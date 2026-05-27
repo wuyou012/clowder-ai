@@ -178,6 +178,8 @@ export type {
   CatFeatures,
   CatVariant,
   CliConfig,
+  // #768 P2/P3: template layer types
+  ClientDefaultsEntry,
   // F067: Co-Creator config for @ mention routing
   CoCreatorConfig,
   ContextBudget,
@@ -185,6 +187,7 @@ export type {
   MissionHubSelfClaimScope,
   // F032: Roster types for collaboration rules
   ReviewPolicy,
+  RoleTemplate,
   Roster,
   RosterEntry,
 } from './cat-breed.js';

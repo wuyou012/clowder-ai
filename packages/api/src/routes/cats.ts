@@ -28,7 +28,13 @@ import {
 } from '../config/account-resolver.js';
 import { resolveBoundAccountRefForCat } from '../config/cat-account-binding.js';
 import { bootstrapCatCatalog, resolveCatCatalogPath } from '../config/cat-catalog-store.js';
-import { getAcpConfig, getRoster, loadCatConfig, toAllCatConfigs } from '../config/cat-config-loader.js';
+import {
+  getAcpConfig,
+  getClientDefaults,
+  getRoster,
+  loadCatConfig,
+  toAllCatConfigs,
+} from '../config/cat-config-loader.js';
 import { configEventBus, createChangeSetId } from '../config/config-event-bus.js';
 import { resolveProjectTemplatePath } from '../config/project-template-path.js';
 import { getResolvedCats } from '../config/resolved-cats.js';
@@ -178,7 +184,15 @@ function buildCatResponseMetadataResolver(projectRoot: string) {
   return (catId: string): CatResponseMetadata => ({ roster: roster[catId] ?? null });
 }
 
-function defaultCliForClient(client: ClientId): { command: string; outputFormat: string } {
+/**
+ * #768 P4: Resolve full CLI defaults for a client from cat-template.json clientDefaults.
+ * Prefers template-driven config; falls back to hardcoded mapping for backward compat
+ * (e.g. custom test templates or configs without clientDefaults).
+ */
+function defaultCliForClient(client: ClientId): CliConfig {
+  const entry = getClientDefaults(client);
+  if (entry?.cli) return entry.cli;
+  // Fallback: command name mapping for configs without clientDefaults
   switch (client) {
     case 'anthropic':
       return { command: 'claude', outputFormat: 'stream-json' };
@@ -433,8 +447,9 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           roleDescription: string;
           personality: string;
           teamStrengths?: string;
+          defaultClient?: string;
         }[];
-        clientDefaults?: Record<string, { defaultModel: string; models: string[] }>;
+        clientDefaults?: Record<string, unknown>;
       };
       if (raw.roleTemplates && raw.roleTemplates.length > 0) {
         return { templates: raw.roleTemplates, clientDefaults: raw.clientDefaults ?? {} };
@@ -538,7 +553,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           color: body.color,
           mentionPatterns: body.mentionPatterns,
           ...(accountRef !== undefined ? { accountRef: accountRef ?? undefined } : {}),
-          contextBudget: body.contextBudget,
+          contextBudget: body.contextBudget ?? getClientDefaults('antigravity')?.contextBudget,
           roleDescription: body.roleDescription,
           personality: body.personality,
           teamStrengths: body.teamStrengths,
@@ -547,7 +562,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           sessionChain: body.sessionChain,
           clientId: 'antigravity',
           defaultModel: body.defaultModel,
-          mcpSupport: body.mcpSupport ?? true,
+          mcpSupport: body.mcpSupport ?? getClientDefaults('antigravity')?.mcpSupport ?? true,
           cli: {
             ...defaultCliForClient('antigravity'),
             ...(body.commandArgs ? { defaultArgs: body.commandArgs } : {}),
@@ -567,7 +582,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           color: body.color,
           mentionPatterns: body.mentionPatterns,
           ...(accountRef !== undefined ? { accountRef: accountRef ?? undefined } : {}),
-          contextBudget: body.contextBudget,
+          contextBudget: body.contextBudget ?? getClientDefaults(body.clientId)?.contextBudget,
           roleDescription: body.roleDescription,
           personality: body.personality,
           teamStrengths: body.teamStrengths,
@@ -578,6 +593,7 @@ export const catsRoutes: FastifyPluginAsync<CatsRoutesOptions> = async (app, opt
           defaultModel: body.defaultModel,
           mcpSupport:
             body.mcpSupport ??
+            getClientDefaults(body.clientId)?.mcpSupport ??
             (body.clientId === 'anthropic' ||
               body.clientId === 'openai' ||
               body.clientId === 'google' ||
