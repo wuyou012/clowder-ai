@@ -133,8 +133,7 @@
       "cli": {
         "command": "gemini",
         "outputFormat": "stream-json",
-        "defaultArgs": [],
-        "effort": "max"
+        "defaultArgs": []
       },
       "contextBudget": {
         "maxPromptTokens": 350000,
@@ -150,8 +149,7 @@
       "cli": {
         "command": "kimi",
         "outputFormat": "stream-json",
-        "defaultArgs": ["--print", "--output-format", "stream-json"],
-        "effort": "max"
+        "defaultArgs": ["--print", "--output-format", "stream-json"]
       },
       "contextBudget": {
         "maxPromptTokens": 240000,
@@ -183,8 +181,7 @@
       "cli": {
         "command": "opencode",
         "outputFormat": "ndjson",
-        "defaultArgs": ["run", "--format", "json"],
-        "effort": "max"
+        "defaultArgs": ["run", "--format", "json"]
       },
       "contextBudget": {
         "maxPromptTokens": 180000,
