@@ -1239,7 +1239,7 @@ export class QueueProcessor {
             userId,
             catId: continuationCapsule.catId,
             capsule: continuationCapsule,
-          });
+          }).catch((err) => log.warn({ err, threadId }, 'enqueueContinuation failed (best-effort)'));
         }
       } else {
         for (const bid of batchedEntryIds) {
