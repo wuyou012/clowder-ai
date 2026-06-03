@@ -204,7 +204,9 @@ function buildBoardMcpServer(
     ...(server.transport && { transport: server.transport }),
     ...(server.resolver && { resolver: server.resolver }),
   };
-  if (options?.includeLaunchFields) {
+  // Plugin-managed MCPs: manifest is public, always expose launch fields.
+  // User-added MCPs: gate behind sensitive-config read permission.
+  if (options?.includeLaunchFields || cap.pluginId) {
     if (server.command) boardServer.command = server.command;
     if (Array.isArray(server.args)) boardServer.args = [...server.args];
     if (server.url) boardServer.url = server.url;

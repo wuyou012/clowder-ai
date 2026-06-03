@@ -11,7 +11,7 @@ import {
   settingsResourceCardClass,
   settingsResourceRowClass,
 } from '../SettingsResourceCard';
-import { PerCatToggles, PluginManagedLink, ProjectSelector, ToggleSwitch } from './capability-settings-ui';
+import { PerCatToggles, ProjectSelector, ToggleSwitch } from './capability-settings-ui';
 import { SettingsBadge, SettingsEmptyState, SettingsPrimaryButton, SettingsText } from './primitives';
 import { useCapabilityState } from './useCapabilityState';
 
@@ -38,6 +38,7 @@ function buildEditData(item: CapabilityBoardItem): McpConfigModalProps['editData
     headers: server.headers,
     envKeys: server.envKeys ?? Object.keys(server.env ?? {}),
     resolver: server.resolver,
+    pluginId: item.pluginId,
   };
 }
 
@@ -160,14 +161,13 @@ export function McpManageContent() {
                   <ToggleSwitch
                     enabled={item.enabled}
                     busy={busy}
-                    disabled={pluginManaged}
-                    title={pluginManaged ? `由插件 ${pluginId} 管理` : item.enabled ? '禁用' : '启用'}
+                    disabled={false}
+                    title={item.enabled ? '禁用' : '启用'}
                     onClick={(event) => {
                       event.stopPropagation();
                       cap.handleToggle(item, !item.enabled);
                     }}
                   />
-                  {pluginId && <PluginManagedLink pluginId={pluginId} />}
                   {!pluginManaged && cap.catFamilies.length > 0 && (
                     <SettingsResourceIconButton
                       onClick={() => setExpandedId(expanded ? null : item.id)}

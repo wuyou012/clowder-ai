@@ -316,17 +316,28 @@ export function PluginConfigPanel({ plugin, onUpdated }: Props) {
       )}
 
       {plugin.resources.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {plugin.resources.map((r, i) => (
-            <span
-              key={i}
-              className={`rounded-[13px] px-2.5 py-0.5 text-label font-medium ${
-                r.enabled ? 'bg-conn-emerald-bg text-conn-emerald-text' : 'bg-cafe-surface-sunken text-cafe-muted'
-              }`}
-            >
-              {r.type}
-            </span>
-          ))}
+        <div className="space-y-1.5">
+          <span
+            className="block font-medium"
+            style={{ fontSize: 'var(--console-font-xs)', color: 'var(--cafe-text-secondary)' }}
+          >
+            资源
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {plugin.resources.map((r, i) => {
+              const label = r.name ?? r.type;
+              return (
+                <span
+                  key={i}
+                  className={`rounded-[13px] px-2.5 py-0.5 text-label font-medium ${
+                    r.enabled ? 'bg-conn-emerald-bg text-conn-emerald-text' : 'bg-cafe-surface-sunken text-cafe-muted'
+                  }`}
+                >
+                  {r.type !== label ? `${r.type} · ${label}` : label}
+                </span>
+              );
+            })}
+          </div>
         </div>
       )}
 
