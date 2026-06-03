@@ -58,6 +58,8 @@ export interface RepoScanTaskSpecOptions {
   pollIntervalMs?: number;
   maxWorkItemsPerRun?: number;
   skipHistoricalOnFirstRun?: boolean;
+  /** F220-B: Override task ID for plugin-scoped schedule instances */
+  id?: string;
 }
 
 function formatReconciliationMessage(signal: RepoInboxSignal): string {
@@ -91,7 +93,7 @@ export function createRepoScanTaskSpec(opts: RepoScanTaskSpecOptions): TaskSpec_
   }
 
   return {
-    id: 'repo-scan',
+    id: opts.id ?? 'repo-scan',
     profile: 'poller',
     trigger: { type: 'interval', ms: opts.pollIntervalMs ?? 300_000 },
     admission: {
