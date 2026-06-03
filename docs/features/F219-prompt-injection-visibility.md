@@ -44,9 +44,28 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 
 ## What
 
+### Prompt Surfaces / Scan Boundary（Phase A manifest 扫描范围）
+
+> Phase A manifest 必须覆盖所有进入 effective prompt 的非用户内容。扫描边界不仅限于 SystemPromptBuilder，还包括 route 拼接层、invocation final mutators、hooks。
+
+| 层 | 入口 | 来源文件 | 段 ID 前缀 |
+|----|------|---------|-----------|
+| **Compile-time L0** | `compile-system-prompt-l0.mjs` | `assets/system-prompts/system-prompt-l0.md` | L1-L7 |
+| **Session-level Builder** | `buildStaticIdentity()` | `SystemPromptBuilder.ts` | S1-S13 |
+| **Per-turn Builder** | `buildInvocationContext()` | `SystemPromptBuilder.ts` | D1-D21 |
+| **Route 拼接层** | `route-serial.ts` / `route-parallel.ts` | route 文件 + mode config | R1-R2 |
+| **Invocation mutators** | `invoke-single-cat.ts` | invocation 文件 | M1-M3 |
+| **Session continuity** | `SessionBootstrap.ts` | session 服务 | B1 |
+| **MCP fallback** | `McpPromptInjector.ts` | MCP 注入器 | C1 |
+| **External hooks** | shell hooks | `.claude/hooks/user-level/` | H1-H3 |
+| **Navigation** | `route-helpers.ts` | route helpers | N1-N2 |
+| **Legacy (非生产主路径)** | `buildReviewerSection()` / `buildSystemPrompt()` | SystemPromptBuilder.ts | X1 |
+
+> `manifest-drift-check` 的 `@segment` 扫描必须覆盖上述全部层，不仅仅是 SystemPromptBuilder。
+
 ### 现状：Effective Prompt Inventory（全量注入段）
 
-> **注意**：inventory 不仅覆盖 SystemPromptBuilder 的段，还覆盖 native L0 编译段和外部 hook 输出。"全量"指 effective prompt 中所有非用户消息的注入内容。
+> **注意**：inventory 覆盖全部 prompt surfaces：L0 编译段、SystemPromptBuilder、route 拼接层、invocation mutators、session bootstrap、MCP fallback、hooks。"全量"指 effective prompt 中所有非用户消息的注入内容。
 
 #### Native L0（编译期，compile-system-prompt-l0.mjs）
 
@@ -104,6 +123,32 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 | D20 | Signal 文章 | F091 linked articles | conditional |
 | D21 | 传球决策树 | non-parallel + a2aEnabled | **hardcoded** |
 
+#### Route 拼接层（route-serial.ts / route-parallel.ts）
+
+| ID | 段名 | 来源 | 触发条件 | 类型 |
+|----|------|------|---------|------|
+| R1 | Mode System Prompt | route-serial.ts:658, route-parallel.ts:365 | always（per-cat fallback to default）| config-driven |
+| R2 | Mode System Prompt (per-cat) | modeSystemPromptByCat config | cat 有独立 mode prompt 时 | config-driven |
+
+#### Invocation Mutators（invoke-single-cat.ts）
+
+| ID | 段名 | 来源 | 触发条件 | 类型 |
+|----|------|------|---------|------|
+| M1 | Dispatch Mission Context | invoke-single-cat.ts:1043-1062, :1412 | 外部项目 dispatch（非 host project） | rule-generated |
+| M2 | Transcript Path Hints | transcript-path-hints.ts + invoke-single-cat.ts:1419 | 活跃会议转录（meta.json active=true）| conditional |
+
+#### Session Continuity（SessionBootstrap.ts）
+
+| ID | 段名 | 来源 | 触发条件 | 类型 |
+|----|------|------|---------|------|
+| B1 | Session Bootstrap | SessionBootstrap.ts:68-269 | Session #2+（首次 session 返回 null） | rule-generated |
+
+#### MCP Fallback（McpPromptInjector.ts）
+
+| ID | 段名 | 来源 | 触发条件 | 类型 |
+|----|------|------|---------|------|
+| C1 | MCP Callback Instructions | McpPromptInjector.ts:60-79 | native MCP 不可用 且 非 Antigravity provider | conditional |
+
 #### 外部注入（不经 SystemPromptBuilder）
 
 | ID | 段名 | 来源 | 类型 |
@@ -112,6 +157,13 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 | N2 | 对话历史增量 | assembleIncrementalContext | rule-generated |
 | H1 | Startup Hook 输出 | session-start-recall.sh | hook |
 | H2 | PostCompact 注入 | session digest + SOP bookmark | hook |
+| H3 | Stop Hook 输出 | session-stop-check.sh | hook（不进 model prompt，是退出治理通知）|
+
+#### Legacy（非生产主路径，显式排除）
+
+| ID | 段名 | 来源 | 说明 |
+|----|------|------|------|
+| X1 | Reviewer Section | SystemPromptBuilder.ts:905-994 | `buildReviewerSection()` 导出但生产 route 不直接调用（走 buildStaticIdentity + buildInvocationContext）。标记 `legacy/exported-not-runtime`，drift check 排除。若未来 route 恢复调用，需重新纳入 manifest。|
 
 ### Phase 1: Manifest + Templates + Visibility + Editability（单一交付）
 
@@ -158,7 +210,7 @@ segments:
 |------|----|------|-------------------|
 | `readonly` | S1 身份, S8 CVO 引用, D1 身份锚点, D8 A2A 球权, D21 传球决策树, L1-L7 全部 L0 原生段 | 核心安全/身份/路由，不可编辑不可禁用 | `false` |
 | `limited-edit` | S4 协作格式, S5 名册, S9 治理摘要, D5 乒乓球, D7 模式 | 内容可编辑但不可完全禁用 | `true` |
-| `editable` | S6 工作流触发, S13 MCP 工具, D14 SOP 提示, H1 Startup Hook, H2 PostCompact | 完全可编辑 + 可启用/禁用 | `true` |
+| `editable` | S6 工作流触发, S13 MCP 工具, D14 SOP 提示, H1 Startup Hook, H2 PostCompact, H3 Stop Hook | 完全可编辑 + 可启用/禁用 | `true` |
 
 > **D15 Voice 模式修正**（缅因猫 review）：D15 原来是 always inject，应改为 `trigger: voiceMode === true`（conditional），Voice OFF 时不注入。
 
@@ -171,7 +223,9 @@ segments:
 | `auto-evolve` | Auto harness 自主迭代 | D15 Voice 模式, 个人偏好, 习惯约束 |
 
 **Necessity audit**：每段附 "why needed / what breaks without it" 注解。重点清理项：
-- **H1 Startup Hook**：核心修复不是"可编辑"，而是**默认降级措辞**——移除 "向铲屎官汇报" 这种抢球权指令，改为 diagnostic notice（低优先级通知）
+- **H1 Startup Hook + H3 Stop Hook**：两者都有 "向铲屎官汇报/商量处理方式" 抢球权措辞。核心修复不是"可编辑"，而是**默认降级为 diagnostic notice**（低优先级通知，不抢对话方向）
+- **R1/R2 Mode Prompt**：需审查是否与 D7 模式声明有重复注入
+- **B1 Session Bootstrap**：2000 token 硬限，需确认 token budget 计算是否考虑了其他段的占用
 - 冗余或优先级过高的段标记清理
 
 **Manifest drift contract（AC-4 具体机制）**：
@@ -247,7 +301,7 @@ SystemPromptBuilder 改为从模板文件读取 + 渲染。注入时机不变，
 
 ### Phase 1（单一交付：Manifest + Templates + Console）
 
-- [ ] AC-1: `assets/prompt-injection-manifest.yaml` 覆盖全量 effective prompt 段（L0 native + Static Identity + Dynamic Invocation + External）
+- [ ] AC-1: `assets/prompt-injection-manifest.yaml` 覆盖全部 prompt surfaces（L0 native L1-L7 + Builder S1-S13 + D1-D21 + Route R1-R2 + Invocation M1-M2 + Session B1 + MCP C1 + External N1-N2/H1-H3）。Legacy X1 显式排除。
 - [ ] AC-2: 每段有完整 schema（id / category / lifecycleStage / source / sourceType / trigger / purpose / userExplanation / priority / safetyTier / transparencyTier / governanceTier / allowLocalOverride / disableable / consumer / relatedFeature）
 - [ ] AC-3: `GET /api/prompt-injection/manifest` 返回完整 manifest
 - [ ] AC-4: manifest drift check — `@segment` 标注扫描与 manifest IDs 对齐（CI lint step）
