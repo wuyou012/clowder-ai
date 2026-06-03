@@ -40,11 +40,25 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 ### 架构归属
 
 **Architecture cell**: harness/system-prompt-injection + action-plane/settings
-**Why（一句话）**：把散落在代码里的 33 个注入段整理成可见可控的 manifest + template 体系，为 Phase 2 生命周期统一抽象和 auto harness 提供基础。
+**Why（一句话）**：把散落在代码和 L0 模板里的全部 effective prompt 注入段整理成可见可控的 manifest + template 体系，为 Phase 2 生命周期统一抽象和 auto harness 提供基础。
 
 ## What
 
-### 现状：注入段全景
+### 现状：Effective Prompt Inventory（全量注入段）
+
+> **注意**：inventory 不仅覆盖 SystemPromptBuilder 的段，还覆盖 native L0 编译段和外部 hook 输出。"全量"指 effective prompt 中所有非用户消息的注入内容。
+
+#### Native L0（编译期，compile-system-prompt-l0.mjs）
+
+| ID | 段名 | 来源 | 类型 |
+|----|------|------|------|
+| L1 | 平行世界自我意识 | system-prompt-l0.md §1 原生文本 | **hardcoded** |
+| L2 | 客观性 carry-over + F218 常驻反射 | system-prompt-l0.md §2 | **hardcoded** |
+| L3 | 传球三选一 + @ 路由规则 | system-prompt-l0.md §4 | **hardcoded** |
+| L4 | 五条铁律 | system-prompt-l0.md §5 | **hardcoded** |
+| L5 | MCP 工具 quick index | system-prompt-l0.md §7 | **hardcoded** |
+| L6 | 能力唤醒指南 | system-prompt-l0.md §8 | **hardcoded** |
+| L7 | 协作哲学 | system-prompt-l0.md §9 | **hardcoded** |
 
 #### Static Identity（Session 级，buildStaticIdentity）
 
@@ -82,7 +96,7 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 | D12 | 活跃参与者 | F042 participant tracking | conditional |
 | D13 | 路由策略 | F042 thread routing policy | conditional |
 | D14 | SOP 阶段提示 | F073 workflow-sop | conditional |
-| D15 | Voice 模式 | always | config-driven |
+| D15 | Voice 模式 | voiceMode === true | conditional |
 | D16 | Bootcamp 模式 | F087 bootcampState | conditional |
 | D17 | Guide 候选 | F155 guide routing | conditional |
 | D18 | 世界上下文 | F093 world context | conditional |
@@ -111,8 +125,8 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 segments:
   - id: S6
     name: Workflow Triggers
-    category: collaboration          # identity | collaboration | feature-injection | hook
-    lifecycleStage: session-init     # session-init | per-turn | external
+    category: collaboration          # identity | collaboration | feature-injection | hook | l0-native
+    lifecycleStage: session-init     # compile-time | session-init | per-turn | external
     source: packages/api/.../SystemPromptBuilder.ts
     sourceType: hardcoded            # hardcoded | config-driven | rule-generated | conditional | per-project | hook
     trigger: always                  # always | condition description
@@ -122,7 +136,7 @@ segments:
     safetyTier: editable             # readonly | limited-edit | editable
     transparencyTier: visible-by-default  # visible-by-default | opt-in-view | debug-only
     governanceTier: human-gated      # auto-evolve | human-gated | immutable
-    editable: true
+    allowLocalOverride: true         # readonly 段必须为 false
     disableable: false
     consumer: L0-system-prompt       # L0-system-prompt | invocation-context | external-hook
     relatedFeature: null
@@ -136,34 +150,48 @@ segments:
 | `transparencyTier` | 用户能不能看到？ | visible-by-default / opt-in-view / debug-only |
 | `governanceTier` | Auto harness 能不能自动改？ | auto-evolve / human-gated / immutable |
 
+**`allowLocalOverride` 约束**：`safetyTier: readonly` 的段 **必须** `allowLocalOverride: false`。即使被提取到模板文件（如 D8/D21），也只能可见不可覆盖。
+
 **Safety tier 分配**：
 
-| Tier | 段 | 规则 |
-|------|----|------|
-| `readonly` | S1 身份, S8 CVO 引用, D1 身份锚点, D8 A2A 球权, D21 传球决策树 | 核心安全/身份/路由，不可编辑不可禁用 |
-| `limited-edit` | S4 协作格式, S5 名册, S9 治理摘要, D5 乒乓球, D7 模式 | 内容可编辑但不可完全禁用 |
-| `editable` | S6 工作流触发, S13 MCP 工具, D14 SOP 提示, D15 Voice, H1 Startup Hook, H2 PostCompact | 完全可编辑 + 可启用/禁用 |
+| Tier | 段 | 规则 | allowLocalOverride |
+|------|----|------|-------------------|
+| `readonly` | S1 身份, S8 CVO 引用, D1 身份锚点, D8 A2A 球权, D21 传球决策树, L1-L7 全部 L0 原生段 | 核心安全/身份/路由，不可编辑不可禁用 | `false` |
+| `limited-edit` | S4 协作格式, S5 名册, S9 治理摘要, D5 乒乓球, D7 模式 | 内容可编辑但不可完全禁用 | `true` |
+| `editable` | S6 工作流触发, S13 MCP 工具, D14 SOP 提示, H1 Startup Hook, H2 PostCompact | 完全可编辑 + 可启用/禁用 | `true` |
+
+> **D15 Voice 模式修正**（缅因猫 review）：D15 原来是 always inject，应改为 `trigger: voiceMode === true`（conditional），Voice OFF 时不注入。
 
 **Governance tier 分配**：
 
 | Tier | 含义 | 示例段 |
 |------|------|--------|
-| `immutable` | 永不自动治理 | S1 身份, D8 A2A 球权, D21 传球决策树, 核心协作规则 |
+| `immutable` | 永不自动治理 | S1 身份, D8 A2A 球权, D21 传球决策树, L3 路由规则, L4 铁律 |
 | `human-gated` | Auto harness 可提案，人工审批 | S9 治理摘要, D14 SOP 提示, S6 工作流触发, Gate 规则 |
 | `auto-evolve` | Auto harness 自主迭代 | D15 Voice 模式, 个人偏好, 习惯约束 |
 
-**Necessity audit**：每段附 "why needed / what breaks without it" 注解。冗余或优先级过高的段标记清理（如 H1 的 "向铲屎官汇报" 措辞应降级为低优先级通知）。
+**Necessity audit**：每段附 "why needed / what breaks without it" 注解。重点清理项：
+- **H1 Startup Hook**：核心修复不是"可编辑"，而是**默认降级措辞**——移除 "向铲屎官汇报" 这种抢球权指令，改为 diagnostic notice（低优先级通知）
+- 冗余或优先级过高的段标记清理
+
+**Manifest drift contract（AC-4 具体机制）**：
+- SystemPromptBuilder 中每个 `lines.push()` 调用点必须用 `/* @segment S6 */` 注释标注 segment ID
+- 测试用 AST/regex 扫描 Builder 代码中的 `@segment` 标注，assert 与 manifest 中的 IDs 对齐
+- L0 编译器的模板段通过 section heading 标注匹配
+- CI 增加 `manifest-drift-check` 作为 lint step
 
 **API**：`GET /api/prompt-injection/manifest` 返回完整 manifest。
 
 #### 2. 硬编码段提取到模板文件
 
-| 段 | 当前位置 | 目标模板 |
-|----|---------|---------|
-| S6 工作流触发点 | `WORKFLOW_TRIGGERS` 常量 | `assets/prompt-templates/workflow-triggers.yaml`（per-breed）|
-| S13 MCP 工具文档 | `MCP_TOOLS_SECTION` 常量 | `assets/prompt-templates/mcp-tools.md` |
-| D8 A2A 球权检查 | inline string | `assets/prompt-templates/a2a-ball-check.md` |
-| D21 传球决策树 | inline string | `assets/prompt-templates/handoff-decision-tree.md` |
+| 段 | 当前位置 | 目标模板 | allowLocalOverride |
+|----|---------|---------|-------------------|
+| S6 工作流触发点 | `WORKFLOW_TRIGGERS` 常量 | `assets/prompt-templates/workflow-triggers.yaml`（per-breed）| `true` |
+| S13 MCP 工具文档 | `MCP_TOOLS_SECTION` 常量 | `assets/prompt-templates/mcp-tools.md` | `true` |
+| D8 A2A 球权检查 | inline string | `assets/prompt-templates/a2a-ball-check.md` | **`false`**（readonly） |
+| D21 传球决策树 | inline string | `assets/prompt-templates/handoff-decision-tree.md` | **`false`**（readonly） |
+
+> D8/D21 提取到文件是为了可见 + 版本控制 + Phase 2 迁移基础。但 `allowLocalOverride: false` 意味着 Console 展示内容但灰掉编辑按钮。
 
 SystemPromptBuilder 改为从模板文件读取 + 渲染。注入时机不变，只是内容来源从代码迁移到文件。
 
@@ -171,16 +199,30 @@ SystemPromptBuilder 改为从模板文件读取 + 渲染。注入时机不变，
 
 **扩展 F203 Phase F 的 read-only viewer**：
 
-- **完整清单**：33 段按 category 分组，每段显示 name / userExplanation / 当前内容预览 / source / safetyTier badge / transparencyTier
+- **完整清单**：全量段按 category 分组，每段显示 name / userExplanation / 当前内容预览 / source / safetyTier badge / transparencyTier
 - **Per-cat 维度**：切换查看不同猫收到的注入内容
-- **编辑 + 覆盖**：editable / limited-edit 段支持 inline 编辑，写入 `.local` overlay 文件（不改源文件）
-- **Hook 管理面板**：展示当前 hooks、启用/禁用、查看最近输出
+- **编辑 + 覆盖**：`allowLocalOverride: true` 段支持 inline 编辑；`readonly` 段展示但灰掉编辑
+- **Hook 管理面板**：展示当前 hooks（来自 `~/.claude/settings.json` / `~/.codex/hooks.json`），启用/禁用 toggle（通过受管 Console API 写入，不允许任意脚本编辑），查看最近输出
 - **覆盖标记**：每段显示 "customized" vs "default" badge
 - **Reset**：删除 `.local` 文件回到默认
 
-**Override 机制**：复用 `shared-rules.local.md` 模式：
-- Console 编辑 → 写入 `assets/prompt-templates/xxx.local.yaml`
-- Builder 读取时：模板文件 → 检查 `.local` overlay → 有则用 overlay
+**Override 机制（详细）**：
+- **路径**：`assets/prompt-templates/{id}.local.{yaml|md}`（与源模板同级）
+- **gitignore**：`.local.*` 模式加入 `.gitignore`，避免用户覆盖误进公共源
+- **保存前校验**：Console 编辑提交时，运行 compile preview（渲染模板 + overlay → 展示最终注入内容），用户确认后写入
+- **Rollback**：每次覆盖前备份到 `.local.bak`，支持一键恢复上一版
+- **Builder 读取**：模板文件 → 检查 `.local` overlay → 有则用 overlay → 渲染变量 → push to lines
+
+#### 4. 实现 Checkpoint 顺序（单一交付，分步验证）
+
+> 整体是一个 PR，但按 checkpoint 顺序实现和验证：
+
+| Checkpoint | 内容 | 验证点 |
+|------------|------|--------|
+| A | Manifest yaml + API + read-only Console UI | manifest-drift-check 绿 + API 返回全量 + UI 展示 |
+| B | 模板提取（S6/S13/D8/D21） | 回归测试绿（注入内容不变） |
+| C | Overlay 编辑（Console 写 .local + Builder 读 .local） | 编辑 → 保存 → 生效 → reset 回默认 |
+| D | Hook 管理面板（enable/disable + 查看输出） | toggle → 配置文件变更 → 下次 session 生效 |
 
 ### Phase 2: 会话生命周期统一抽象（Phase 1 完成后）
 
@@ -205,16 +247,18 @@ SystemPromptBuilder 改为从模板文件读取 + 渲染。注入时机不变，
 
 ### Phase 1（单一交付：Manifest + Templates + Console）
 
-- [ ] AC-1: `assets/prompt-injection-manifest.yaml` 覆盖全部 33 段
-- [ ] AC-2: 每段有完整 schema（id / category / lifecycleStage / source / sourceType / trigger / purpose / userExplanation / priority / safetyTier / transparencyTier / governanceTier / editable / disableable / consumer / relatedFeature）
+- [ ] AC-1: `assets/prompt-injection-manifest.yaml` 覆盖全量 effective prompt 段（L0 native + Static Identity + Dynamic Invocation + External）
+- [ ] AC-2: 每段有完整 schema（id / category / lifecycleStage / source / sourceType / trigger / purpose / userExplanation / priority / safetyTier / transparencyTier / governanceTier / allowLocalOverride / disableable / consumer / relatedFeature）
 - [ ] AC-3: `GET /api/prompt-injection/manifest` 返回完整 manifest
-- [ ] AC-4: manifest 与 SystemPromptBuilder 实际注入保持一致（测试验证）
-- [ ] AC-5: S6 / S13 / D8 / D21 从 .ts 硬编码迁移到模板文件
+- [ ] AC-4: manifest drift check — `@segment` 标注扫描与 manifest IDs 对齐（CI lint step）
+- [ ] AC-5: S6 / S13 / D8 / D21 从 .ts 硬编码迁移到模板文件；D8/D21 标记 `allowLocalOverride: false`
 - [ ] AC-6: SystemPromptBuilder 从模板文件读取 + 渲染，行为不变（回归测试绿）
-- [ ] AC-7: Console 注入段列表完整呈现（33 段分类展示 + userExplanation）
-- [ ] AC-8: 可编辑段支持编辑 + 保存 + 生效（`.local` overlay）
-- [ ] AC-9: Hook 管理面板：展示 hooks、启用/禁用
+- [ ] AC-7: Console 全量段列表完整呈现（分类展示 + userExplanation + safetyTier badge）
+- [ ] AC-8: `allowLocalOverride: true` 段支持编辑 + compile preview + 保存 + 生效；readonly 段灰掉编辑
+- [ ] AC-9: Hook 管理面板：展示 hooks、enable/disable toggle（通过受管 API）、查看最近输出
 - [ ] AC-10: per-cat 维度切换
+- [ ] AC-11: `.local.*` 文件 gitignore + 保存前 compile preview + reset/rollback 支持
+- [ ] AC-12: H1 Startup Hook 默认措辞降级（移除 "向铲屎官汇报" 抢球权语言 → diagnostic notice）
 - [ ] **AC-Trust**: 非开发者用户，给定 manifest viewer + 一次猫行为异常事件（如 thread_mpuxhppp0vzl2y16 球丢事故），能在 5 分钟内定位：(a) 哪个段最可能导致问题 (b) 能改什么。通过 task-based 可用性测试验证。
 
 ### Phase 2（会话生命周期统一抽象）
