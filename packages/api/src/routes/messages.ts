@@ -616,8 +616,12 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
 
       // Emit queue update to this user only (privacy: scopeKey isolation)
       await emitQueueUpdated(
-        opts.socketManager, userId, resolvedThreadId,
-        opts.invocationQueue.list(resolvedThreadId, userId), opts.messageStore, enqueueResult.outcome,
+        opts.socketManager,
+        userId,
+        resolvedThreadId,
+        opts.invocationQueue.list(resolvedThreadId, userId),
+        opts.messageStore,
+        enqueueResult.outcome,
       );
 
       tryAutoCancelPendingHolds(resolvedThreadId, opts.holdBallCancelDeps);
@@ -658,8 +662,12 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
       // F39 bugfix: Notify frontend that force-cancel happened (clear stale queue UI)
       if (opts.invocationQueue) {
         await emitQueueUpdated(
-          opts.socketManager, userId, resolvedThreadId,
-          opts.invocationQueue.list(resolvedThreadId, userId), opts.messageStore, 'force_cleared',
+          opts.socketManager,
+          userId,
+          resolvedThreadId,
+          opts.invocationQueue.list(resolvedThreadId, userId),
+          opts.messageStore,
+          'force_cleared',
         );
       }
       // Fall through to immediate execution below
@@ -729,8 +737,12 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
               }
             }
             await emitQueueUpdated(
-              opts.socketManager, userId, resolvedThreadId,
-              opts.invocationQueue.list(resolvedThreadId, userId), opts.messageStore, enqueueResult.outcome,
+              opts.socketManager,
+              userId,
+              resolvedThreadId,
+              opts.invocationQueue.list(resolvedThreadId, userId),
+              opts.messageStore,
+              enqueueResult.outcome,
             );
             tryAutoCancelPendingHolds(resolvedThreadId, opts.holdBallCancelDeps);
             reply.status(202);
