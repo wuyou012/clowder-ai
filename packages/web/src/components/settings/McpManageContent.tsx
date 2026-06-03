@@ -56,7 +56,7 @@ export function McpManageContent() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const handleCardClick = useCallback((item: CapabilityBoardItem) => {
-    const readOnly = item.source !== 'external' || !!item.pluginId;
+    const readOnly = item.source !== 'external';
     setModal({
       editId: item.id,
       readOnly,
@@ -168,7 +168,7 @@ export function McpManageContent() {
                       cap.handleToggle(item, !item.enabled);
                     }}
                   />
-                  {!pluginManaged && cap.catFamilies.length > 0 && (
+                  {cap.catFamilies.length > 0 && (
                     <SettingsResourceIconButton
                       onClick={() => setExpandedId(expanded ? null : item.id)}
                       title="按猫开关"
@@ -196,7 +196,7 @@ export function McpManageContent() {
                   )}
                 </div>
               </div>
-              {expanded && !pluginManaged && (
+              {expanded && (
                 <PerCatToggles
                   item={item}
                   catFamilies={cap.catFamilies}

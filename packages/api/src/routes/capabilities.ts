@@ -972,9 +972,12 @@ export const capabilitiesRoutes: FastifyPluginAsync = async (app) => {
 
       const cap = config.capabilities[capIndex]!;
 
-      // Plugin-owned capabilities must be toggled through /api/plugins/:id/enable|disable
-      // to keep lifecycle state (symlinks, limb nodes, CLI configs) consistent.
-      if (cap.pluginId) {
+      // Plugin-owned skill/limb capabilities must be toggled through
+      // /api/plugins/:id/enable|disable to keep lifecycle state (symlinks,
+      // limb nodes) consistent.  MCP capabilities are safe to toggle directly
+      // — the CLI config writer reacts to the enabled flag the same way
+      // regardless of who flipped it.
+      if (cap.pluginId && cap.type !== 'mcp') {
         reply.status(409);
         return {
           error: `Capability "${body.capabilityId}" is managed by plugin "${cap.pluginId}". Use /api/plugins/${cap.pluginId}/enable or /disable instead.`,
