@@ -54,7 +54,7 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 | **Session-level Builder** | `buildStaticIdentity()` | `SystemPromptBuilder.ts` | S1-S13 |
 | **Per-turn Builder** | `buildInvocationContext()` | `SystemPromptBuilder.ts` | D1-D21 |
 | **Route 拼接层** | `route-serial.ts` / `route-parallel.ts` | route 文件 + mode config | R1-R2 |
-| **Invocation mutators** | `invoke-single-cat.ts` | invocation 文件 | M1-M3 |
+| **Invocation mutators** | `invoke-single-cat.ts` | invocation 文件 | M1-M2 |
 | **Session continuity** | `SessionBootstrap.ts` | session 服务 | B1 |
 | **MCP fallback** | `McpPromptInjector.ts` | MCP 注入器 | C1 |
 | **External hooks** | shell hooks | `.claude/hooks/user-level/` | H1-H3 |
@@ -157,7 +157,7 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 | N2 | 对话历史增量 | assembleIncrementalContext | rule-generated |
 | H1 | Startup Hook 输出 | session-start-recall.sh | hook |
 | H2 | PostCompact 注入 | session digest + SOP bookmark | hook |
-| H3 | Stop Hook 输出 | session-stop-check.sh | hook（不进 model prompt，是退出治理通知）|
+| H3 | Stop Hook 输出 | session-stop-check.sh | hook（不进 model prompt，`consumer: governance-hook`，参与 hook 治理但不参与 prompt diff）|
 
 #### Legacy（非生产主路径，显式排除）
 
@@ -177,7 +177,7 @@ Cat Cafe 的治理能力越来越强（hooks / L0 prompt / skills / dispatch / a
 segments:
   - id: S6
     name: Workflow Triggers
-    category: collaboration          # identity | collaboration | feature-injection | hook | l0-native
+    category: collaboration          # identity | collaboration | feature-injection | hook | l0-native | route | invocation | session | mcp-fallback | navigation
     lifecycleStage: session-init     # compile-time | session-init | per-turn | external
     source: packages/api/.../SystemPromptBuilder.ts
     sourceType: hardcoded            # hardcoded | config-driven | rule-generated | conditional | per-project | hook
@@ -312,7 +312,7 @@ SystemPromptBuilder 改为从模板文件读取 + 渲染。注入时机不变，
 - [ ] AC-9: Hook 管理面板：展示 hooks、enable/disable toggle（通过受管 API）、查看最近输出
 - [ ] AC-10: per-cat 维度切换
 - [ ] AC-11: `.local.*` 文件 gitignore + 保存前 compile preview + reset/rollback 支持
-- [ ] AC-12: H1 Startup Hook 默认措辞降级（移除 "向铲屎官汇报" 抢球权语言 → diagnostic notice）
+- [ ] AC-12: H1 Startup Hook + H3 Stop Hook 默认措辞降级（移除 "向铲屎官汇报/商量处理方式" 抢球权语言 → diagnostic notice）
 - [ ] **AC-Trust**: 非开发者用户，给定 manifest viewer + 一次猫行为异常事件（如 thread_mpuxhppp0vzl2y16 球丢事故），能在 5 分钟内定位：(a) 哪个段最可能导致问题 (b) 能改什么。通过 task-based 可用性测试验证。
 
 ### Phase 2（会话生命周期统一抽象）
