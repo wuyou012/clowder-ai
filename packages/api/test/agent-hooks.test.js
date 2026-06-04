@@ -291,32 +291,26 @@ describe('agent hook sync targets', () => {
     assert.equal(claudeSettings?.status, 'configured');
   });
 
-  it('toggle-off writes disabled marker, sync preserves it, toggle-on removes it', async () => {
+  it('toggle-off records disable in prefs file, sync preserves it, toggle-on clears it', async () => {
     // Initial sync installs managed hooks
     await syncAgentHooks({ projectRoot, targetRoot });
     const settingsPath = join(targetRoot, '.claude', 'settings.json');
+    const prefsPath = join(targetRoot, '.claude', 'cat-cafe-hook-prefs.json');
     let settings = JSON.parse(await readFile(settingsPath, 'utf8'));
     assert.equal(settings.hooks.SessionStart.length, 1);
     assert.ok(settings.hooks.SessionStart[0].hooks[0].command.includes('session-start-recall.sh'));
 
-    // Toggle off SessionStart → marker written, managed hook removed
+    // Toggle off SessionStart → prefs records disable, managed hook removed from settings
     await toggleClaudeHook(targetRoot, 'SessionStart', false);
     settings = JSON.parse(await readFile(settingsPath, 'utf8'));
-    const disabledEntry = settings.hooks.SessionStart.find((e) => e._catCafeDisabled === true);
-    assert.ok(disabledEntry, 'disabled marker entry should exist after toggle-off');
-    assert.equal(
-      settings.hooks.SessionStart.filter((e) => e.hooks?.length > 0).length,
-      0,
-      'no managed hook entries after toggle-off',
-    );
+    assert.equal(settings.hooks.SessionStart.length, 0, 'managed hook removed from settings');
+    const prefs = JSON.parse(await readFile(prefsPath, 'utf8'));
+    assert.deepEqual(prefs.disabledEvents, ['SessionStart'], 'prefs records disabled event');
 
     // Sync preserves the disable — does NOT re-add managed hook
     await syncAgentHooks({ projectRoot, targetRoot });
     settings = JSON.parse(await readFile(settingsPath, 'utf8'));
-    assert.ok(
-      settings.hooks.SessionStart.some((e) => e._catCafeDisabled === true),
-      'disabled marker survives sync',
-    );
+    assert.equal(settings.hooks.SessionStart.length, 0, 'managed hook still absent after sync');
     const hookEvents = getClaudeHookEventStatus(targetRoot);
     assert.equal(hookEvents.SessionStart, false, 'hookEvents reports disabled');
     assert.equal(hookEvents.Stop, true, 'Stop still enabled');
@@ -325,24 +319,23 @@ describe('agent hook sync targets', () => {
     const status = await getAgentHookStatus({ projectRoot, targetRoot });
     assert.equal(status.status, 'configured');
 
-    // Toggle back on → marker removed, managed hook restored
+    // Toggle back on → prefs cleared, managed hook restored
     await toggleClaudeHook(targetRoot, 'SessionStart', true);
     settings = JSON.parse(await readFile(settingsPath, 'utf8'));
-    assert.ok(
-      !settings.hooks.SessionStart.some((e) => e._catCafeDisabled === true),
-      'disabled marker removed after toggle-on',
-    );
     assert.ok(
       settings.hooks.SessionStart.some((e) => e.hooks?.[0]?.command?.includes('session-start-recall.sh')),
       'managed hook restored after toggle-on',
     );
+    const prefsAfter = JSON.parse(await readFile(prefsPath, 'utf8'));
+    assert.deepEqual(prefsAfter.disabledEvents, [], 'prefs cleared after toggle-on');
   });
 
-  it('toggle-off with custom hooks preserves customs and marker, sync does not re-add managed', async () => {
+  it('toggle-off with custom hooks preserves customs in settings, disable in prefs', async () => {
     // Set up: custom hook + managed hook installed via sync
     const claudeDir = join(targetRoot, '.claude');
     await mkdir(claudeDir, { recursive: true });
     const settingsPath = join(claudeDir, 'settings.json');
+    const prefsPath = join(claudeDir, 'cat-cafe-hook-prefs.json');
     await writeFile(
       settingsPath,
       JSON.stringify({
@@ -358,29 +351,48 @@ describe('agent hook sync targets', () => {
     assert.equal(settings.hooks.SessionStart[0].hooks[0].command, '/custom/my-hook.sh');
     assert.ok(settings.hooks.SessionStart[1].hooks[0].command.includes('session-start-recall.sh'));
 
-    // Toggle off → custom hook preserved, managed removed, marker added
+    // Toggle off → custom hook preserved in settings, managed removed, prefs records disable
     await toggleClaudeHook(targetRoot, 'SessionStart', false);
     settings = JSON.parse(await readFile(settingsPath, 'utf8'));
-    const customEntries = settings.hooks.SessionStart.filter((e) => !e._catCafeDisabled);
-    assert.equal(customEntries.length, 1, 'custom hook entry preserved');
-    assert.equal(customEntries[0].hooks[0].command, '/custom/my-hook.sh');
-    assert.ok(
-      settings.hooks.SessionStart.some((e) => e._catCafeDisabled === true),
-      'disabled marker present',
-    );
+    assert.equal(settings.hooks.SessionStart.length, 1, 'only custom hook remains');
+    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, '/custom/my-hook.sh');
+    const prefs = JSON.parse(await readFile(prefsPath, 'utf8'));
+    assert.deepEqual(prefs.disabledEvents, ['SessionStart']);
 
-    // Sync does NOT re-add managed hook (marker = intentional disable)
+    // Sync does NOT re-add managed hook (prefs = intentional disable)
     await syncAgentHooks({ projectRoot, targetRoot });
     settings = JSON.parse(await readFile(settingsPath, 'utf8'));
     const managedAfterSync = settings.hooks.SessionStart.filter((e) =>
       e.hooks?.some((h) => h.command?.includes('session-start-recall.sh')),
     );
     assert.equal(managedAfterSync.length, 0, 'managed hook not re-added after sync');
-    assert.equal(
-      settings.hooks.SessionStart.filter((e) => !e._catCafeDisabled)[0].hooks[0].command,
-      '/custom/my-hook.sh',
-      'custom hook still preserved after sync',
-    );
+    assert.equal(settings.hooks.SessionStart[0].hooks[0].command, '/custom/my-hook.sh');
+  });
+
+  it('settings.json contains only valid hook matcher entries after toggle-off (schema validity)', async () => {
+    await syncAgentHooks({ projectRoot, targetRoot });
+    await toggleClaudeHook(targetRoot, 'SessionStart', false);
+    await toggleClaudeHook(targetRoot, 'Stop', false);
+
+    const settingsPath = join(targetRoot, '.claude', 'settings.json');
+    const settings = JSON.parse(await readFile(settingsPath, 'utf8'));
+
+    // Every entry in every hook event array must have a "hooks" array (Claude schema requirement)
+    for (const [eventName, entries] of Object.entries(settings.hooks)) {
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries) {
+        assert.ok(
+          Array.isArray(entry.hooks),
+          `settings.hooks.${eventName} entry missing required "hooks" array: ${JSON.stringify(entry)}`,
+        );
+        // No unknown Cat Cafe marker fields in Claude's config
+        assert.equal(
+          entry._catCafeDisabled,
+          undefined,
+          `settings.hooks.${eventName} must not contain _catCafeDisabled marker`,
+        );
+      }
+    }
   });
 
   it('reports stale scripts with a diff summary and canonicalizes Codex hooks JSON', async () => {

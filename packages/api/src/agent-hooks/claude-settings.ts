@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { HealthResult } from './health.js';
@@ -124,21 +124,38 @@ function managedCommandsAllHaveBashPrefix(settings: JsonObject, targetRoot: stri
 }
 
 /**
- * Explicit marker written by toggleClaudeHook when disabling a managed hook.
- * A hookless entry `{ _catCafeDisabled: true }` survives withoutManagedHooks
- * (no hooks array → pass-through) and is unambiguous: custom-only events
- * (user has their own hooks, Cat Cafe never installed) won't have this marker.
+ * Cat Cafe hook preferences — stored in a SEPARATE file from Claude's settings.json
+ * to avoid writing schema-invalid entries into Claude's hook matcher arrays.
+ * Format: `{ "disabledEvents": ["SessionStart"] }`
  */
-const CAT_CAFE_DISABLED_MARKER = '_catCafeDisabled';
+const HOOK_PREFS_FILENAME = 'cat-cafe-hook-prefs.json';
 
-/** Positive identification: entry has the explicit disabled marker from toggle API */
-function isEventIntentionallyDisabled(settings: JsonObject, eventName: string): boolean {
-  return eventEntries(settings, eventName).some((entry) => entry[CAT_CAFE_DISABLED_MARKER] === true);
+function hookPrefsPath(targetRoot: string): string {
+  return join(targetRoot, '.claude', HOOK_PREFS_FILENAME);
 }
 
-/** Strip Cat Cafe disabled marker entries (used before re-adding managed hook or marker) */
-function withoutDisabledMarker(entries: JsonObject[]): JsonObject[] {
-  return entries.filter((entry) => entry[CAT_CAFE_DISABLED_MARKER] !== true);
+function readHookPrefs(targetRoot: string): JsonObject {
+  const prefsPath = hookPrefsPath(targetRoot);
+  if (!existsSync(prefsPath)) return {};
+  try {
+    const parsed = JSON.parse(readFileSync(prefsPath, 'utf-8'));
+    return isJsonObject(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeHookPrefs(targetRoot: string, prefs: JsonObject): void {
+  const prefsPath = hookPrefsPath(targetRoot);
+  mkdirSync(dirname(prefsPath), { recursive: true });
+  writeFileSync(prefsPath, `${JSON.stringify(prefs, null, 2)}\n`, 'utf-8');
+}
+
+/** Check Cat Cafe's own prefs file for explicit disable (not Claude's settings.json) */
+function isEventIntentionallyDisabled(targetRoot: string, eventName: string): boolean {
+  const prefs = readHookPrefs(targetRoot);
+  const disabled = prefs.disabledEvents;
+  return Array.isArray(disabled) && disabled.includes(eventName);
 }
 
 function readJsonObject(path: string): JsonObject {
@@ -159,7 +176,7 @@ function checkManagedEventState(
 ): ManagedEventState {
   const command = expectedClaudeCommand(targetRoot, eventName);
   if (eventHasCommand(settings, eventName, command, targetRoot)) return 'ok';
-  if (isEventIntentionallyDisabled(settings, eventName)) return 'ok';
+  if (isEventIntentionallyDisabled(targetRoot, eventName)) return 'ok';
   if (eventHasStaleManagedCommand(settings, eventName, command, targetRoot)) return 'stale';
   return 'missing';
 }
@@ -248,14 +265,23 @@ export async function toggleClaudeHook(
   const targetPath = join(targetRoot, '.claude', 'settings.json');
   const settings = readOptionalSettings(targetPath);
   const hooksRoot: JsonObject = isJsonObject(settings.hooks) ? (settings.hooks as JsonObject) : {};
-  const entries = withoutDisabledMarker(withoutManagedHooks(eventEntries(settings, eventName), targetRoot));
+  const entries = withoutManagedHooks(eventEntries(settings, eventName), targetRoot);
   if (enabled) {
     const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
     entries.push({ hooks: [{ type: 'command', command: `bash "${scriptPath}"` }] });
-  } else {
-    entries.push({ [CAT_CAFE_DISABLED_MARKER]: true });
   }
   hooksRoot[eventName] = entries;
+
+  // Record disable preference in Cat Cafe's own prefs file (outside Claude schema)
+  const prefs = readHookPrefs(targetRoot);
+  const disabled = new Set(Array.isArray(prefs.disabledEvents) ? (prefs.disabledEvents as string[]) : []);
+  if (enabled) {
+    disabled.delete(eventName);
+  } else {
+    disabled.add(eventName);
+  }
+  prefs.disabledEvents = [...disabled].sort();
+  writeHookPrefs(targetRoot, prefs);
   settings.hooks = hooksRoot;
   await mkdir(dirname(targetPath), { recursive: true });
   writeFileSync(targetPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf-8');
@@ -291,8 +317,8 @@ export async function syncClaudeSettings(targetRoot: string): Promise<void> {
 
   for (const eventName of Object.keys(MANAGED_HOOKS) as Array<keyof typeof MANAGED_HOOKS>) {
     const entries = withoutManagedHooks(eventEntries(settings, eventName), targetRoot);
-    // Preserve intentional disables: explicit _catCafeDisabled marker from toggle API
-    if (isEventIntentionallyDisabled(settings, eventName)) {
+    // Preserve intentional disables recorded in Cat Cafe's own prefs file
+    if (isEventIntentionallyDisabled(targetRoot, eventName)) {
       hooksRoot[eventName] = entries;
     } else {
       const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
