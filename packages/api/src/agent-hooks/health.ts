@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { claudeSettingsHealth, syncClaudeSettings } from './claude-settings.js';
+import { claudeSettingsHealth, getClaudeHookEventStatus, syncClaudeSettings } from './claude-settings.js';
 import {
   applySync,
   buildAgentHookTargets,
@@ -29,6 +29,7 @@ export interface HealthResult extends DriftResult {
 export interface AgentHookStatusResponse {
   status: AgentHookHealthStatus;
   targets: HealthResult[];
+  hookEvents?: Record<string, boolean>;
 }
 
 export interface AgentHookOptions {
@@ -173,6 +174,7 @@ export async function getAgentHookStatus(options: AgentHookOptions): Promise<Age
   return {
     status: aggregateStatus(results),
     targets: results,
+    hookEvents: getClaudeHookEventStatus(options.targetRoot),
   };
 }
 

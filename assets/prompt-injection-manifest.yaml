@@ -961,11 +961,11 @@ segments:
     purpose: "Re-injects session digest + SOP bookmark after context window compression"
     userExplanation: "上下文压缩后重新注入会话摘要和 SOP 书签，防止压缩导致关键信息丢失"
     priority: high
-    safetyTier: editable
+    safetyTier: limited-edit
     transparencyTier: opt-in-view
     governanceTier: human-gated
-    allowLocalOverride: true
-    disableable: true
+    allowLocalOverride: false
+    disableable: false
     consumer: external-hook
     relatedFeature: null
 

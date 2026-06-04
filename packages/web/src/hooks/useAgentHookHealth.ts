@@ -22,6 +22,7 @@ export interface AgentHookTargetHealth {
 export interface AgentHookStatusResponse {
   status: AgentHookHealthStatus;
   targets: AgentHookTargetHealth[];
+  hookEvents?: Record<string, boolean>;
 }
 
 interface UseAgentHookHealthOptions {

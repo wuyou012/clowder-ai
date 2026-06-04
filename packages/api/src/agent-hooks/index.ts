@@ -1,4 +1,4 @@
-export { type ManagedHookEvent, toggleClaudeHook } from './claude-settings.js';
+export { getClaudeHookEventStatus, type ManagedHookEvent, toggleClaudeHook } from './claude-settings.js';
 export {
   type AgentHookDiffSummary,
   type AgentHookHealthStatus,

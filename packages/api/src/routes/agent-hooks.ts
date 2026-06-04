@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -171,7 +171,8 @@ export const agentHooksRoutes: FastifyPluginAsync<AgentHooksRouteOptions> = asyn
     }
     try {
       const input = JSON.stringify({ cwd: resolved.projectRoot });
-      const output = execSync(`echo '${input}' | bash "${scriptPath}"`, {
+      const output = execFileSync('bash', [scriptPath], {
+        input,
         timeout: 10000,
         encoding: 'utf-8',
         cwd: resolved.projectRoot,

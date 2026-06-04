@@ -50,6 +50,9 @@ const HOOK_SEGMENTS: HookSegment[] = [
   },
 ];
 
+/** Maps hookId → settings.json event name for per-hook enabled state */
+const HOOK_EVENT_MAP: Record<string, string> = { H1: 'SessionStart', H3: 'Stop' };
+
 function matchTargetToHook(target: AgentHookTargetHealth): string | null {
   const n = target.name.toLowerCase();
   if (n.includes('session-start') || n.includes('start')) return 'H1';
@@ -166,7 +169,9 @@ export function HookManagementPanel() {
       <div className="space-y-2">
         {HOOK_SEGMENTS.map((hook) => {
           const target = hookHealth.get(hook.id);
-          const isConfigured = target?.status === 'configured';
+          // Use per-event enabled state from settings.json (not file sync target status)
+          const hookEventKey = HOOK_EVENT_MAP[hook.id];
+          const isConfigured = hookEventKey ? (health?.hookEvents?.[hookEventKey] ?? false) : false;
           return (
             <HookRow
               key={hook.id}

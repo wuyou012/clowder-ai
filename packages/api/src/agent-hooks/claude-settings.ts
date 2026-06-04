@@ -231,6 +231,26 @@ export async function toggleClaudeHook(
   writeFileSync(targetPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf-8');
 }
 
+/** Per-event enabled state from ~/.claude/settings.json */
+export function getClaudeHookEventStatus(targetRoot: string): Record<string, boolean> {
+  const targetPath = join(targetRoot, '.claude', 'settings.json');
+  if (!existsSync(targetPath)) return { SessionStart: false, Stop: false };
+  try {
+    const settings = readJsonObject(targetPath);
+    return {
+      SessionStart: eventHasCommand(
+        settings,
+        'SessionStart',
+        expectedClaudeCommand(targetRoot, 'SessionStart'),
+        targetRoot,
+      ),
+      Stop: eventHasCommand(settings, 'Stop', expectedClaudeCommand(targetRoot, 'Stop'), targetRoot),
+    };
+  } catch {
+    return { SessionStart: false, Stop: false };
+  }
+}
+
 export async function syncClaudeSettings(targetRoot: string): Promise<void> {
   const targetPath = join(targetRoot, '.claude', 'settings.json');
   const settings = readOptionalSettings(targetPath);
