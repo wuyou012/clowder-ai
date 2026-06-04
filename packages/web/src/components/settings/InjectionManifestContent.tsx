@@ -222,7 +222,7 @@ function TierLegend() {
 function HookCategoryGroup({ label, count }: { label: string; count: number }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
-    <SettingsCollapsibleCard title={label} count={count} collapsed={collapsed} onToggle={setCollapsed}>
+    <SettingsCollapsibleCard title={label} count={count} collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)}>
       <HookManagementPanel />
     </SettingsCollapsibleCard>
   );
@@ -241,7 +241,12 @@ function CategoryGroup({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
-    <SettingsCollapsibleCard title={label} count={segments.length} collapsed={collapsed} onToggle={setCollapsed}>
+    <SettingsCollapsibleCard
+      title={label}
+      count={segments.length}
+      collapsed={collapsed}
+      onToggle={() => setCollapsed((c) => !c)}
+    >
       <div className="space-y-2">
         {segments.map((seg) => (
           <SegmentRow key={seg.id} segment={seg} catBreed={catBreed} catProvider={catProvider} />
