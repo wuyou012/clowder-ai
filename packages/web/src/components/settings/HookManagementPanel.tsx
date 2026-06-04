@@ -223,11 +223,15 @@ function HookRow({
             <SettingsText as="span" variant="sm" tone="default" className="font-medium">
               {hook.name}
             </SettingsText>
-            {target && (
+            {hook.toggleable ? (
+              <SettingsBadge tone={statusTone(isConfigured ? 'configured' : 'missing')} size="xxs">
+                {statusLabel(isConfigured ? 'configured' : 'missing')}
+              </SettingsBadge>
+            ) : target ? (
               <SettingsBadge tone={statusTone(target.status)} size="xxs">
                 {statusLabel(target.status)}
               </SettingsBadge>
-            )}
+            ) : null}
             {hook.toggleable && (
               <button
                 type="button"

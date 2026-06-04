@@ -123,12 +123,46 @@ function managedCommandsAllHaveBashPrefix(settings: JsonObject, targetRoot: stri
   return true;
 }
 
+/** Check if event key exists in settings.hooks (even as empty array = intentionally disabled) */
+function eventKeyExists(settings: JsonObject, eventName: string): boolean {
+  const hooksRoot = settings.hooks;
+  if (!isJsonObject(hooksRoot)) return false;
+  return Array.isArray((hooksRoot as JsonObject)[eventName]);
+}
+
+/** Check if event has ANY managed hook command (stale or current) */
+function eventHasAnyManagedHook(settings: JsonObject, eventName: string, targetRoot: string): boolean {
+  return eventEntries(settings, eventName).some((entry) =>
+    entryHooks(entry).some((hook) => hook.type === 'command' && isManagedHookCommand(hook.command, targetRoot)),
+  );
+}
+
+/** Event key present but no managed hooks = user intentionally disabled via toggle API */
+function isEventIntentionallyDisabled(settings: JsonObject, eventName: string, targetRoot: string): boolean {
+  return eventKeyExists(settings, eventName) && !eventHasAnyManagedHook(settings, eventName, targetRoot);
+}
+
 function readJsonObject(path: string): JsonObject {
   const parsed = JSON.parse(readFileSync(path, 'utf-8'));
   if (!isJsonObject(parsed)) {
     throw new Error(`${path} must contain a JSON object`);
   }
   return parsed;
+}
+
+type ManagedEventState = 'ok' | 'stale' | 'missing';
+
+/** Per-event health: configured / intentionally disabled / stale / missing */
+function checkManagedEventState(
+  settings: JsonObject,
+  eventName: keyof typeof MANAGED_HOOKS,
+  targetRoot: string,
+): ManagedEventState {
+  const command = expectedClaudeCommand(targetRoot, eventName);
+  if (eventHasCommand(settings, eventName, command, targetRoot)) return 'ok';
+  if (isEventIntentionallyDisabled(settings, eventName, targetRoot)) return 'ok';
+  if (eventHasStaleManagedCommand(settings, eventName, command, targetRoot)) return 'stale';
+  return 'missing';
 }
 
 export function claudeSettingsHealth(targetRoot: string): HealthResult {
@@ -146,11 +180,9 @@ export function claudeSettingsHealth(targetRoot: string): HealthResult {
 
   try {
     const settings = readJsonObject(targetPath);
-    const startCommand = expectedClaudeCommand(targetRoot, 'SessionStart');
-    const stopCommand = expectedClaudeCommand(targetRoot, 'Stop');
-    const hasStart = eventHasCommand(settings, 'SessionStart', startCommand, targetRoot);
-    const hasStop = eventHasCommand(settings, 'Stop', stopCommand, targetRoot);
-    if (hasStart && hasStop) {
+    const startState = checkManagedEventState(settings, 'SessionStart', targetRoot);
+    const stopState = checkManagedEventState(settings, 'Stop', targetRoot);
+    if (startState === 'ok' && stopState === 'ok') {
       const allBash = managedCommandsAllHaveBashPrefix(settings, targetRoot);
       if (allBash) {
         return { name: 'claude-settings', drifted: false, status: 'configured', targetPath, reason: 'configured' };
@@ -164,10 +196,7 @@ export function claudeSettingsHealth(targetRoot: string): HealthResult {
         diff: { kind: 'json', message: 'managed hook commands need bash prefix', fields: ['hooks'] },
       };
     }
-    if (
-      eventHasStaleManagedCommand(settings, 'SessionStart', startCommand, targetRoot) ||
-      eventHasStaleManagedCommand(settings, 'Stop', stopCommand, targetRoot)
-    ) {
+    if (startState === 'stale' || stopState === 'stale') {
       return {
         name: 'claude-settings',
         drifted: true,
@@ -261,9 +290,15 @@ export async function syncClaudeSettings(targetRoot: string): Promise<void> {
 
   for (const eventName of Object.keys(MANAGED_HOOKS) as Array<keyof typeof MANAGED_HOOKS>) {
     const entries = withoutManagedHooks(eventEntries(settings, eventName), targetRoot);
-    const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
-    entries.push({ hooks: [{ type: 'command', command: `bash "${scriptPath}"` }] });
-    hooksRoot[eventName] = entries;
+    // Preserve intentional disables: event key present but no managed hooks
+    // means user toggled it off — don't re-enable during sync
+    if (isEventIntentionallyDisabled(settings, eventName, targetRoot)) {
+      hooksRoot[eventName] = entries;
+    } else {
+      const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
+      entries.push({ hooks: [{ type: 'command', command: `bash "${scriptPath}"` }] });
+      hooksRoot[eventName] = entries;
+    }
   }
 
   settings.hooks = hooksRoot;
