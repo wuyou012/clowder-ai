@@ -118,7 +118,11 @@ export const promptInjectionRoutes: FastifyPluginAsync = async (app) => {
       if (meta.ext === 'yaml') {
         // YAML preview: parse and show per-key values
         try {
-          const parsed = YAML.parse(content) as Record<string, string>;
+          const parsed: unknown = YAML.parse(content);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            reply.status(400);
+            return { error: 'YAML must be a mapping (object), not a scalar or list' };
+          }
           const entries: Record<string, string> = {};
           for (const [k, v] of Object.entries(parsed)) {
             entries[k] = typeof v === 'string' ? v.trimEnd() : String(v);
@@ -165,10 +169,14 @@ export const promptInjectionRoutes: FastifyPluginAsync = async (app) => {
         return { error: 'Missing or empty content field' };
       }
 
-      // Validate YAML segments parse correctly
+      // Validate YAML segments parse to a plain object (not null/scalar/array)
       if (meta.ext === 'yaml') {
         try {
-          YAML.parse(content);
+          const parsed: unknown = YAML.parse(content);
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            reply.status(400);
+            return { error: 'YAML must be a mapping (object), not a scalar or list' };
+          }
         } catch (e) {
           reply.status(400);
           return { error: `Invalid YAML: ${e instanceof Error ? e.message : String(e)}` };
