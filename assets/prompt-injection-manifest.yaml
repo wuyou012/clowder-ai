@@ -242,8 +242,8 @@ segments:
     name: 工作流触发点
     category: collaboration
     lifecycleStage: session-init
-    source: packages/api/src/domains/cats/services/context/SystemPromptBuilder.ts
-    sourceType: hardcoded
+    source: assets/prompt-templates/workflow-triggers.yaml
+    sourceType: template
     trigger: "WORKFLOW_TRIGGERS[breedId] exists"
     purpose: "Per-breed workflow triggers: when to proactively @-mention other cats"
     userExplanation: "告诉每只猫在什么情况下应该 @提及 哪位队友（如完成开发后 @缅因猫 review）"
@@ -255,7 +255,6 @@ segments:
     disableable: false
     consumer: invocation-context
     relatedFeature: null
-    _templateTarget: assets/prompt-templates/workflow-triggers.yaml
 
   - id: S7
     name: Pack Workflows
@@ -369,8 +368,8 @@ segments:
     name: MCP 工具文档
     category: collaboration
     lifecycleStage: session-init
-    source: packages/api/src/domains/cats/services/context/SystemPromptBuilder.ts
-    sourceType: hardcoded
+    source: assets/prompt-templates/mcp-tools.md
+    sourceType: template
     trigger: "options?.mcpAvailable === true (Claude cats only)"
     purpose: "MCP tools documentation section for native-MCP cats (Claude). Non-Claude cats use per-message HTTP callback injection instead."
     userExplanation: "MCP 工具使用文档——告诉猫有哪些协作工具可用及其用法（仅 Claude 猫注入）"
@@ -382,7 +381,6 @@ segments:
     disableable: false
     consumer: invocation-context
     relatedFeature: null
-    _templateTarget: assets/prompt-templates/mcp-tools.md
 
   # ═══════════════════════════════════════════════════════════════
   # Dynamic Invocation Context — per-turn, buildInvocationContext()
@@ -518,8 +516,8 @@ segments:
     name: A2A 球权检查
     category: collaboration
     lifecycleStage: per-turn
-    source: packages/api/src/domains/cats/services/context/SystemPromptBuilder.ts
-    sourceType: hardcoded
+    source: assets/prompt-templates/a2a-ball-check.md
+    sourceType: template
     trigger: "mode !== 'parallel' && a2aEnabled"
     purpose: "Ball ownership rules: @ = transfer, push back on contradictions, no deadlocks"
     userExplanation: "球权规则——@ 是球权转移指令，收到矛盾信号要 push back，禁止球权死锁"
@@ -531,7 +529,6 @@ segments:
     disableable: false
     consumer: invocation-context
     relatedFeature: F167
-    _templateTarget: assets/prompt-templates/a2a-ball-check.md
 
   - id: D9
     name: 路由反馈
@@ -754,8 +751,8 @@ segments:
     name: 传球决策树
     category: collaboration
     lifecycleStage: per-turn
-    source: packages/api/src/domains/cats/services/context/SystemPromptBuilder.ts
-    sourceType: hardcoded
+    source: assets/prompt-templates/handoff-decision-tree.md
+    sourceType: template
     trigger: "mode !== 'parallel' && a2aEnabled"
     purpose: "Trailing handoff decision tree — maximum recency bias placement for non-Claude models"
     userExplanation: "传球决策树（放在最末尾）——强制猫每轮结束时选择下一步：传给谁 / 等什么 / 找铲屎官"
@@ -767,7 +764,6 @@ segments:
     disableable: false
     consumer: invocation-context
     relatedFeature: F167
-    _templateTarget: assets/prompt-templates/handoff-decision-tree.md
 
   # ═══════════════════════════════════════════════════════════════
   # Route 拼接层 — route-serial.ts / route-parallel.ts

@@ -129,7 +129,18 @@ for (const seg of manifest.segments) {
   }
 }
 
-// ── 5. Report ─────────────────────────────────────────────────
+// ── 5. Validate template source files exist ──────────────────
+
+for (const seg of manifest.segments) {
+  if (seg.sourceType === 'template' && seg.source) {
+    const tplPath = join(ROOT, seg.source);
+    if (!existsSync(tplPath)) {
+      errors.push(`TEMPLATE: segment ${seg.id} source file not found: ${seg.source}`);
+    }
+  }
+}
+
+// ── 6. Report ─────────────────────────────────────────────────
 
 console.log(`F219 Manifest Drift Check`);
 console.log(`  Manifest segments: ${manifestIds.size} (${activeIds.size} active)`);

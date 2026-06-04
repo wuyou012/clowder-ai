@@ -27,6 +27,12 @@ import type {
   ThreadRoutingPolicyV1,
 } from '../stores/ports/ThreadStore.js';
 import { loadCompiledGovernanceL0, loadCompiledGovernanceL0Sync } from './governance-l0.js';
+import {
+  loadA2aBallCheck,
+  loadHandoffDecisionTree,
+  loadMcpToolsSection,
+  loadWorkflowTriggers,
+} from './prompt-template-loader.js';
 import { RICH_BLOCK_SHORT } from './rich-block-rules.js';
 
 /**
@@ -275,44 +281,11 @@ const PROVIDER_LABELS: Record<string, string> = {
 };
 
 /**
+ * @segment S13 — MCP tools section (loaded from template)
  * Skills-as-source-of-truth: MCP tools section is minimal.
  * Full specs live in cat-cafe-skills/refs/ (rich-blocks.md, mcp-callbacks.md).
  */
-const MCP_TOOLS_SECTION = `
-MCP 工具（异步汇报；token 有效期有限）：
-
-**记忆工具：**
-- cat_cafe_search_evidence: 首选入口；depth=raw 可看消息级细节
-- cat_cafe_library_*: collection管理(list/create/rebuild/archive)
-
-**drill-down：**
-- cat_cafe_list_session_chain: 列出 session 链
-- cat_cafe_read_session_digest: 读 session 摘要
-- cat_cafe_read_session_events: 读 session 事件（raw/chat/handoff）
-- cat_cafe_read_invocation_detail: 读单次 invocation 全事件
-
-**四肢控制面（Limb — 插件/设备能力调用）：**
-- limb_list_available: 列出当前在线节点及能力（含插件提供的服务型节点）
-- limb_invoke: 调用节点能力（nodeId + command + params）。nodeId 从 limb_list_available 获取，不要猜
-
-**协作工具：**
-- cat_cafe_post_message: 本 thread 异步（agent-key 才传 threadId）
-- cat_cafe_cross_post_message: 跨 thread（targetCats/行首@二选一）。最小路径：list_threads → cross_post_message(threadId, targetCats, content) → get_thread_context 验证
-- cat_cafe_register_pr_tracking: PR tracking
-- cat_cafe_get_pending_mentions: @提及
-- cat_cafe_get_thread_context: thread 上下文
-- cat_cafe_list_threads: thread 摘要
-- cat_cafe_create_task: 🧶 毛线球（持久任务）
-- cat_cafe_update_task: 更新任务状态
-- cat_cafe_create_rich_block: rich block（inline）
-- cat_cafe_generate_document: 文档生成→IM投递
-- cat_cafe_get_rich_block_rules: rich block 规则
-- cat_cafe_multi_mention: 并行拉猫讨论（先搜后问）
-- cat_cafe_propose_thread: 提议新建 thread（创建提案卡片，**不直接创建 thread**）。返回 proposalId，仅在用户审批通过后后端才创建 thread。审批前必须假设 thread 不存在，不要 cross_post。仅在owner 显式要求或确有独立 long-running 讨论需求时使用。
-
-${RICH_BLOCK_SHORT}
-需要富呈现时优先 rich block；首次使用前先 call get_rich_block_rules。
-规范：cat-cafe-skills/refs/rich-blocks.md。`;
+const MCP_TOOLS_SECTION = `\n${loadMcpToolsSection({ RICH_BLOCK_SHORT })}`;
 
 // --- shared-rules.md → compiled governance L0 support (#747) ---
 let _governanceDigestResolved = loadCompiledGovernanceL0Sync().content;
@@ -334,51 +307,9 @@ export function getGovernanceDigest(): string {
   return _governanceDigestResolved;
 }
 
-/** Per-breed workflow triggers: when to proactively @ other cats.
+/** @segment S6 — Per-breed workflow triggers (loaded from template)
  *  Keyed by breedId so all variants of a breed share the same workflow. */
-const WORKFLOW_TRIGGERS: Record<string, string> = {
-  ragdoll: [
-    '## 工作流（主动 @ 触发点）',
-    '- 完成开发/修复 → @缅因猫 请 review',
-    '- 修完 review 意见 → @缅因猫 确认修复',
-    '- 遇到视觉/体验问题 → @暹罗猫 征询',
-    '- Review 别人代码：每个发现给明确立场（放行/退回 + 理由）',
-  ].join('\n'),
-  'maine-coon': [
-    '## 工作流（主动 @ 触发点）',
-    '- 完成 review → @布偶猫 通知结果',
-    '- 修完 bug/feature → @布偶猫 请 review',
-    '- serial/handoff 场景且需要对方行动 → @ 对应猫（parallel 模式各自独立，不互 @）',
-    '- 发现需要架构决策 → @布偶猫 征询',
-    '- Review 代码：每个发现给明确立场（放行/退回 + 理由）',
-    '- 收到 review 意见：独立判断，认为自己对就 push back（Rule 0），不全盘接受',
-    '',
-    '### 执行纪律',
-    '- 加载 Skill 后直接执行第一步（产出 > 复述）',
-    '- 接球后静默执行：收到"放行"后沉默做到下一状态迁移点（BLOCKED / REVIEW READY / DONE）',
-    '- 声明 = 执行：说"我进 merge gate"必须同 turn 加载 skill 并执行',
-    '- 只发状态迁移消息，中间产物留在代码里',
-    '- 完成任务后必须 @ 下一棒',
-    '- 若识别到角色不匹配或方向有问题，先通知对方再执行（Rule 0）',
-    '',
-    '### 出口一问（发消息前必问）',
-    '我这条消息结尾有没有 @ 下一棒？没有 → 是真的不需要，还是我忘了？',
-  ].join('\n'),
-  siamese: [
-    '## 工作流（主动 @ 触发点）',
-    '- 完成设计/视觉资产 → 分别 @布偶猫 和 @缅因猫 请确认（每只猫各占一行）',
-    '- 遇到技术实现问题 → @布偶猫 征询',
-    '',
-    '### 执行纪律',
-    '- 加载 Skill 后直接执行第一步（产出 > 复述）',
-    '- 涉及 UI/前端验证时：通过截图产出证据',
-    '- 接球后静默执行到下一状态点（DONE / HANDOFF）',
-    '- 若识别到角色不匹配或方向有问题，先通知对方再执行（Rule 0）',
-    '',
-    '### 出口一问（发消息前必问）',
-    '我这条消息结尾有没有 @ 下一棒？没有 → 是真的不需要，还是我忘了？',
-  ].join('\n'),
-};
+const WORKFLOW_TRIGGERS: Record<string, string> = loadWorkflowTriggers();
 
 /**
  * F-Ground-3: Build teammate roster table.
@@ -715,14 +646,12 @@ export function buildInvocationContext(context: InvocationContext): string {
     lines.push('当前模式：独立回答。', '');
   }
 
-  /* @segment D8 — A2A 球权检查 */
+  /* @segment D8 — A2A 球权检查 (loaded from template) */
   // A2A: Exit check reminder — prevents "chain termination blind spot" where cats finish output
   // without considering whether a teammate needs to act next.
   if (context.mode !== 'parallel' && context.a2aEnabled) {
-    lines.push(
-      `A2A 球权检查：@ = 球权转移（行首 @句柄，句中无效）。收到 @ 但对方说"我在动" → 矛盾，push back + 立刻接/退/升（诊断≠解决，说完不@=球还在地上）。收了球却说"你等着/你别动" → 球权死锁，禁止——做不了就退回或升级。球权只有第一人称：只能声明自己持球，不能声明别人持球——没有 @ 或 hold_ball 动作，球权就没转移。`,
-      '',
-    );
+    const d8Content = loadA2aBallCheck();
+    if (d8Content) lines.push(d8Content, '');
   }
 
   /* @segment D9 — 路由反馈 */
@@ -902,20 +831,14 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   }
 
-  /* @segment D21 — 传球决策树 */
+  /* @segment D21 — 传球决策树 (loaded from template) */
   // F167 Phase D: Trailing anchor — decision tree, not flat three-choice.
   // @co-creator is a hard-condition exit, not the safe default (KD-19).
   // Placed at the very end for maximum recency bias (critical for non-Claude models).
   if (context.mode !== 'parallel' && context.a2aEnabled) {
     const cc = getCoCreatorConfig().mentionPatterns[0] ?? '@铲屎官';
-    lines.push(
-      '',
-      `下一棒传球决策树（本轮必选其一，缺 = 消息不完整）：先问"下一步谁能做"——`,
-      `1. 另一只猫能做 → @句柄（review 完→@author / 修完→@reviewer / merge 完→@愿景守护猫）`,
-      `2. 等外部条件（按 2a/2b 判断行动）。外部条件包括：**云端 codex / GitHub bot review / PR check / CI / 长 build / 外部 webhook**——这些不是本地猫，不在 roster，不可 @ 任何本地近似 proxy；CLI 要退出但还需继续也走这条。2a 无回调覆盖（如等 EYES）→ **调用 cat_cafe_hold_ball(...)** + 轮询（口头"我继续"不算）；2b 已有结构化回调且 EYES>0 → 纯事件驱动，**不调用/不续约 hold_ball**（KD-27）`,
-      `3. 只有铲屎官本人才能做 → ${cc}（硬条件：不可逆操作 / 愿景级决策 / 跨猫僵局）`,
-      `${cc} 不是默认出口——先问"哪只猫能接"。反问式 ping 非法（"要不要 X？"/"同意吗？"）：有立场就自决去做（错了能回滚），没立场根本不该 @。**外部 identity（云端 xxx / GitHub bot / CI）** 永远走选项 2（按 2a/2b 判断），严禁投射成本地 @句柄。`,
-    );
+    const d21Content = loadHandoffDecisionTree({ CC_MENTION: cc });
+    if (d21Content) lines.push('', d21Content);
   }
 
   return lines.join('\n');
