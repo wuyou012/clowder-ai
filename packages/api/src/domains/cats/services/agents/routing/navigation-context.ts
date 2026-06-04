@@ -106,6 +106,7 @@ export interface NavigationContext {
   bestNextSource?: string;
 }
 
+/* @segment N1 — 导航块 */
 export function formatNavigationHeader(ctx: NavigationContext): string {
   const lines: string[] = ['[导航]'];
   const coCreatorTimeZone = getCoCreatorConfig().timeZone;

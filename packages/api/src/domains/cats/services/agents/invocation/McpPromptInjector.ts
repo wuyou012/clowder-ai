@@ -57,6 +57,7 @@ function resolveExampleHandle(opts: McpCallbackOptions): string {
  * Minimal: @teammate rules + credentials + tool list + skill reference.
  * Full API docs are in cat-cafe-skills/refs/mcp-callbacks.md.
  */
+/* @segment C1 — MCP Callback Instructions */
 export function buildMcpCallbackInstructions(opts: McpCallbackOptions): string {
   const exampleHandle = resolveExampleHandle(opts);
   return `## 协作方式

@@ -12,6 +12,7 @@ import { HubEnvFilesTab } from '../HubEnvFilesTab';
 import { PushSettingsPanel } from '../PushSettingsPanel';
 import { useConfirm } from '../useConfirm';
 import { VoiceSettingsPanel } from '../VoiceSettingsPanel';
+import { InjectionManifestContent } from './InjectionManifestContent';
 import { MarketplaceContent } from './MarketplaceContent';
 import { McpManageContent } from './McpManageContent';
 import { OpsContent } from './OpsContent';
@@ -198,6 +199,8 @@ export function SettingsContent({ section, initialEditCatId }: SettingsContentPr
         return <OpsContent />;
       case 'rules':
         return <RulesPromptsContent />;
+      case 'injections':
+        return <InjectionManifestContent />;
       case 'mcp':
         return <McpManageContent />;
       case 'plugins':

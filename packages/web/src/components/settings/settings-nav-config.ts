@@ -78,6 +78,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     description: '家规、协作 SOP 和模型提示词入口。',
   },
   {
+    id: 'injections',
+    label: '注入体系',
+    icon: 'layers',
+    color: 'var(--color-gemini-primary)',
+    description: '全量 prompt 注入段清单、分类与安全分级。',
+  },
+  {
     id: 'notify',
     label: '通知',
     icon: 'bell',

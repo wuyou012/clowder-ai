@@ -466,7 +466,7 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
   const providerLabel = PROVIDER_LABELS[config.clientId] ?? config.clientId;
   const lines: string[] = [];
 
-  // Identity
+  /* @segment S1 — 身份声明 */
   const nameLabel = config.nickname
     ? `${config.displayName}/${config.nickname}（${config.name}）`
     : `${config.displayName}（${config.name}）`;
@@ -478,6 +478,7 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
     '',
   );
 
+  /* @segment S2 — 硬限制 */
   // F167 Phase E (KD-20): self-awareness — if this cat has hard restrictions,
   // declare them inline so the cat can recognize illegitimate @-mentions and
   // push back / retreat (instead of accepting and failing). Data-driven from
@@ -486,11 +487,13 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
     lines.push(`你的硬限制：${config.restrictions.join('、')}。被 @ 做这类任务时请 push back 或退回给 @ 你的猫。`, '');
   }
 
+  /* @segment S3 — Pack Masks */
   // F129: Pack masks — role overlay (never changes core identity, see KD-3)
   if (options?.packBlocks?.masksBlock) {
     lines.push(options.packBlocks.masksBlock, '');
   }
 
+  /* @segment S4 — 协作格式 */
   // A2A collaboration format (always included — cats should know how to @ even in single-cat mode)
   const { mentions: callableMentions, hasDuplicateDisplayNames, uniqueHandleExample } = buildCallableMentions(catId);
   if (callableMentions.length > 0) {
@@ -517,25 +520,28 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
     lines.push('');
   }
 
+  /* @segment S5 — 队友名册 */
   // F-Ground-3: Teammate roster — who to @ and what they're good at
   const rosterLines = buildTeammateRoster(catId);
   if (rosterLines) {
     lines.push(rosterLines, '');
   }
 
+  /* @segment S6 — 工作流触发点 */
   // Per-breed workflow triggers (fallback to catId for legacy configs without breedId)
   const triggers = WORKFLOW_TRIGGERS[config.breedId ?? ''] ?? WORKFLOW_TRIGGERS[catId as string];
   if (triggers) {
     lines.push(triggers, '');
   }
 
+  /* @segment S7 — Pack Workflows */
   // F129: Pack workflow blocks (after breed workflow triggers)
   const packBlocks = options?.packBlocks;
   if (packBlocks?.workflowsBlock) {
     lines.push(packBlocks.workflowsBlock, '');
   }
 
-  // 铲屎官 reference (session-level, not per-message)
+  /* @segment S8 — 铲屎官引用 */
   // F067: Use co-creator config for name + mention handles
   // Note: "不冒充/不编造/身份契约" folded into compiled governance L0
   const coCreator = getCoCreatorConfig();
@@ -543,25 +549,30 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
   const ccHandles = coCreator.mentionPatterns.map((p) => `\`${p}\``).join(' / ');
   lines.push(`${ccName}（铲屎官/CVO）。重要决策由${ccName}拍板。需要关注时行首写 ${ccHandles}。`, '');
 
+  /* @segment S9 — 治理摘要 */
   // L0 Governance Digest — compiled from shared-rules.md (#747)
   // Source of truth: cat-cafe-skills/refs/shared-rules.md (supports .local/.local-override)
   lines.push('', getGovernanceDigest());
 
+  /* @segment S10 — Pack Guardrails */
   // F129: Pack guardrails — hard constraint track (only adds strictness, never relaxes Core Rails)
   if (packBlocks?.guardrailBlock) {
     lines.push('', packBlocks.guardrailBlock);
   }
 
+  /* @segment S11 — Pack Defaults */
   // F129: Pack defaults — user-overridable behavior track
   if (packBlocks?.defaultsBlock) {
     lines.push('', packBlocks.defaultsBlock);
   }
 
+  /* @segment S12 — World Driver */
   // F129: World driver summary (read-only, informational)
   if (packBlocks?.worldDriverSummary) {
     lines.push('', packBlocks.worldDriverSummary);
   }
 
+  /* @segment S13 — MCP 工具文档 */
   // MCP tools documentation — ONLY for Claude (--append-system-prompt survives compression).
   // Non-Claude cats (Codex/Gemini) inject HTTP callback instructions per-message
   // because their systemPrompt lives in session history and may be lost on compression.
@@ -619,11 +630,14 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   })();
 
+  /* @segment D1 — Identity 锚点 */
   // F042: Identity constant — pinned per invocation to survive compression.
   lines.push(
     `Identity: ${config.displayName}${config.nickname ? `/${config.nickname}` : ''} (@${context.catId}, model=${runtimeModel})`,
   );
 
+  /* @segment D2 — 直接消息来源 */
+  /* @segment D3 — 同族分身提醒 (conditional: same displayName) */
   // F042 + F167: A2A direct-message reply target + identity anti-spoofing.
   // When handoff comes from a same-breed variant (same displayName, different catId),
   // inject explicit model markers + "not-you" reminder to prevent identity collapse
@@ -649,6 +663,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   }
 
+  /* @segment D4 — 跨 thread 回复 */
   // F193 AC-B2: Cross-thread reply hint.
   // Cross-post triggered invocation (F052 sourceThreadId injected by API).
   // Without this hint, the receiving cat sees a truncated 8-char thread
@@ -663,6 +678,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     );
   }
 
+  /* @segment D5 — 乒乓球警告 */
   // F167 L1: ping-pong streak warning — inject when this cat just received the ball
   // in a same-pair streak >= 2 (but < 4, else it would have been blocked upstream).
   if (context.pingPongWarning) {
@@ -673,6 +689,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     );
   }
 
+  /* @segment D6 — 本次队友 */
   // Teammates — only list cats actually in this invocation
   if (context.teammates.length > 0) {
     lines.push('你的队友：');
@@ -684,7 +701,7 @@ export function buildInvocationContext(context: InvocationContext): string {
       }
     }
   }
-  // Mode context
+  /* @segment D7 — 模式声明 */
   if (context.mode === 'serial' && context.chainIndex != null && context.chainTotal != null) {
     lines.push(`当前模式：你是第 ${context.chainIndex}/${context.chainTotal} 只被召唤的猫，请注意前面猫的回复。`, '');
   } else if (context.mode === 'parallel') {
@@ -698,6 +715,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     lines.push('当前模式：独立回答。', '');
   }
 
+  /* @segment D8 — A2A 球权检查 */
   // A2A: Exit check reminder — prevents "chain termination blind spot" where cats finish output
   // without considering whether a teammate needs to act next.
   if (context.mode !== 'parallel' && context.a2aEnabled) {
@@ -707,6 +725,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     );
   }
 
+  /* @segment D9 — 路由反馈 */
   // F064: One-shot feedback when previous @mention was not routed.
   if (context.mentionRoutingFeedback && context.mentionRoutingFeedback.items?.length > 0) {
     const items = context.mentionRoutingFeedback.items.slice(0, 2).map((it) => `@${it.targetCatId}`);
@@ -716,17 +735,19 @@ export function buildInvocationContext(context: InvocationContext): string {
     );
   }
 
-  // Prompt tags
+  /* @segment D10 — 思维标签 */
   if (context.promptTags?.includes('critique')) {
     lines.push('思维方式：批判性分析。挑战假设，找出漏洞，提出反例。', '');
   }
 
+  /* @segment D11 — Skill 触发 */
   // F140 Phase C: connector-triggered skill suggestion (hint, not directive)
   const skillTag = context.promptTags?.find((t) => t.startsWith('skill:'));
   if (skillTag) {
     lines.push(`⚡ Signal-triggered action → load skill: ${skillTag.slice(6)}`, '');
   }
 
+  /* @segment D12 — 活跃参与者 */
   // F042 Wave 3: Active participant hint — re-injected per-invocation, survives compression.
   if (context.activeParticipants && context.activeParticipants.length > 0) {
     const topActive = context.activeParticipants
@@ -740,6 +761,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   }
 
+  /* @segment D13 — 路由策略 */
   // F042: Thread routing policy hint — short, per-invocation, survives compression.
   if (context.routingPolicy?.v === 1 && context.routingPolicy.scopes) {
     const toMention = (id: string): string => {
@@ -774,6 +796,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   }
 
+  /* @segment D14 — SOP 阶段提示 */
   // F073 P4: SOP stage hint — 告示牌 (bulletin board, not controller)
   if (context.sopStageHint) {
     const { stage, suggestedSkill, suggestedSkillSource, featureId } = context.sopStageHint;
@@ -781,6 +804,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     lines.push(`SOP: ${featureId} stage=${stage} → load skill: ${suggestedSkill}${sourcePart}`);
   }
 
+  /* @segment D15 — Voice 模式 */
   // F092: Voice companion mode — instruct cats to prioritize audio output
   if (context.voiceMode) {
     lines.push(
@@ -795,6 +819,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     );
   }
 
+  /* @segment D16 — Bootcamp 模式 */
   // F087: Bootcamp mode — inject phase context so cats know to guide the new CVO
   if (context.bootcampState) {
     const { phase, leadCat, selectedTaskId } = context.bootcampState;
@@ -807,11 +832,13 @@ export function buildInvocationContext(context: InvocationContext): string {
     );
   }
 
+  /* @segment D17 — Guide 候选 */
   // F155: Guide candidate — inline protocol (cats don't have /Skill tool at runtime)
   if (context.guideCandidate) {
     lines.push(...buildGuidePromptLines(context.guideCandidate, context.threadId));
   }
 
+  /* @segment D18 — 世界上下文 */
   // F093: World context envelope — inject world state for world-building mode
   if (context.worldContext) {
     const wc = context.worldContext;
@@ -843,6 +870,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     lines.push('');
   }
 
+  /* @segment D19 — Constitutional 知识 */
   // F163 AC-A3: always_on constitutional knowledge injection (physical, not retrieval)
   if (context.alwaysOnDocs && context.alwaysOnDocs.length > 0) {
     lines.push('');
@@ -856,6 +884,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   }
 
+  /* @segment D20 — Signal 文章 */
   // F091: Active Signal articles in discussion context
   if (context.activeSignals && context.activeSignals.length > 0) {
     lines.push('Signal articles linked to this thread:');
@@ -873,6 +902,7 @@ export function buildInvocationContext(context: InvocationContext): string {
     }
   }
 
+  /* @segment D21 — 传球决策树 */
   // F167 Phase D: Trailing anchor — decision tree, not flat three-choice.
   // @co-creator is a hard-condition exit, not the safe default (KD-19).
   // Placed at the very end for maximum recency bias (critical for non-Claude models).
@@ -891,6 +921,7 @@ export function buildInvocationContext(context: InvocationContext): string {
   return lines.join('\n');
 }
 
+/* @segment X1 — Reviewer Section (Legacy: exported but not called in production routes) */
 /**
  * F032 Phase D2: Build reviewer section for system prompt.
  * Shows available reviewers based on roster, filtered by family.
