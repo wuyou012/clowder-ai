@@ -37,7 +37,7 @@ if [ -n "$UNPUSHED" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ 收尾检查：有未 push 的 commit：
 ${UNPUSHED}
-→ 别走！先 push 再收工
+→ 诊断通知：有未 push 的 commit，建议先 push
 "
 fi
 
@@ -57,7 +57,7 @@ if [ -n "$UNTRACKED_DOCS" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ 收尾检查：docs/ 下有未跟踪的 .md 文件（你或其他猫生成了但忘记 commit push）：
 ${UNTRACKED_DOCS}
-→ 别走！先向铲屎官汇报这些文件，商量处理方式
+→ 诊断通知：docs/ 有未提交文件，建议 commit 或清理
 "
 fi
 
@@ -67,7 +67,7 @@ if [ -n "$ROOT_IMAGES" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ 收尾检查：根目录有图片文件（截图应放 assets/screenshots/）：
 ${ROOT_IMAGES}
-→ 别走！先向铲屎官汇报，商量移走还是删除
+→ 诊断通知：根目录有图片文件，建议移到 assets/screenshots/
 "
 fi
 
@@ -79,7 +79,7 @@ if [ -n "$ROOT_CLUTTER" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ 收尾检查：根目录有杂物文件：
 ${ROOT_CLUTTER}
-→ 别走！先向铲屎官汇报这些文件
+→ 诊断通知：根目录有杂物文件，建议清理或移走
 "
 fi
 

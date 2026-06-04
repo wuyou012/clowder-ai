@@ -950,7 +950,6 @@ segments:
     disableable: true
     consumer: external-hook
     relatedFeature: null
-    _knownIssue: "Contains '向铲屎官汇报' language that grabs conversation direction. Should be downgraded to diagnostic notice."
 
   - id: H2
     name: PostCompact 注入
@@ -987,7 +986,6 @@ segments:
     disableable: true
     consumer: governance-hook
     relatedFeature: null
-    _knownIssue: "Contains '向铲屎官汇报/商量处理方式' language. Should be downgraded to diagnostic notice."
 
   # ═══════════════════════════════════════════════════════════════
   # Legacy — excluded from active prompt path

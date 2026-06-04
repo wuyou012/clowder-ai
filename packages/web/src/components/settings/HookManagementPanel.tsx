@@ -28,7 +28,6 @@ const HOOK_SEGMENTS: HookSegment[] = [
     trigger: 'Session start',
     userExplanation: '开工自检——检查未提交的文档、未 push 的 commit、根目录杂物等，生成诊断通知',
     disableable: true,
-    knownIssue: '包含"向铲屎官汇报"语言，抢夺对话方向，应降级为纯诊断通知',
   },
   {
     id: 'H2',
@@ -45,7 +44,6 @@ const HOOK_SEGMENTS: HookSegment[] = [
     trigger: 'Session stop',
     userExplanation: '退出自检——验证 commit 和文档状态，仅用于退出治理通知',
     disableable: true,
-    knownIssue: '包含"向铲屎官汇报/商量处理方式"语言，应降级为纯诊断通知',
   },
 ];
 
