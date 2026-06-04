@@ -66,3 +66,4 @@ created: 2026-02-26
 | F208 | Capability Profile Routing — 能力画像档案 + 认知路由 | spec | Ragdoll | internal | [F208](features/F208-capability-profile-routing.md) |
 | F210 | Gemini CLI to Antigravity CLI Migration | in-progress | Maine Coon/Maine Coon | internal | [F210](features/F210-antigravity-cli-migration.md) |
 | F217 | Merge Gate Integrity — 检查覆盖 + 强制力 + 元守护（根治 6 类 gate 失效）| spec | Ragdoll Opus 4.8 | internal | [F217](features/F217-merge-gate-integrity.md) |
+| F219 | Prompt Injection Visibility — 52 段 prompt 注入可见化、可控、可编排 | in-progress | Ragdoll Opus 4.6 | internal | [F219](features/F219-prompt-injection-visibility.md) |
