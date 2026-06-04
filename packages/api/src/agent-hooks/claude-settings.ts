@@ -123,23 +123,22 @@ function managedCommandsAllHaveBashPrefix(settings: JsonObject, targetRoot: stri
   return true;
 }
 
-/** Check if event key exists in settings.hooks (even as empty array = intentionally disabled) */
-function eventKeyExists(settings: JsonObject, eventName: string): boolean {
-  const hooksRoot = settings.hooks;
-  if (!isJsonObject(hooksRoot)) return false;
-  return Array.isArray((hooksRoot as JsonObject)[eventName]);
+/**
+ * Explicit marker written by toggleClaudeHook when disabling a managed hook.
+ * A hookless entry `{ _catCafeDisabled: true }` survives withoutManagedHooks
+ * (no hooks array → pass-through) and is unambiguous: custom-only events
+ * (user has their own hooks, Cat Cafe never installed) won't have this marker.
+ */
+const CAT_CAFE_DISABLED_MARKER = '_catCafeDisabled';
+
+/** Positive identification: entry has the explicit disabled marker from toggle API */
+function isEventIntentionallyDisabled(settings: JsonObject, eventName: string): boolean {
+  return eventEntries(settings, eventName).some((entry) => entry[CAT_CAFE_DISABLED_MARKER] === true);
 }
 
-/** Check if event has ANY managed hook command (stale or current) */
-function eventHasAnyManagedHook(settings: JsonObject, eventName: string, targetRoot: string): boolean {
-  return eventEntries(settings, eventName).some((entry) =>
-    entryHooks(entry).some((hook) => hook.type === 'command' && isManagedHookCommand(hook.command, targetRoot)),
-  );
-}
-
-/** Event key present but no managed hooks = user intentionally disabled via toggle API */
-function isEventIntentionallyDisabled(settings: JsonObject, eventName: string, targetRoot: string): boolean {
-  return eventKeyExists(settings, eventName) && !eventHasAnyManagedHook(settings, eventName, targetRoot);
+/** Strip Cat Cafe disabled marker entries (used before re-adding managed hook or marker) */
+function withoutDisabledMarker(entries: JsonObject[]): JsonObject[] {
+  return entries.filter((entry) => entry[CAT_CAFE_DISABLED_MARKER] !== true);
 }
 
 function readJsonObject(path: string): JsonObject {
@@ -160,7 +159,7 @@ function checkManagedEventState(
 ): ManagedEventState {
   const command = expectedClaudeCommand(targetRoot, eventName);
   if (eventHasCommand(settings, eventName, command, targetRoot)) return 'ok';
-  if (isEventIntentionallyDisabled(settings, eventName, targetRoot)) return 'ok';
+  if (isEventIntentionallyDisabled(settings, eventName)) return 'ok';
   if (eventHasStaleManagedCommand(settings, eventName, command, targetRoot)) return 'stale';
   return 'missing';
 }
@@ -249,10 +248,12 @@ export async function toggleClaudeHook(
   const targetPath = join(targetRoot, '.claude', 'settings.json');
   const settings = readOptionalSettings(targetPath);
   const hooksRoot: JsonObject = isJsonObject(settings.hooks) ? (settings.hooks as JsonObject) : {};
-  const entries = withoutManagedHooks(eventEntries(settings, eventName), targetRoot);
+  const entries = withoutDisabledMarker(withoutManagedHooks(eventEntries(settings, eventName), targetRoot));
   if (enabled) {
     const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
     entries.push({ hooks: [{ type: 'command', command: `bash "${scriptPath}"` }] });
+  } else {
+    entries.push({ [CAT_CAFE_DISABLED_MARKER]: true });
   }
   hooksRoot[eventName] = entries;
   settings.hooks = hooksRoot;
@@ -290,9 +291,8 @@ export async function syncClaudeSettings(targetRoot: string): Promise<void> {
 
   for (const eventName of Object.keys(MANAGED_HOOKS) as Array<keyof typeof MANAGED_HOOKS>) {
     const entries = withoutManagedHooks(eventEntries(settings, eventName), targetRoot);
-    // Preserve intentional disables: event key present but no managed hooks
-    // means user toggled it off — don't re-enable during sync
-    if (isEventIntentionallyDisabled(settings, eventName, targetRoot)) {
+    // Preserve intentional disables: explicit _catCafeDisabled marker from toggle API
+    if (isEventIntentionallyDisabled(settings, eventName)) {
       hooksRoot[eventName] = entries;
     } else {
       const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
