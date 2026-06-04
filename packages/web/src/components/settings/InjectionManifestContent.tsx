@@ -9,7 +9,9 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useCatData } from '@/hooks/useCatData';
 import { apiFetch } from '@/utils/api-client';
+import { CatDimensionSelector, isSegmentActiveForCat } from './CatDimensionSelector';
 import { HookManagementPanel } from './HookManagementPanel';
 import { SettingsBadge, SettingsCollapsibleCard, SettingsSection, SettingsText } from './primitives';
 import { SegmentEditor } from './SegmentEditor';
@@ -92,6 +94,9 @@ const GOVERNANCE_TIER_BADGE: Record<string, { label: string; tone: GovernanceTon
 export function InjectionManifestContent() {
   const [data, setData] = useState<ManifestResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectedCatId, setSelectedCatId] = useState<string | null>(null);
+  const { cats } = useCatData();
+  const selectedCat = cats.find((c) => c.id === selectedCatId);
 
   useEffect(() => {
     let cancelled = false;
@@ -157,6 +162,7 @@ export function InjectionManifestContent() {
         }
       >
         <TierLegend />
+        <CatDimensionSelector selected={selectedCatId} onSelect={setSelectedCatId} />
       </SettingsSection>
 
       {/* Per-category collapsible groups */}
@@ -164,7 +170,13 @@ export function InjectionManifestContent() {
         group.category === 'hook' ? (
           <HookCategoryGroup key="hook" label={group.label} count={group.segments.length} />
         ) : (
-          <CategoryGroup key={group.category} label={group.label} segments={group.segments} />
+          <CategoryGroup
+            key={group.category}
+            label={group.label}
+            segments={group.segments}
+            catBreed={selectedCat?.breedId}
+            catProvider={selectedCat?.provider}
+          />
         ),
       )}
     </div>
@@ -216,30 +228,49 @@ function HookCategoryGroup({ label, count }: { label: string; count: number }) {
   );
 }
 
-function CategoryGroup({ label, segments }: { label: string; segments: ManifestSegment[] }) {
+function CategoryGroup({
+  label,
+  segments,
+  catBreed,
+  catProvider,
+}: {
+  label: string;
+  segments: ManifestSegment[];
+  catBreed?: string;
+  catProvider?: string;
+}) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <SettingsCollapsibleCard title={label} count={segments.length} collapsed={collapsed} onToggle={setCollapsed}>
       <div className="space-y-2">
         {segments.map((seg) => (
-          <SegmentRow key={seg.id} segment={seg} />
+          <SegmentRow key={seg.id} segment={seg} catBreed={catBreed} catProvider={catProvider} />
         ))}
       </div>
     </SettingsCollapsibleCard>
   );
 }
 
-function SegmentRow({ segment: s }: { segment: ManifestSegment }) {
+function SegmentRow({
+  segment: s,
+  catBreed,
+  catProvider,
+}: {
+  segment: ManifestSegment;
+  catBreed?: string;
+  catProvider?: string;
+}) {
   const [editorOpen, setEditorOpen] = useState(false);
   const safety = SAFETY_TIER_BADGE[s.safetyTier];
   const governance = GOVERNANCE_TIER_BADGE[s.governanceTier];
   const isTemplate = s.sourceType === 'template';
+  const isActive = !catBreed || isSegmentActiveForCat(s.trigger, catBreed, catProvider);
 
   return (
     <div>
       <div
-        className="flex items-start gap-3 rounded-lg px-3 py-2"
-        style={{ backgroundColor: 'var(--console-panel-bg)' }}
+        className="flex items-start gap-3 rounded-lg px-3 py-2 transition-opacity"
+        style={{ backgroundColor: 'var(--console-panel-bg)', opacity: isActive ? 1 : 0.4 }}
       >
         {/* ID badge */}
         <SettingsText as="span" variant="xs" tone="muted" className="mt-0.5 w-8 shrink-0 font-mono">
