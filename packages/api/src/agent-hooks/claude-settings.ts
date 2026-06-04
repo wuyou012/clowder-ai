@@ -209,6 +209,28 @@ function withoutManagedHooks(entries: JsonObject[], targetRoot: string): JsonObj
   });
 }
 
+export type ManagedHookEvent = keyof typeof MANAGED_HOOKS;
+
+/** Toggle a single managed hook on/off in ~/.claude/settings.json */
+export async function toggleClaudeHook(
+  targetRoot: string,
+  eventName: ManagedHookEvent,
+  enabled: boolean,
+): Promise<void> {
+  const targetPath = join(targetRoot, '.claude', 'settings.json');
+  const settings = readOptionalSettings(targetPath);
+  const hooksRoot: JsonObject = isJsonObject(settings.hooks) ? (settings.hooks as JsonObject) : {};
+  const entries = withoutManagedHooks(eventEntries(settings, eventName), targetRoot);
+  if (enabled) {
+    const scriptPath = expectedClaudeCommand(targetRoot, eventName).replace(/\\/g, '/');
+    entries.push({ hooks: [{ type: 'command', command: `bash "${scriptPath}"` }] });
+  }
+  hooksRoot[eventName] = entries;
+  settings.hooks = hooksRoot;
+  await mkdir(dirname(targetPath), { recursive: true });
+  writeFileSync(targetPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf-8');
+}
+
 export async function syncClaudeSettings(targetRoot: string): Promise<void> {
   const targetPath = join(targetRoot, '.claude', 'settings.json');
   const settings = readOptionalSettings(targetPath);

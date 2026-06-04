@@ -21,6 +21,7 @@ interface ContentResponse {
   segmentId: string;
   allowLocalOverride: boolean;
   hasOverride: boolean;
+  hasBackup: boolean;
   content: string;
   baseContent: string;
   vars: string[];
@@ -120,6 +121,26 @@ export function SegmentEditor({ segmentId, segmentName, allowLocalOverride, onCl
     }
   }, [segmentId, fetchContent]);
 
+  const handleRestoreBackup = useCallback(async () => {
+    setError(null);
+    setSaveMsg(null);
+    try {
+      const res = await apiFetch(`/api/prompt-injection/segment/${segmentId}/restore-backup`, {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const payload = (await res.json()) as { error?: string };
+        setError(payload.error ?? '恢复失败');
+        return;
+      }
+      setSaveMsg('已恢复上一版');
+      setPreview(null);
+      await fetchContent();
+    } catch {
+      setError('恢复请求失败');
+    }
+  }, [segmentId, fetchContent]);
+
   const isReadonly = !allowLocalOverride;
   const isDirty = data ? draft !== data.content : false;
 
@@ -213,6 +234,9 @@ export function SegmentEditor({ segmentId, segmentName, allowLocalOverride, onCl
                 {saving ? '保存中...' : '保存覆盖'}
               </SettingsPrimaryButton>
               {data.hasOverride && <SettingsSecondaryButton onClick={handleReset}>恢复默认</SettingsSecondaryButton>}
+              {data.hasBackup && (
+                <SettingsSecondaryButton onClick={handleRestoreBackup}>恢复上一版</SettingsSecondaryButton>
+              )}
             </div>
           )}
         </>

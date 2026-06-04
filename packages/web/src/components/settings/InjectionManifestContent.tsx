@@ -175,7 +175,7 @@ export function InjectionManifestContent() {
             label={group.label}
             segments={group.segments}
             catBreed={selectedCat?.breedId}
-            catProvider={selectedCat?.provider}
+            catClientId={selectedCat?.clientId}
           />
         ),
       )}
@@ -232,12 +232,12 @@ function CategoryGroup({
   label,
   segments,
   catBreed,
-  catProvider,
+  catClientId,
 }: {
   label: string;
   segments: ManifestSegment[];
   catBreed?: string;
-  catProvider?: string;
+  catClientId?: string;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
@@ -249,7 +249,7 @@ function CategoryGroup({
     >
       <div className="space-y-2">
         {segments.map((seg) => (
-          <SegmentRow key={seg.id} segment={seg} catBreed={catBreed} catProvider={catProvider} />
+          <SegmentRow key={seg.id} segment={seg} catBreed={catBreed} catClientId={catClientId} />
         ))}
       </div>
     </SettingsCollapsibleCard>
@@ -259,17 +259,17 @@ function CategoryGroup({
 function SegmentRow({
   segment: s,
   catBreed,
-  catProvider,
+  catClientId,
 }: {
   segment: ManifestSegment;
   catBreed?: string;
-  catProvider?: string;
+  catClientId?: string;
 }) {
   const [editorOpen, setEditorOpen] = useState(false);
   const safety = SAFETY_TIER_BADGE[s.safetyTier];
   const governance = GOVERNANCE_TIER_BADGE[s.governanceTier];
   const isTemplate = s.sourceType === 'template';
-  const isActive = !catBreed || isSegmentActiveForCat(s.trigger, catBreed, catProvider);
+  const isActive = !catBreed || isSegmentActiveForCat(s.trigger, catBreed, catClientId);
 
   return (
     <div>

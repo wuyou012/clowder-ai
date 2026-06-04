@@ -52,32 +52,30 @@ export function CatDimensionSelector({ onSelect, selected }: CatDimensionSelecto
 /**
  * Determine if a segment would be active for a given cat.
  * Uses heuristic matching based on trigger conditions in the manifest.
+ * @param catClientId — CLI client identity (anthropic/openai/google/etc.)
  */
 export function isSegmentActiveForCat(
   trigger: string,
   catBreed: string | undefined,
-  catProvider: string | undefined,
+  catClientId: string | undefined,
 ): boolean {
   const t = trigger.toLowerCase();
 
   // Always-on segments
   if (t === 'always' || t === 'session start' || t === 'session stop') return true;
 
-  // MCP segments: Claude-only
+  // MCP segments: check by clientId (MCP-supporting clients per hub-cat-editor.protocols.ts)
   if (t.includes('mcpavailable') || t.includes('mcp')) {
-    return catProvider === 'anthropic' || catProvider === 'claude';
+    if (!catClientId) return true; // no filter = assume active
+    const MCP_CLIENTS = new Set(['anthropic', 'openai', 'google', 'kimi', 'opencode', 'antigravity']);
+    return MCP_CLIENTS.has(catClientId);
   }
 
   // Breed-specific workflow triggers
-  if (t.includes('workflow_triggers') || t.includes('breedid')) {
-    // Active for all breeds that have triggers defined
-    return true;
-  }
+  if (t.includes('workflow_triggers') || t.includes('breedid')) return true;
 
   // A2A segments: active when not parallel
-  if (t.includes('a2aenabled') || t.includes("mode !== 'parallel'")) {
-    return true; // A2A is typically enabled
-  }
+  if (t.includes('a2aenabled') || t.includes("mode !== 'parallel'")) return true;
 
   // Default: assume active
   return true;

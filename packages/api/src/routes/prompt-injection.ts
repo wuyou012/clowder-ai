@@ -74,11 +74,14 @@ export const promptInjectionRoutes: FastifyPluginAsync = async (app) => {
     const status = getOverrideStatus(id);
     const content = getTemplateRawContent(id, true);
     const baseContent = status?.hasOverride ? getTemplateRawContent(id, false) : content;
+    const fileInfo = getTemplateFileInfo(id);
+    const hasBackup = fileInfo ? existsSync(join(TEMPLATES_DIR, `${fileInfo.local}.bak`)) : false;
 
     return {
       segmentId: id,
       allowLocalOverride: meta.allowLocalOverride,
       hasOverride: status?.hasOverride ?? false,
+      hasBackup,
       content: content ?? '',
       baseContent: baseContent ?? '',
       vars: meta.vars,
@@ -220,5 +223,39 @@ export const promptInjectionRoutes: FastifyPluginAsync = async (app) => {
       return { segmentId: id, deleted: true };
     }
     return { segmentId: id, deleted: false, reason: 'No override file exists' };
+  });
+
+  /**
+   * POST /api/prompt-injection/segment/:id/restore-backup
+   * Restore .local from .local.bak (one-click rollback to previous version).
+   */
+  app.post<{ Params: { id: string } }>('/api/prompt-injection/segment/:id/restore-backup', async (request, reply) => {
+    if (!resolveUserId(request)) {
+      reply.status(401);
+      return { error: 'Authentication required' };
+    }
+    const { id } = request.params;
+    const meta = EDITABLE_SEGMENTS[id];
+    if (!meta) {
+      reply.status(404);
+      return { error: `Segment ${id} is not template-backed` };
+    }
+    if (!meta.allowLocalOverride) {
+      reply.status(403);
+      return { error: `Segment ${id} is readonly` };
+    }
+    const fileInfo = getTemplateFileInfo(id);
+    if (!fileInfo?.local) {
+      reply.status(500);
+      return { error: 'Template file info not found' };
+    }
+    const bakPath = join(TEMPLATES_DIR, `${fileInfo.local}.bak`);
+    if (!existsSync(bakPath)) {
+      reply.status(404);
+      return { error: 'No backup file exists' };
+    }
+    const localPath = join(TEMPLATES_DIR, fileInfo.local);
+    copyFileSync(bakPath, localPath);
+    return { segmentId: id, restored: true };
   });
 };
