@@ -1,14 +1,16 @@
 'use client';
 
 /**
- * F219 Checkpoint A — Read-only injection manifest viewer.
+ * F219 Checkpoints A+C — Injection manifest viewer + overlay editor.
  * Fetches manifest from GET /api/prompt-injection/manifest and displays
  * all segments grouped by category with safety tier badges.
+ * Template-backed segments support inline editing (Checkpoint C).
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
 import { SettingsBadge, SettingsCollapsibleCard, SettingsSection, SettingsText } from './primitives';
+import { SegmentEditor } from './SegmentEditor';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -31,7 +33,6 @@ interface ManifestSegment {
   consumer: string;
   relatedFeature: string | null;
   _knownIssue?: string;
-  _templateTarget?: string;
   _status?: string;
 }
 
@@ -214,55 +215,81 @@ function CategoryGroup({ label, segments }: { label: string; segments: ManifestS
 }
 
 function SegmentRow({ segment: s }: { segment: ManifestSegment }) {
+  const [editorOpen, setEditorOpen] = useState(false);
   const safety = SAFETY_TIER_BADGE[s.safetyTier];
   const governance = GOVERNANCE_TIER_BADGE[s.governanceTier];
+  const isTemplate = s.sourceType === 'template';
 
   return (
-    <div className="flex items-start gap-3 rounded-lg px-3 py-2" style={{ backgroundColor: 'var(--console-panel-bg)' }}>
-      {/* ID badge */}
-      <SettingsText as="span" variant="xs" tone="muted" className="mt-0.5 w-8 shrink-0 font-mono">
-        {s.id}
-      </SettingsText>
-
-      {/* Content */}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <SettingsText as="span" variant="sm" tone="default" className="font-medium">
-            {s.name}
-          </SettingsText>
-          {safety && (
-            <SettingsBadge tone={safety.tone} size="xxs">
-              {safety.label}
-            </SettingsBadge>
-          )}
-          {governance && (
-            <SettingsBadge tone={governance.tone} size="xxs">
-              {governance.label}
-            </SettingsBadge>
-          )}
-          {s._knownIssue && (
-            <SettingsBadge tone="amber" size="xxs">
-              已知问题
-            </SettingsBadge>
-          )}
-        </div>
-        <SettingsText as="p" variant="xs" tone="secondary" className="mt-0.5">
-          {s.userExplanation}
+    <div>
+      <div
+        className="flex items-start gap-3 rounded-lg px-3 py-2"
+        style={{ backgroundColor: 'var(--console-panel-bg)' }}
+      >
+        {/* ID badge */}
+        <SettingsText as="span" variant="xs" tone="muted" className="mt-0.5 w-8 shrink-0 font-mono">
+          {s.id}
         </SettingsText>
-        <div className="mt-1 flex flex-wrap gap-3">
-          <SettingsText as="span" variant="xs" tone="muted">
-            {s.lifecycleStage}
-          </SettingsText>
-          <SettingsText as="span" variant="xs" tone="muted">
-            {s.sourceType}
-          </SettingsText>
-          {s.relatedFeature && (
-            <SettingsText as="span" variant="xs" tone="muted">
-              {s.relatedFeature}
+
+        {/* Content */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <SettingsText as="span" variant="sm" tone="default" className="font-medium">
+              {s.name}
             </SettingsText>
-          )}
+            {safety && (
+              <SettingsBadge tone={safety.tone} size="xxs">
+                {safety.label}
+              </SettingsBadge>
+            )}
+            {governance && (
+              <SettingsBadge tone={governance.tone} size="xxs">
+                {governance.label}
+              </SettingsBadge>
+            )}
+            {s._knownIssue && (
+              <SettingsBadge tone="amber" size="xxs">
+                已知问题
+              </SettingsBadge>
+            )}
+            {isTemplate && (
+              <button
+                type="button"
+                className="ml-auto text-xs opacity-50 hover:opacity-100"
+                onClick={() => setEditorOpen(!editorOpen)}
+              >
+                {editorOpen ? '收起' : s.allowLocalOverride ? '编辑' : '查看'}
+              </button>
+            )}
+          </div>
+          <SettingsText as="p" variant="xs" tone="secondary" className="mt-0.5">
+            {s.userExplanation}
+          </SettingsText>
+          <div className="mt-1 flex flex-wrap gap-3">
+            <SettingsText as="span" variant="xs" tone="muted">
+              {s.lifecycleStage}
+            </SettingsText>
+            <SettingsText as="span" variant="xs" tone="muted">
+              {s.sourceType}
+            </SettingsText>
+            {s.relatedFeature && (
+              <SettingsText as="span" variant="xs" tone="muted">
+                {s.relatedFeature}
+              </SettingsText>
+            )}
+          </div>
         </div>
       </div>
+      {editorOpen && (
+        <div className="mt-2 pl-11">
+          <SegmentEditor
+            segmentId={s.id}
+            segmentName={s.name}
+            allowLocalOverride={s.allowLocalOverride}
+            onClose={() => setEditorOpen(false)}
+          />
+        </div>
+      )}
     </div>
   );
 }

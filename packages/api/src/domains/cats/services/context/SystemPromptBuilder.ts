@@ -284,8 +284,11 @@ const PROVIDER_LABELS: Record<string, string> = {
  * @segment S13 — MCP tools section (loaded from template)
  * Skills-as-source-of-truth: MCP tools section is minimal.
  * Full specs live in cat-cafe-skills/refs/ (rich-blocks.md, mcp-callbacks.md).
+ * Lazy-evaluated to pick up .local overlay changes (F219 Checkpoint C).
  */
-const MCP_TOOLS_SECTION = `\n${loadMcpToolsSection({ RICH_BLOCK_SHORT })}`;
+function getMcpToolsSection(): string {
+  return `\n${loadMcpToolsSection({ RICH_BLOCK_SHORT })}`;
+}
 
 // --- shared-rules.md → compiled governance L0 support (#747) ---
 let _governanceDigestResolved = loadCompiledGovernanceL0Sync().content;
@@ -308,8 +311,11 @@ export function getGovernanceDigest(): string {
 }
 
 /** @segment S6 — Per-breed workflow triggers (loaded from template)
- *  Keyed by breedId so all variants of a breed share the same workflow. */
-const WORKFLOW_TRIGGERS: Record<string, string> = loadWorkflowTriggers();
+ *  Keyed by breedId so all variants of a breed share the same workflow.
+ *  Lazy-evaluated to pick up .local overlay changes (F219 Checkpoint C). */
+function getWorkflowTriggers(): Record<string, string> {
+  return loadWorkflowTriggers();
+}
 
 /**
  * F-Ground-3: Build teammate roster table.
@@ -368,7 +374,7 @@ function buildTeammateRoster(currentCatId: CatId): string | null {
 export interface StaticIdentityOptions {
   /**
    * Whether native MCP tools are available (Claude with --mcp-config).
-   * When true, MCP_TOOLS_SECTION is included in static identity because
+   * When true, getMcpToolsSection() is included in static identity because
    * Claude's --append-system-prompt survives context compression.
    *
    * Non-Claude cats (Codex/Gemini) use HTTP callback instructions which
@@ -460,7 +466,8 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
 
   /* @segment S6 — 工作流触发点 */
   // Per-breed workflow triggers (fallback to catId for legacy configs without breedId)
-  const triggers = WORKFLOW_TRIGGERS[config.breedId ?? ''] ?? WORKFLOW_TRIGGERS[catId as string];
+  const wfTriggers = getWorkflowTriggers();
+  const triggers = wfTriggers[config.breedId ?? ''] ?? wfTriggers[catId as string];
   if (triggers) {
     lines.push(triggers, '');
   }
@@ -508,7 +515,7 @@ export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOption
   // Non-Claude cats (Codex/Gemini) inject HTTP callback instructions per-message
   // because their systemPrompt lives in session history and may be lost on compression.
   if (options?.mcpAvailable) {
-    lines.push('', MCP_TOOLS_SECTION.trim());
+    lines.push('', getMcpToolsSection().trim());
   }
 
   return lines.join('\n');
