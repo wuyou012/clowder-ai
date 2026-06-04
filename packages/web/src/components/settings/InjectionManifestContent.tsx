@@ -1,14 +1,16 @@
 'use client';
 
 /**
- * F219 Checkpoints A+C — Injection manifest viewer + overlay editor.
+ * F219 Checkpoints A+C+D — Injection manifest viewer + overlay editor + hook panel.
  * Fetches manifest from GET /api/prompt-injection/manifest and displays
  * all segments grouped by category with safety tier badges.
  * Template-backed segments support inline editing (Checkpoint C).
+ * Hook category shows dedicated management panel (Checkpoint D).
  */
 
 import { useEffect, useMemo, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
+import { HookManagementPanel } from './HookManagementPanel';
 import { SettingsBadge, SettingsCollapsibleCard, SettingsSection, SettingsText } from './primitives';
 import { SegmentEditor } from './SegmentEditor';
 
@@ -158,9 +160,13 @@ export function InjectionManifestContent() {
       </SettingsSection>
 
       {/* Per-category collapsible groups */}
-      {grouped.map((group) => (
-        <CategoryGroup key={group.category} label={group.label} segments={group.segments} />
-      ))}
+      {grouped.map((group) =>
+        group.category === 'hook' ? (
+          <HookCategoryGroup key="hook" label={group.label} count={group.segments.length} />
+        ) : (
+          <CategoryGroup key={group.category} label={group.label} segments={group.segments} />
+        ),
+      )}
     </div>
   );
 }
@@ -198,6 +204,15 @@ function TierLegend() {
         </div>
       </div>
     </div>
+  );
+}
+
+function HookCategoryGroup({ label, count }: { label: string; count: number }) {
+  const [collapsed, setCollapsed] = useState(false);
+  return (
+    <SettingsCollapsibleCard title={label} count={count} collapsed={collapsed} onToggle={setCollapsed}>
+      <HookManagementPanel />
+    </SettingsCollapsibleCard>
   );
 }
 
