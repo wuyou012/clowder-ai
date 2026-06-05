@@ -61,6 +61,13 @@ export function isAgyTrustDialog(value: string): boolean {
   return stripAgyAnsi(value).includes('Do you trust the contents of this project');
 }
 
+export function isAgyCliLogReady(value: string): boolean {
+  return (
+    value.includes('CLI ready for user input') &&
+    /Propagating selected model override to backend: label=/.test(value)
+  );
+}
+
 export function extractAgyConversationId(value: string): string | null {
   const matches = [...value.matchAll(/\b(?:Created|Streaming) conversation ([0-9a-f-]{36})\b/gi)];
   return matches.length > 0 ? matches[matches.length - 1]?.[1] ?? null : null;
@@ -100,7 +107,12 @@ function statSize(path: string): number {
 function readFromOffset(path: string, offset: number): string {
   if (!existsSync(path)) return '';
   const raw = readFileSync(path);
-  return (offset > 0 ? raw.subarray(offset) : raw).toString('utf8');
+  // AGY can truncate and rewrite cli.log on startup; if the prior offset is
+  // past the new file size, read the new log from the beginning.
+  if (offset > 0 && offset <= raw.length) {
+    return raw.subarray(offset).toString('utf8');
+  }
+  return raw.toString('utf8');
 }
 
 function agyTranscriptPath(conversationId: string, brainRoot: string): string {
@@ -121,7 +133,14 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function waitForReady(term: IPty, signal: AbortSignal | undefined, timeoutMs: number): Promise<boolean> {
+async function waitForReady(
+  term: IPty,
+  cliLogPath: string,
+  initialCliLogOffset: number,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  pollIntervalMs: number,
+): Promise<boolean> {
   let output = '';
   let trustConfirmed = false;
   const disposable = term.onData((data) => {
@@ -131,7 +150,8 @@ async function waitForReady(term: IPty, signal: AbortSignal | undefined, timeout
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (signal?.aborted) return false;
-      if (isAgyReadyPrompt(output)) {
+      const cliLogText = readFromOffset(cliLogPath, initialCliLogOffset);
+      if (isAgyReadyPrompt(output) || isAgyCliLogReady(cliLogText)) {
         await sleep(READY_SETTLE_MS, signal);
         return !signal?.aborted;
       }
@@ -144,7 +164,7 @@ async function waitForReady(term: IPty, signal: AbortSignal | undefined, timeout
         trustConfirmed = true;
         term.write('\r');
       }
-      await sleep(POLL_INTERVAL_MS, signal);
+      await sleep(pollIntervalMs, signal);
     }
     return false;
   } finally {
@@ -296,12 +316,36 @@ export async function* invokeAgyPty(
       ptyExit = event;
     });
 
-    const ready = await waitForReady(term, options?.signal, readyTimeoutMs);
+    const ready = await waitForReady(
+      term,
+      cliLogPath,
+      initialCliLogOffset,
+      options?.signal,
+      readyTimeoutMs,
+      pollIntervalMs,
+    );
     if (options?.signal?.aborted) {
       yield { type: 'done', catId, metadata, timestamp: Date.now() };
       return;
     }
     if (!ready) {
+      const agyLogText = readFromOffset(cliLogPath, initialCliLogOffset);
+      const logClassification = classifyAntigravityCliPlainText({
+        stdout: '',
+        agyLogText,
+      });
+      if (logClassification.kind === 'error') {
+        yield {
+          type: 'error',
+          catId,
+          error: logClassification.error,
+          metadata,
+          timestamp: Date.now(),
+        };
+        yield { type: 'done', catId, metadata, timestamp: Date.now() };
+        return;
+      }
+
       yield {
         type: 'error',
         catId,

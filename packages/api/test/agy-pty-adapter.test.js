@@ -8,6 +8,7 @@ import {
   extractAgyConversationId,
   extractAgyPlannerResponse,
   invokeAgyPty,
+  isAgyCliLogReady,
   isAgyReadyPrompt,
   isAgyTrustDialog,
   stripAgyAnsi,
@@ -94,6 +95,20 @@ test('agy pty helpers strip ANSI terminal control sequences', () => {
   assert.equal(isAgyReadyPrompt('\u001b[?25h\n> '), true);
 });
 
+test('agy pty helpers detect cli.log ready signal', () => {
+  assert.equal(isAgyCliLogReady('CLI ready for user input (startup took 4.6724ms)'), false);
+  assert.equal(
+    isAgyCliLogReady(
+      [
+        'CLI ready for user input (startup took 4.6724ms)',
+        'Propagating selected model override to backend: label="Gemini 3.5 Flash (Medium)"',
+      ].join('\n'),
+    ),
+    true,
+  );
+  assert.equal(isAgyCliLogReady('Starting CLI program'), false);
+});
+
 test('agy pty helpers read the latest conversation id from cli.log text', () => {
   const first = '11111111-1111-4111-8111-111111111111';
   const second = '22222222-2222-4222-8222-222222222222';
@@ -141,6 +156,131 @@ test('invokeAgyPty yields error and done when PTY never becomes ready', async ()
   assert.match(msgs[0]?.error ?? '', /PTY/);
   assert.equal(msgs.at(-1)?.type, 'done');
   assert.equal(fakePty.term.kill.mock.callCount(), 1);
+});
+
+test('invokeAgyPty proceeds when cli.log reports ready without PTY prompt', async () => {
+  const paths = createAgyTempPaths();
+  const conversationId = '77777777-7777-4777-8777-777777777777';
+  const fakePty = createFakePtySpawn({
+    onWrite(data) {
+      if (data.startsWith('\x1b[200~')) {
+        writeFileSync(
+          paths.cliLogPath,
+          [
+            'CLI ready for user input (startup took 4.6724ms)',
+            'Propagating selected model override to backend: label="Gemini 3.5 Flash (Medium)"',
+            `2026-06-04T00:00:00Z Streaming conversation ${conversationId}`,
+          ].join('\n'),
+        );
+        writePlannerTranscript(paths.brainRoot, conversationId, 'ready from cli log');
+      }
+    },
+  });
+
+  setTimeout(() => {
+    writeFileSync(
+      paths.cliLogPath,
+      [
+        'CLI ready for user input (startup took 4.6724ms)',
+        'Propagating selected model override to backend: label="Gemini 3.5 Flash (Medium)"',
+      ].join('\n'),
+    );
+  }, 5);
+
+  const msgs = await collect(
+    invokeAgyPty('who are you', 'gemini', {
+      ...paths,
+      ptySpawn: fakePty.spawn,
+      readyTimeoutMs: 1_000,
+      timeoutMs: 100,
+      pollIntervalMs: 5,
+    }),
+  );
+
+  assert.equal(msgs[0]?.type, 'session_init');
+  assert.equal(msgs[0]?.sessionId, conversationId);
+  assert.equal(msgs[1]?.type, 'text');
+  assert.equal(msgs[1]?.content, 'ready from cli log');
+  assert.equal(msgs.at(-1)?.type, 'done');
+});
+
+test('invokeAgyPty handles cli.log truncation before ready signal', async () => {
+  const paths = createAgyTempPaths();
+  const conversationId = '88888888-8888-4888-8888-888888888888';
+  writeFileSync(paths.cliLogPath, 'old log line\n'.repeat(200));
+
+  const fakePty = createFakePtySpawn({
+    onWrite(data) {
+      if (data.startsWith('\x1b[200~')) {
+        writeFileSync(
+          paths.cliLogPath,
+          [
+            'CLI ready for user input (startup took 4.6724ms)',
+            'Propagating selected model override to backend: label="Gemini 3.5 Flash (Medium)"',
+            `2026-06-04T00:00:00Z Streaming conversation ${conversationId}`,
+          ].join('\n'),
+        );
+        writePlannerTranscript(paths.brainRoot, conversationId, 'ready after log truncation');
+      }
+    },
+  });
+
+  setTimeout(() => {
+    writeFileSync(
+      paths.cliLogPath,
+      [
+        'CLI ready for user input (startup took 4.6724ms)',
+        'Propagating selected model override to backend: label="Gemini 3.5 Flash (Medium)"',
+      ].join('\n'),
+    );
+  }, 5);
+
+  const msgs = await collect(
+    invokeAgyPty('who are you', 'gemini', {
+      ...paths,
+      ptySpawn: fakePty.spawn,
+      readyTimeoutMs: 1_000,
+      timeoutMs: 100,
+      pollIntervalMs: 5,
+    }),
+  );
+
+  assert.equal(msgs[0]?.type, 'session_init');
+  assert.equal(msgs[0]?.sessionId, conversationId);
+  assert.equal(msgs[1]?.type, 'text');
+  assert.equal(msgs[1]?.content, 'ready after log truncation');
+  assert.equal(msgs.at(-1)?.type, 'done');
+});
+
+test('invokeAgyPty classifies cli.log diagnostics when ready times out', async () => {
+  const paths = createAgyTempPaths();
+  const fakePty = createFakePtySpawn();
+
+  setTimeout(() => {
+    writeFileSync(
+      paths.cliLogPath,
+      [
+        'Authentication required. Please visit the URL to log in:',
+        'https://accounts.google.com/o/oauth2/auth?client_id=test',
+        'Waiting for authentication (timeout 60s)...',
+        'Error: authentication interrupted.',
+      ].join('\n'),
+    );
+  }, 5);
+
+  const msgs = await collect(
+    invokeAgyPty('who are you', 'gemini', {
+      ...paths,
+      ptySpawn: fakePty.spawn,
+      readyTimeoutMs: 30,
+      timeoutMs: 20,
+      pollIntervalMs: 5,
+    }),
+  );
+
+  assert.equal(msgs[0]?.type, 'error');
+  assert.match(msgs[0]?.error ?? '', /not authenticated/i);
+  assert.equal(msgs.at(-1)?.type, 'done');
 });
 
 test('invokeAgyPty yields error and done when cli.log has no conversation id', async () => {
