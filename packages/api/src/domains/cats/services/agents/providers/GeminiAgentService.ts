@@ -42,6 +42,7 @@ import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, 
 import { appendLocalImagePathHints, collectImageAccessDirectories } from '../providers/image-cli-bridge.js';
 import { extractImagePaths } from '../providers/image-paths.js';
 import { type AgyProfile, preflightAgyProfile, resolveAgyProfile } from './agy-profile-manager.js';
+import { invokeAgyPty } from './agy-pty-adapter.js';
 import {
   classifyAntigravityCliPlainText,
   extractAntigravityCliConversationId,
@@ -51,8 +52,8 @@ import { isKnownPostResponseCandidatesCrash, isResultErrorEvent, transformGemini
 
 const log = createModuleLogger('gemini-agent');
 
-type GeminiAdapter = 'gemini-cli' | 'antigravity-cli' | 'antigravity';
-const DEFAULT_GEMINI_ADAPTER: GeminiAdapter = 'antigravity-cli';
+type GeminiAdapter = 'gemini-cli' | 'antigravity-cli' | 'antigravity' | 'agy-pty';
+const DEFAULT_GEMINI_ADAPTER: GeminiAdapter = 'agy-pty';
 
 interface GeminiStoredThought {
   readonly subject?: string;
@@ -386,7 +387,7 @@ export class GeminiAgentService implements AgentService {
   private readonly spawnFn: SpawnFn | undefined;
   private readonly model: string;
   private readonly antigravitySpawnFn: typeof nodeSpawn;
-  private readonly adapter: GeminiAdapter;
+  readonly adapter: GeminiAdapter;
   private readonly agyProfileConfig: AgyProfileConfig | undefined;
   constructor(options?: GeminiAgentServiceOptions) {
     this.catId = options?.catId ?? createCatId('gemini');
@@ -403,6 +404,8 @@ export class GeminiAgentService implements AgentService {
       yield* this.invokeAntigravity(prompt, options);
     } else if (this.adapter === 'antigravity-cli') {
       yield* this.invokeAntigravityCLI(prompt, options);
+    } else if (this.adapter === 'agy-pty') {
+      yield* invokeAgyPty(prompt, this.catId, options);
     } else {
       yield* this.invokeGeminiCLI(prompt, options);
     }
@@ -810,9 +813,18 @@ export class GeminiAgentService implements AgentService {
         }
       }
 
+      // Always forward proxy env vars so agy can reach googleapis.com through the system proxy.
+      // Go binaries (agy) read HTTP_PROXY/HTTPS_PROXY from env, not from WinHTTP.
+      const proxyEnv: Record<string, string> = {};
+      for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy']) {
+        const val = process.env[key];
+        if (val) proxyEnv[key] = val;
+      }
+      const hasProxyEnv = Object.keys(proxyEnv).length > 0;
       const childEnv =
-        options?.callbackEnv || options?.accountEnv || agyProfile
+        options?.callbackEnv || options?.accountEnv || agyProfile || hasProxyEnv
           ? {
+              ...proxyEnv,
               ...(options?.callbackEnv ?? {}),
               ...(options?.accountEnv ?? {}),
               ...(agyProfile ? { HOME: agyProfile.homePath } : {}),

@@ -1125,8 +1125,8 @@ export const ENV_VARS: EnvDefinition[] = [
   },
   {
     name: 'GEMINI_ADAPTER',
-    defaultValue: 'antigravity-cli',
-    description: '暹罗猫适配器 (antigravity-cli/gemini-cli/antigravity)',
+    defaultValue: 'agy-pty',
+    description: '暹罗猫适配器 (agy-pty/antigravity-cli/gemini-cli/antigravity)',
     category: 'gemini',
     sensitive: false,
   },

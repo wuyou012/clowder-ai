@@ -1,4 +1,4 @@
-Command:
+﻿Command:
 /tmp/cat-cafe-f210-agy-recon/bin/agy \
   --log-file /tmp/cat-cafe-f210-agy-headless-spike-real-home.log \
   --print-timeout 20s \
@@ -23,11 +23,6 @@ I... Print mode: silent auth succeeded
 I... Starting new conversation (agent=false)
 I... Created conversation [REDACTED_CONVERSATION_ID]
 I... Print mode: conversation=[REDACTED_CONVERSATION_ID], sending message
-
-Post-run file checks:
-- ~/.gemini/antigravity-cli/settings.json still did not exist after the run.
-- ~/.gemini/antigravity-cli/cache/last_conversations.json recorded the new conversation.
-- ~/.gemini/config/projects/[REDACTED_PROJECT_ID].json was created and symlinked from .antigravitycli/.
 
 Notes:
 - Successful print-mode stdout is plain final text, not JSON or NDJSON.

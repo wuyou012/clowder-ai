@@ -27,7 +27,6 @@ import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
-import { sanitizeCliStderr } from '../../../../../utils/sanitize-cli-stderr.js';
 import { AuditEventTypes, getEventAuditLog } from '../../orchestration/EventAuditLog.js';
 import { CliRawArchive } from '../../session/CliRawArchive.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, TokenUsage } from '../../types.js';
@@ -43,16 +42,6 @@ import { extractImagePaths } from '../providers/image-paths.js';
 import { compileL0ViaSubprocess } from './l0-compiler.js';
 
 const log = createModuleLogger('codex-agent');
-
-/** Redact a custom base URL for diagnostic logging — expose protocol+host only. */
-function redactUrlForLog(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return `${parsed.protocol}//${parsed.host}`;
-  } catch {
-    return '[invalid-url]';
-  }
-}
 
 /**
  * Options for constructing CodexAgentService (dependency injection)
@@ -110,7 +99,7 @@ function collectCodexStreamError(event: unknown, recentErrors: string[]): void {
   const raw = record.message;
   if (typeof raw !== 'string') return;
 
-  const msg = sanitizeCliStderr(raw.trim()).slice(0, MAX_STREAM_ERROR_LENGTH);
+  const msg = raw.trim().slice(0, MAX_STREAM_ERROR_LENGTH);
   if (!msg) return;
 
   const last = recentErrors[recentErrors.length - 1];
@@ -262,32 +251,8 @@ function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Reco
   const args: string[] = [];
   const allowedWorkspaceDirs = resolveAllowedWorkspaceDirsForMcp(workingDirectory);
 
-  // F213 (2026-05-26, post 砚砚 review P2 fix): L4 per-invocation dummy disabled
-  // override for the legacy `cat-cafe` server. L5 startup cleanup
-  // (`mcp-config-adapters.ts` writers + `deprecated-managed-servers.ts` registry)
-  // only writes to `<projectRoot>/.codex/config.toml`, so legacy entries in
-  // user-level (`~/.codex/config.toml`), `$CODEX_HOME/config.toml`, or system
-  // (`/etc/codex/config.toml`) config files survive cleanup. Without this L4
-  // override, codex would load those surviving legacy entries with no
-  // callback env → fail closed.
-  //
-  // Dummy disabled form (echo + legacy-shim + enabled=false) verified by 砚砚
-  // strict-npm-Codex reproducer: passes config parse (complete transport
-  // definition, not partial) + codex skips server startup (enabled=false).
-  // Per-invocation `--config` is the highest priority override, beating any
-  // legacy entry from any source. This is L4's runtime safety net for the
-  // case L5 cleanup cannot prove ownership.
-  //
-  // See ADR-036 amendment 2026-05-26 + `docs/features/F213-stale-mcp-config-cleanup.md`
-  // + `docs/discussions/2026-05-26-codex-mcp-legacy-deprecation/README.md` §6.2.
-  args.push(
-    '--config',
-    'mcp_servers.cat-cafe.command="echo"',
-    '--config',
-    `mcp_servers.cat-cafe.args=[${toTomlString('legacy-shim')}]`,
-    '--config',
-    'mcp_servers.cat-cafe.enabled=false',
-  );
+  // Do not add an env-only legacy `cat-cafe` entry. Current Codex treats that
+  // partial MCP table as a malformed server and exits before the turn starts.
 
   for (const [serverName, entrypoint] of CAT_CAFE_MCP_SERVER_ENTRIES) {
     const serverPath = resolve(mcpDistDir, entrypoint);
@@ -497,11 +462,7 @@ export class CodexAgentService implements AgentService {
     // --add-dir .git: 允许写入 .git/ 目录（index.lock、objects、refs），解锁 git commit
     // 注意：旧 session resume 时沿用创建时的沙箱参数，不会带 --add-dir。
     // 这是预期行为——新建会话即可获得 .git 写入权限。
-    // Incident 2026-05-29 (cross-thread-context-contamination): prompt 正文经 stdin
-    // 传入（见下方 cliOpts.stdinInput），绝不进 argv —— 否则 `ps -o command=` /
-    // /proc/<pid>/cmdline 会把完整对话历史（含跨 thread/猫/用户内容）暴露给任何
-    // 并发进程。'--' 结束选项解析，'-' 让 codex 从 stdin 读取 PROMPT。
-    const promptArgs = ['--', '-'];
+    const promptArgs = ['--', effectivePrompt];
 
     // Dedup: skip system --config/--flag pairs that the user explicitly overrides (#567).
     const dedup = (src: string[]): string[] => {
@@ -587,28 +548,7 @@ export class CodexAgentService implements AgentService {
           rawEnv.USERPROFILE = isolatedHome;
         }
       }
-      const homeIsolated = authMode === 'api_key' && !!customBaseUrl;
       const codexEnv = applyAuthMode(rawEnv, authMode);
-
-      // Diagnostic logging: critical env state for debugging CLI startup failures
-      log.info(
-        {
-          catId: this.catId,
-          authMode,
-          homeIsolated,
-          isolatedHome: homeIsolated ? rawEnv.HOME : undefined,
-          customBaseUrl: customBaseUrl ? redactUrlForLog(customBaseUrl) : null,
-          sandboxMode,
-          hasOpenaiKey: !!codexEnv.OPENAI_API_KEY,
-          hasOpenaiKeyAfterAuth: codexEnv.OPENAI_API_KEY !== null && codexEnv.OPENAI_API_KEY !== undefined,
-          envKeysCallbackEnv: Object.keys(options?.callbackEnv ?? {}),
-          envKeysAccountEnv: Object.keys(options?.accountEnv ?? {}),
-          cwd: options?.workingDirectory ?? null,
-          platform: process.platform,
-        },
-        '[codex-diag] Auth + env setup',
-      );
-
       // F171: Account env vars applied LAST — user overrides provider-injected values.
       // Strip OPENAI_BASE_URL/OPENAI_API_BASE if already consumed via --config model_providers
       // to prevent the deprecated env var from conflicting with the CLI config.
@@ -634,32 +574,25 @@ export class CodexAgentService implements AgentService {
         return;
       }
 
-      // Diagnostic: log full invocation params at info level for troubleshooting
-      log.info(
+      log.debug(
         {
           catId: this.catId,
           command: codexCommand,
           model: cliModel,
           originalModel: effectiveModel,
-          customBaseUrl: customBaseUrl ? redactUrlForLog(customBaseUrl) : null,
+          customBaseUrl: customBaseUrl ?? null,
           sessionId: options?.sessionId ?? null,
           invocationId: options?.invocationId ?? null,
           cwd: options?.workingDirectory ?? null,
           authMode,
           argCount: args.length,
-          // Log flag names + --config keys (no values) for debugging
-          cliFlags: args.filter((a) => a.startsWith('-')),
-          cliConfigKeys: args.map((a, i) => (args[i - 1] === '--config' ? a.split('=')[0] : null)).filter(Boolean),
         },
-        '[codex-diag] Invoking Codex CLI',
+        'Invoking Codex CLI',
       );
 
       const cliOpts = {
         command: codexCommand,
         args,
-        // Incident 2026-05-29 (cross-thread-context-contamination): prompt 正文经 stdin
-        // 传入，不进 argv —— 防 `ps -o command=` / /proc/<pid>/cmdline 跨进程泄露。
-        stdinInput: effectivePrompt,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         env: codexEnv,
         ...(options?.signal ? { signal: options.signal } : {}),
@@ -720,8 +653,7 @@ export class CodexAgentService implements AgentService {
             type: 'error',
             catId: this.catId,
             error: `缅因猫 CLI 响应超时 (${Math.round(event.timeoutMs / 1000)}s${event.firstEventAt == null ? ', 未收到首帧' : ''})`,
-            // F212 Phase A (云端 codex P2): timeout cliDiagnostics 也透传到 metadata.
-            metadata: event.cliDiagnostics ? { ...metadata, cliDiagnostics: event.cliDiagnostics } : metadata,
+            metadata,
             timestamp: Date.now(),
           };
           continue;
@@ -757,29 +689,12 @@ export class CodexAgentService implements AgentService {
             );
             continue;
           }
-          // Diagnostic: log full error details at info level for troubleshooting
-          log.info(
-            {
-              catId: this.catId,
-              exitCode: event.exitCode,
-              signal: event.signal,
-              message: event.message,
-              reasonCode: event.reasonCode,
-              publicSummary: event.cliDiagnostics?.publicSummary,
-              safeExcerpt: event.cliDiagnostics?.safeExcerpt,
-              debugRef: event.cliDiagnostics?.debugRef,
-              sawSubstantiveOutput,
-              recentStreamErrors,
-            },
-            '[codex-diag] CLI error exit — full diagnostics',
-          );
           const base = formatCliExitError('Codex CLI', event);
-          // F212 Phase A: forward cliDiagnostics on metadata for frontend folded panel (Phase B).
           yield {
             type: 'error',
             catId: this.catId,
             error: withRecentDiagnostics(base, recentStreamErrors),
-            metadata: event.cliDiagnostics ? { ...metadata, cliDiagnostics: event.cliDiagnostics } : metadata,
+            metadata,
             timestamp: Date.now(),
           };
           continue;
@@ -872,24 +787,18 @@ export class CodexAgentService implements AgentService {
             usage.contextUsedTokens = snapshot.contextUsedTokens;
             usage.contextWindowSize = snapshot.contextWindowTokens;
             usage.lastTurnInputTokens = snapshot.contextUsedTokens;
-            // Codex turn.completed usage can be CLI-session cumulative. When
-            // token_count is available, prefer last_token_usage for this turn.
-            // For Codex, each Cat Cafe invocation is one CLI turn, so
-            // last_token_usage is the invocation input, not a session total.
-            usage.inputTokens = snapshot.contextUsedTokens;
 
             if (snapshot.contextResetsAtMs != null) {
               usage.contextResetsAtMs = snapshot.contextResetsAtMs;
             }
-            if (snapshot.lastCachedInputTokens != null) {
-              usage.cacheReadTokens = snapshot.lastCachedInputTokens;
-            } else {
-              delete usage.cacheReadTokens;
+            if (usage.inputTokens == null && snapshot.totalInputTokens != null) {
+              usage.inputTokens = snapshot.totalInputTokens;
             }
-            if (snapshot.lastOutputTokens != null) {
-              usage.outputTokens = snapshot.lastOutputTokens;
-            } else {
-              delete usage.outputTokens;
+            if (usage.cacheReadTokens == null && snapshot.totalCachedInputTokens != null) {
+              usage.cacheReadTokens = snapshot.totalCachedInputTokens;
+            }
+            if (usage.outputTokens == null && snapshot.totalOutputTokens != null) {
+              usage.outputTokens = snapshot.totalOutputTokens;
             }
 
             metadata.usage = usage;

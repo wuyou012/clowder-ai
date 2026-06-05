@@ -7,7 +7,17 @@
 
 export type AntigravityCliPlainTextResult =
   | { kind: 'text'; content: string; textMode?: 'replace' }
-  | { kind: 'error'; errorKind: 'timeout' | 'missing_model' | 'missing_session' | 'auth_required'; error: string }
+  | {
+      kind: 'error';
+      errorKind:
+        | 'timeout'
+        | 'missing_model'
+        | 'missing_session'
+        | 'auth_required'
+        | 'eligibility_failed'
+        | 'location_unsupported';
+      error: string;
+    }
   | { kind: 'empty' };
 
 export interface AntigravityCliPlainTextInput {
@@ -32,6 +42,7 @@ export function classifyAntigravityCliPlainText(input: AntigravityCliPlainTextIn
 
   const trimmedStdout = stripFreshConversationWarning(input.stdout).trim();
   const diagnosticText = `${trimmedStdout}\n${(input.stderr ?? '').trim()}`;
+  const allText = `${diagnosticText}\n${input.agyLogText ?? ''}`;
 
   if (isAgyPrintTimeoutOutput(trimmedStdout)) {
     return {
@@ -41,7 +52,24 @@ export function classifyAntigravityCliPlainText(input: AntigravityCliPlainTextIn
     };
   }
 
-  if (isAgyAuthRequiredDiagnostic(diagnosticText)) {
+  if (isAgyEligibilityFailedDiagnostic(allText)) {
+    return {
+      kind: 'error',
+      errorKind: 'eligibility_failed',
+      error: formatAgyEligibilityFailedError(),
+    };
+  }
+
+  // Check log text for location restriction (error only appears in agy log, not stdout/stderr)
+  if (isAgyLocationUnsupportedDiagnostic(allText)) {
+    return {
+      kind: 'error',
+      errorKind: 'location_unsupported',
+      error: formatAgyLocationUnsupportedError(),
+    };
+  }
+
+  if (isAgyAuthRequiredDiagnostic(allText)) {
     return {
       kind: 'error',
       errorKind: 'auth_required',
@@ -49,7 +77,7 @@ export function classifyAntigravityCliPlainText(input: AntigravityCliPlainTextIn
     };
   }
 
-  if (isAgyMissingModelDiagnostic(diagnosticText)) {
+  if (isAgyMissingModelDiagnostic(allText)) {
     return {
       kind: 'error',
       errorKind: 'missing_model',
@@ -113,6 +141,17 @@ function isAgyMissingModelDiagnostic(text: string): boolean {
   );
 }
 
+/**
+ * Detects eligibility check failure when the Google account is not eligible
+ * for Antigravity (e.g., region restriction or account type).
+ * After this, agy typically tries to auto-switch to another account, triggering
+ * an auth_required flow in --print mode.
+ */
+function isAgyEligibilityFailedDiagnostic(text: string): boolean {
+  const trimmed = text.trim();
+  return /eligibility\s+check\s+failed/im.test(trimmed) || /not\s+eligible\s+for\s+antigravity/im.test(trimmed);
+}
+
 function isAgyAuthRequiredDiagnostic(text: string): boolean {
   const trimmed = text.trim();
   const hasAuthPrompt = /^Authentication required\.\s+Please visit the URL to log in:/im.test(trimmed);
@@ -121,6 +160,27 @@ function isAgyAuthRequiredDiagnostic(text: string): boolean {
   const hasAuthInterrupted = /^Error:\s*authentication interrupted\.?$/im.test(trimmed);
 
   return hasAuthPrompt && (hasGoogleOAuthUrl || (hasAuthWait && hasAuthInterrupted));
+}
+
+function isAgyLocationUnsupportedDiagnostic(text: string): boolean {
+  return /User location is not supported for the API use/i.test(text);
+}
+
+function formatAgyLocationUnsupportedError(): string {
+  return [
+    'Antigravity CLI 错误：你所在地区不支持 Gemini Code Assist API（FAILED_PRECONDITION 400）。',
+    'Antigravity/agy 后端在中国大陆不可用。',
+    '请改用 gemini-cli 适配器：在 .env 中设置 GEMINI_ADAPTER=gemini-cli，',
+    '安装 gemini CLI（npm install -g @google/gemini-cli），并设置 GOOGLE_API_KEY。',
+  ].join(' ');
+}
+
+function formatAgyEligibilityFailedError(): string {
+  return [
+    'Antigravity CLI 账号资格检查失败：当前 Google 账号在你所在地区暂不支持 Antigravity。',
+    '请先在终端运行 `agy` 完成账号切换（按照提示登录有访问权限的 Google 账号），再重试。',
+    '切换后需在交互模式执行 `/model` 选择默认模型。',
+  ].join(' ');
 }
 
 function formatAgyAuthRequiredError(): string {

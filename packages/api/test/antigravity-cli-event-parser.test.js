@@ -174,4 +174,46 @@ describe('Antigravity CLI plain text parser', () => {
       content: 'Error: this is quoted model output, not a CLI failure.',
     });
   });
+
+  test('classifies auth-required fixture (interrupted OAuth) as auth_required error', () => {
+    const fixture = readFixture('agy-print-auth-required.txt');
+    const stdout = extractBlock(fixture, 'stdout');
+
+    const result = classifyAntigravityCliPlainText({ stdout, stderr: '', resumed: false });
+
+    assert.equal(result.kind, 'error');
+    assert.equal(result.errorKind, 'auth_required');
+    assert.match(result.error, /authenticated|auth|login/i);
+  });
+
+  test('classifies eligibility check failure (stdout) as eligibility_failed error', () => {
+    const result = classifyAntigravityCliPlainText({
+      stdout:
+        'Eligibility check failed: Your current account is not eligible for Antigravity, because it is not currently available in your location.',
+      stderr: '',
+      resumed: false,
+    });
+
+    assert.equal(result.kind, 'error');
+    assert.equal(result.errorKind, 'eligibility_failed');
+    assert.match(result.error, /eligibility|eligible|资格/i);
+  });
+
+  test('classifies eligibility check failure (stderr only) as eligibility_failed error', () => {
+    const result = classifyAntigravityCliPlainText({
+      stdout: '',
+      stderr:
+        'Eligibility check failed: Your current account is not eligible for Antigravity, because it is not currently available in your location.',
+      resumed: false,
+    });
+
+    assert.equal(result.kind, 'error');
+    assert.equal(result.errorKind, 'eligibility_failed');
+  });
+
+  test('returns empty when stdout and stderr are both empty', () => {
+    const result = classifyAntigravityCliPlainText({ stdout: '', stderr: '', resumed: false });
+
+    assert.deepEqual(result, { kind: 'empty' });
+  });
 });

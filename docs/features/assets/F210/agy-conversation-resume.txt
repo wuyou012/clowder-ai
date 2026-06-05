@@ -1,4 +1,4 @@
-Command:
+﻿Command:
 /tmp/cat-cafe-f210-agy-recon/bin/agy \
   --log-file /tmp/cat-cafe-f210-agy-headless-spike-resume.log \
   --print-timeout 30s \
@@ -14,14 +14,6 @@ AGY_RESUME_OK
 
 stderr:
 (empty)
-
-Selected log lines:
-I... Print mode: starting (promptLength=28, model="", conversationID="[REDACTED_CONVERSATION_ID]")
-I... ChainedAuth: authenticated via keyring (effective: keyring)
-I... Propagating selected model override to backend: label="Gemini 3.5 Flash (High)"
-I... Print mode: silent auth succeeded
-I... Print mode: resuming conversation [REDACTED_CONVERSATION_ID]
-I... Print mode: conversation=[REDACTED_CONVERSATION_ID], sending message
 
 Notes:
 - `--conversation <id>` does resume by stable conversation ID.

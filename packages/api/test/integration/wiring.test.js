@@ -349,8 +349,8 @@ describe('AgentRouter + Services wiring', () => {
     assert.ok(spawnOpts.env.CAT_CAFE_CALLBACK_TOKEN);
   });
 
-  test('routes Gemini through antigravity-cli plain-text adapter by default', async () => {
-    delete process.env.GEMINI_ADAPTER;
+  test('routes Gemini through antigravity-cli plain-text adapter via env override', async () => {
+    process.env.GEMINI_ADAPTER = 'antigravity-cli';
     const claudeSpawn = createTrackingSpawnFn(() => claudeEvents('s-1', 'hi'));
     const codexSpawn = createTrackingSpawnFn(() => codexEvents('t-1', 'hi'));
     const agySpawn = createTrackingPlainTextSpawnFn(() => ({
@@ -372,8 +372,8 @@ describe('AgentRouter + Services wiring', () => {
     assert.equal(agySpawn._calls.length, 1);
     const call = agySpawn._calls[0];
     assert.equal(commandName(call.cmd), 'agy');
-    assert.ok(call.args.includes('--print'), 'default antigravity-cli route should use agy --print');
-    assert.ok(call.args.includes('--add-dir'), 'default antigravity-cli route should bind the working directory');
+    assert.ok(call.args.includes('--print'), 'antigravity-cli override should use agy --print');
+    assert.ok(call.args.includes('--add-dir'), 'antigravity-cli override should bind the working directory');
     assert.equal(call.args.includes('--model'), false, 'antigravity-cli must not pass unverified --model flag');
     assert.ok(
       msgs.some((m) => m.type === 'text' && m.content === 'CAT_CAFE_AGY_ROUTE_OK'),
