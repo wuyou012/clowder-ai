@@ -51,6 +51,16 @@ export function isAgyReadyPrompt(value: string): boolean {
   return stripped === '>' || stripped.endsWith('\n>');
 }
 
+/**
+ * Detects agy 1.0.5+ workspace trust dialog.
+ * When the working directory is not in trustedWorkspaces, agy prompts:
+ *   "Do you trust the contents of this project?"
+ * This must be auto-confirmed by pressing Enter before the ready prompt appears.
+ */
+export function isAgyTrustDialog(value: string): boolean {
+  return stripAgyAnsi(value).includes('Do you trust the contents of this project');
+}
+
 export function extractAgyConversationId(value: string): string | null {
   const matches = [...value.matchAll(/\b(?:Created|Streaming) conversation ([0-9a-f-]{36})\b/gi)];
   return matches.length > 0 ? matches[matches.length - 1]?.[1] ?? null : null;
@@ -113,6 +123,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 async function waitForReady(term: IPty, signal: AbortSignal | undefined, timeoutMs: number): Promise<boolean> {
   let output = '';
+  let trustConfirmed = false;
   const disposable = term.onData((data) => {
     output += data;
   });
@@ -123,6 +134,15 @@ async function waitForReady(term: IPty, signal: AbortSignal | undefined, timeout
       if (isAgyReadyPrompt(output)) {
         await sleep(READY_SETTLE_MS, signal);
         return !signal?.aborted;
+      }
+      // Auto-confirm workspace trust dialog (agy 1.0.5+).
+      // When the working directory is not in trustedWorkspaces, agy shows an
+      // interactive prompt that blocks before the '>' ready cursor appears.
+      // Pressing Enter selects the highlighted "Yes, I trust this folder" option.
+      if (!trustConfirmed && isAgyTrustDialog(output)) {
+        log.debug('[agy-pty] workspace trust dialog detected — auto-confirming with Enter');
+        trustConfirmed = true;
+        term.write('\r');
       }
       await sleep(POLL_INTERVAL_MS, signal);
     }

@@ -9,6 +9,7 @@ import {
   extractAgyPlannerResponse,
   invokeAgyPty,
   isAgyReadyPrompt,
+  isAgyTrustDialog,
   stripAgyAnsi,
 } from '../dist/domains/cats/services/agents/providers/agy-pty-adapter.js';
 import { ensureFakeCliOnPath } from './helpers/fake-cli-path.js';
@@ -250,4 +251,65 @@ test('invokeAgyPty yields session_init, text, and done from transcript planner r
   assert.equal(msgs[1]?.type, 'text');
   assert.equal(msgs[1]?.content, 'hello');
   assert.equal(msgs[2]?.type, 'done');
+});
+
+test('isAgyTrustDialog detects workspace trust dialog and ignores normal output', () => {
+  assert.equal(
+    isAgyTrustDialog('Do you trust the contents of this project?\n> Yes, I trust this folder\nNo, exit\n'),
+    true,
+  );
+  // ANSI-wrapped version
+  assert.equal(
+    isAgyTrustDialog('[1mDo you trust the contents of this project?[0m\n> Yes, I trust this folder\n'),
+    true,
+  );
+  // Normal ready prompt — must NOT trigger
+  assert.equal(isAgyTrustDialog('\n> '), false);
+  assert.equal(isAgyTrustDialog('hello world\n> '), false);
+});
+
+test('invokeAgyPty auto-confirms workspace trust dialog and proceeds to ready', async () => {
+  const paths = createAgyTempPaths();
+  const conversationId = '66666666-6666-4666-8666-666666666666';
+  let enterReceived = false;
+
+  const TRUST_DIALOG =
+    'Do you trust the contents of this project?\n> Yes, I trust this folder\nNo, exit\n\n↑/↓ Navigate · enter Confirm';
+
+  const fakePty = createFakePtySpawn({
+    readyData: TRUST_DIALOG,
+    onWrite(data, term) {
+      if (!enterReceived && data === '\r') {
+        // Trust confirmation Enter received — emit ready prompt
+        enterReceived = true;
+        setTimeout(() => term.emitData('\n> '), 5);
+      } else if (data.startsWith('\x1b[200~')) {
+        // Actual prompt submission — write cli.log + transcript
+        setTimeout(() => {
+          writeFileSync(
+            paths.cliLogPath,
+            `2026-06-04T00:00:00Z Streaming conversation ${conversationId}\n`,
+          );
+          writePlannerTranscript(paths.brainRoot, conversationId, 'trusted workspace response');
+        }, 5);
+      }
+    },
+  });
+
+  const msgs = await collect(
+    invokeAgyPty('who are you', 'gemini', {
+      ...paths,
+      ptySpawn: fakePty.spawn,
+      readyTimeoutMs: 2_000,
+      timeoutMs: 500,
+      pollIntervalMs: 5,
+    }),
+  );
+
+  assert.ok(enterReceived, 'should have sent Enter to auto-confirm trust dialog');
+  assert.equal(msgs[0]?.type, 'session_init');
+  assert.equal(msgs[0]?.sessionId, conversationId);
+  assert.equal(msgs[1]?.type, 'text');
+  assert.equal(msgs[1]?.content, 'trusted workspace response');
+  assert.equal(msgs.at(-1)?.type, 'done');
 });
