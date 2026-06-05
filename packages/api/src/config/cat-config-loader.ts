@@ -757,7 +757,12 @@ export function getDefaultCatId(): CatId {
     return _defaultCatId;
   }
 
-  // Ultimate fallback for zero-member bootstrap mode.
+  // Ultimate fallback: try catRegistry for dynamically loaded cats
+  // (getCachedConfig may be null if gateway starts before cat catalog is loaded)
+  const firstKnown = catRegistry.getAllIds()[0];
+  if (firstKnown) return firstKnown as CatId;
+
+  // Zero-member bootstrap mode (no cats registered yet).
   return createCatId('opus');
 }
 

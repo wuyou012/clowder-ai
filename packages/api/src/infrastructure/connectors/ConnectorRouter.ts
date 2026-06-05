@@ -162,6 +162,21 @@ export class ConnectorRouter {
     return patterns;
   }
 
+  private getValidDefaultCatId(): CatId {
+    if (catRegistry.tryGet(this.opts.defaultCatId)) return this.opts.defaultCatId;
+
+    const fallback = catRegistry.getAllIds()[0];
+    if (fallback) {
+      this.opts.log.warn(
+        { configuredDefaultCatId: this.opts.defaultCatId, fallbackCatId: fallback },
+        '[ConnectorRouter] Default cat is not registered, using first available cat',
+      );
+      return fallback;
+    }
+
+    return this.opts.defaultCatId;
+  }
+
   async route(
     connectorId: string,
     externalChatId: string,
@@ -291,7 +306,7 @@ export class ConnectorRouter {
             icon: def2?.icon ?? 'message',
           };
           const mentionPatterns = this.getMentionPatterns();
-          const { targetCatId } = parseMentions(fwdText, mentionPatterns, this.opts.defaultCatId);
+          const { targetCatId } = parseMentions(fwdText, mentionPatterns, this.getValidDefaultCatId());
           const fwdTimestamp = Date.now();
           const fwdStored = await messageStore.append({
             threadId: fwdThreadId,
@@ -437,7 +452,7 @@ export class ConnectorRouter {
 
     // Parse @-mentions to determine target cat
     const mentionPatterns = this.getMentionPatterns();
-    const mentionResult = parseMentions(resolvedText, mentionPatterns, this.opts.defaultCatId);
+    const mentionResult = parseMentions(resolvedText, mentionPatterns, this.getValidDefaultCatId());
     let targetCatId = mentionResult.targetCatId;
     if (!mentionResult.matched && this.opts.threadStore.getParticipantsWithActivity) {
       const participants = await this.opts.threadStore.getParticipantsWithActivity(binding.threadId);

@@ -127,6 +127,22 @@ function ensureMentionRegistry() {
   }
 }
 
+function registerTestCat(id, overrides = {}) {
+  catRegistry.register(id, {
+    id,
+    name: id,
+    displayName: overrides.displayName ?? id,
+    avatar: overrides.avatar ?? '/avatars/test.png',
+    color: overrides.color ?? { primary: '#111', secondary: '#eee' },
+    mentionPatterns: overrides.mentionPatterns ?? [`@${id}`],
+    provider: overrides.provider ?? 'openai',
+    defaultModel: overrides.defaultModel ?? 'test-model',
+    mcpSupport: false,
+    roleDescription: 'test role',
+    personality: 'test personality',
+  });
+}
+
 describe('ConnectorRouter', () => {
   let bindingStore;
   let dedup;
@@ -243,6 +259,32 @@ describe('ConnectorRouter', () => {
     assert.equal(trigger.calls.length, 1);
     assert.equal(trigger.calls[0].catId, 'opus');
     assert.deepEqual(messageStore.messages[0].mentions, ['opus']);
+  });
+
+  it('falls back to a registered cat when configured default cat is stale', async () => {
+    catRegistry.reset();
+    registerTestCat('codex', { mentionPatterns: ['@codex'] });
+
+    const staleTrigger = mockTrigger();
+    const staleMessageStore = mockMessageStore();
+    const staleRouter = new ConnectorRouter({
+      bindingStore: new MemoryConnectorThreadBindingStore(),
+      dedup: new InboundMessageDedup(),
+      messageStore: staleMessageStore,
+      threadStore: mockThreadStore(),
+      invokeTrigger: staleTrigger,
+      socketManager: mockSocketManager(),
+      defaultUserId: 'owner-1',
+      defaultCatId: 'opus',
+      log: noopLog(),
+    });
+
+    const result = await staleRouter.route('weixin', 'chat-stale-default', 'hello', 'ext-stale-default-1');
+
+    assert.equal(result.kind, 'routed');
+    assert.equal(staleTrigger.calls.length, 1);
+    assert.equal(staleTrigger.calls[0].catId, 'codex');
+    assert.deepEqual(staleMessageStore.messages[0].mentions, ['codex']);
   });
 
   it('skips duplicate messages', async () => {
