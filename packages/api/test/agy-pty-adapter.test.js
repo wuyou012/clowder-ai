@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock } from 'node:test';
@@ -335,6 +335,46 @@ test('invokeAgyPty classifies cli.log diagnostics when transcript times out', as
   const error = msgs.find((msg) => msg.type === 'error');
   assert.ok(error);
   assert.match(error.error, /not authenticated/i);
+  assert.equal(msgs.at(-1)?.type, 'done');
+});
+
+test('invokeAgyPty surfaces cli.log diagnostics while waiting for transcript', async () => {
+  const paths = createAgyTempPaths();
+  const conversationId = '99999999-9999-4999-8999-999999999999';
+  const fakePty = createFakePtySpawn({
+    readyData: '\n> ',
+    onWrite() {
+      writeFileSync(paths.cliLogPath, `2026-06-04T00:00:00Z Created conversation ${conversationId}\n`);
+      setTimeout(() => {
+        appendFileSync(
+          paths.cliLogPath,
+          [
+            '',
+            'agent executor error: FAILED_PRECONDITION (code 400): User location is not supported for the API use.',
+            'FAILED_PRECONDITION (code 400): User location is not supported for the API use.',
+          ].join('\n'),
+        );
+      }, 5);
+    },
+  });
+
+  const startedAt = Date.now();
+  const msgs = await collect(
+    invokeAgyPty('who are you', 'gemini', {
+      ...paths,
+      ptySpawn: fakePty.spawn,
+      readyTimeoutMs: 1_000,
+      timeoutMs: 1_000,
+      pollIntervalMs: 5,
+    }),
+  );
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(msgs[0]?.type, 'session_init');
+  const error = msgs.find((msg) => msg.type === 'error');
+  assert.ok(error);
+  assert.match(error.error, /location|地区|区域|not support/i);
+  assert.ok(elapsedMs < 700, `expected early diagnostic, got ${elapsedMs}ms`);
   assert.equal(msgs.at(-1)?.type, 'done');
 });
 

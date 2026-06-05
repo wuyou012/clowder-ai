@@ -30,6 +30,11 @@ interface AgyTranscriptEntry {
   readonly content?: unknown;
 }
 
+type AgyPlannerOutcome =
+  | { readonly kind: 'response'; readonly content: string }
+  | { readonly kind: 'error'; readonly error: string }
+  | { readonly kind: 'timeout' };
+
 interface AgyPtyRuntimeOptions {
   readonly cliLogPath?: string;
   readonly brainRoot?: string;
@@ -189,24 +194,33 @@ async function waitForConversationId(
   return null;
 }
 
-async function waitForPlannerResponse(
+async function waitForPlannerOutcome(
   conversationId: string,
   brainRoot: string,
+  cliLogPath: string,
+  initialCliLogOffset: number,
   signal: AbortSignal | undefined,
   timeoutMs: number,
   pollIntervalMs: number,
-): Promise<string | null> {
+): Promise<AgyPlannerOutcome> {
   const transcriptPath = agyTranscriptPath(conversationId, brainRoot);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (signal?.aborted) return null;
+    if (signal?.aborted) return { kind: 'timeout' };
     if (existsSync(transcriptPath)) {
       const content = extractAgyPlannerResponse(readFileSync(transcriptPath, 'utf8'));
-      if (content) return content;
+      if (content) return { kind: 'response', content };
+    }
+    const logClassification = classifyAntigravityCliPlainText({
+      stdout: '',
+      agyLogText: readFromOffset(cliLogPath, initialCliLogOffset),
+    });
+    if (logClassification.kind === 'error') {
+      return { kind: 'error', error: logClassification.error };
     }
     await sleep(pollIntervalMs, signal);
   }
-  return null;
+  return { kind: 'timeout' };
 }
 
 function applyUserCliArgs(baseArgs: string[], userArgs: readonly string[] | undefined): string[] {
@@ -384,9 +398,11 @@ export async function* invokeAgyPty(
     metadata.sessionId = conversationId;
     yield { type: 'session_init', catId, sessionId: conversationId, metadata, timestamp: Date.now() };
 
-    const response = await waitForPlannerResponse(
+    const response = await waitForPlannerOutcome(
       conversationId,
       brainRoot,
+      cliLogPath,
+      initialCliLogOffset,
       options?.signal,
       timeoutMs,
       pollIntervalMs,
@@ -395,7 +411,18 @@ export async function* invokeAgyPty(
       yield { type: 'done', catId, metadata, timestamp: Date.now() };
       return;
     }
-    if (!response) {
+    if (response.kind === 'error') {
+      yield {
+        type: 'error',
+        catId,
+        error: response.error,
+        metadata,
+        timestamp: Date.now(),
+      };
+      yield { type: 'done', catId, metadata, timestamp: Date.now() };
+      return;
+    }
+    if (response.kind === 'timeout') {
       const agyLogText = readFromOffset(cliLogPath, initialCliLogOffset);
       const logClassification = classifyAntigravityCliPlainText({
         stdout: '',
@@ -431,7 +458,7 @@ export async function* invokeAgyPty(
     yield {
       type: 'text',
       catId,
-      content: response,
+      content: response.content,
       metadata,
       timestamp: Date.now(),
     };
