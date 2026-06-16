@@ -52,9 +52,30 @@ function sanitizeProfileId(value: string): string {
 }
 
 function expandHomePath(path: string): string {
-  if (path === '~') return homedir();
-  if (path.startsWith(`~${sep}`)) return join(homedir(), path.slice(2));
+  if (path === '~') return activeUserHomePath();
+  if (path.startsWith('~/') || path.startsWith('~\\')) return join(activeUserHomePath(), path.slice(2));
   return path;
+}
+
+function nonEmptyEnv(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function activeUserHomePath(): string {
+  return nonEmptyEnv(process.env.HOME) ?? homedir();
+}
+
+function candidateUserHomePaths(): readonly string[] {
+  const driveHome =
+    nonEmptyEnv(process.env.HOMEDRIVE) && nonEmptyEnv(process.env.HOMEPATH)
+      ? `${process.env.HOMEDRIVE}${process.env.HOMEPATH}`
+      : null;
+  return uniqueResolvedPaths(
+    [process.env.HOME, process.env.USERPROFILE, driveHome ?? undefined, homedir()]
+      .map(nonEmptyEnv)
+      .filter((value): value is string => value !== null),
+  );
 }
 
 function resolveUnder(root: string, segment: string): string {
@@ -115,8 +136,21 @@ function canonicalProfileHomePath(homeRoot: string | null, homePath: string): st
   return resolve(realRoot, rel);
 }
 
-function realUserHomePath(): string {
-  return tryRealpath(homedir()) ?? resolve(homedir());
+function canonicalPath(path: string): string {
+  return tryRealpath(path) ?? resolve(path);
+}
+
+function realUserHomePaths(): readonly string[] {
+  return uniqueResolvedPaths(candidateUserHomePaths().map(canonicalPath));
+}
+
+function isSameOrWithin(parent: string, target: string): boolean {
+  const rel = relative(parent, target);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function isSamePath(left: string, right: string): boolean {
+  return relative(left, right) === '';
 }
 
 export function resolveAgyProfile(input: ResolveAgyProfileInput): AgyProfile | null {
@@ -126,7 +160,7 @@ export function resolveAgyProfile(input: ResolveAgyProfileInput): AgyProfile | n
   const profileId = sanitizeProfileId(config.profileId ?? input.catId);
   const homeRoot = resolve(
     expandHomePath(
-      config.homeRoot ?? process.env.CAT_CAFE_AGY_PROFILE_ROOT ?? join(homedir(), '.cat-cafe', 'agy-profiles'),
+      config.homeRoot ?? process.env.CAT_CAFE_AGY_PROFILE_ROOT ?? join(activeUserHomePath(), '.cat-cafe', 'agy-profiles'),
     ),
   );
   const homePath = resolveUnder(homeRoot, profileId);
@@ -161,9 +195,11 @@ export function resolveAgyProfile(input: ResolveAgyProfileInput): AgyProfile | n
 }
 
 function isRealUserAntigravitySettingsPath(path: string): boolean {
-  const realAgyDir = join(realUserHomePath(), '.gemini', 'antigravity-cli');
   const resolvedPath = resolve(path);
-  return resolvedPath === join(realAgyDir, 'settings.json') || resolvedPath.startsWith(`${realAgyDir}${sep}`);
+  return realUserHomePaths().some((homePath) => {
+    const realAgyDir = join(homePath, '.gemini', 'antigravity-cli');
+    return isSameOrWithin(realAgyDir, resolvedPath);
+  });
 }
 
 function getUnsafeAgyProfileTargetReason(
@@ -185,7 +221,7 @@ function getUnsafeAgyProfileTargetReason(
   }
 
   const canonicalHomePath = canonicalProfileHomePath(homeRoot, homePath);
-  if (canonicalHomePath === realUserHomePath()) {
+  if (realUserHomePaths().some((homePath) => isSamePath(homePath, canonicalHomePath))) {
     return 'AGY profile sandbox points at the real user HOME; refusing to write shared state.';
   }
 

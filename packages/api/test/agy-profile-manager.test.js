@@ -12,6 +12,28 @@ function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'));
 }
 
+function isDirectoryLinkUnavailable(err) {
+  return (
+    err &&
+    typeof err === 'object' &&
+    'code' in err &&
+    ['EACCES', 'EPERM', 'ENOTSUP'].includes(String(err.code))
+  );
+}
+
+function createDirectoryLinkOrSkip(t, target, path) {
+  try {
+    symlinkSync(target, path, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (err) {
+    if (isDirectoryLinkUnavailable(err)) {
+      t.skip(`directory links are unavailable in this environment: ${err.code}`);
+      return false;
+    }
+    throw err;
+  }
+  return true;
+}
+
 describe('agy-profile-manager', () => {
   test('creates isolated per-cat HOME settings with expected model and trusted workspace', () => {
     const root = mkdtempSync(join(tmpdir(), 'agy-profile-root-'));
@@ -124,6 +146,32 @@ describe('agy-profile-manager', () => {
     }
   });
 
+  test('defaults profile roots under the active HOME', () => {
+    const home = mkdtempSync(join(tmpdir(), 'agy-profile-home-'));
+    const worktree = mkdtempSync(join(tmpdir(), 'agy-profile-worktree-'));
+    const savedHome = process.env.HOME;
+    process.env.HOME = home;
+
+    try {
+      const profile = resolveAgyProfile({
+        catId: 'gemini35',
+        expectedModel: 'Gemini 3.5 Flash (High)',
+        workingDirectory: worktree,
+        config: { enabled: true, model: 'Gemini 3.5 Flash (High)' },
+      });
+
+      assert.equal(profile.homePath, join(home, '.cat-cafe', 'agy-profiles', 'gemini35'));
+    } finally {
+      if (savedHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = savedHome;
+      }
+      rmSync(home, { recursive: true, force: true });
+      rmSync(worktree, { recursive: true, force: true });
+    }
+  });
+
   test('preflight fails closed when assigned worktree is not trusted', () => {
     const root = mkdtempSync(join(tmpdir(), 'agy-profile-root-'));
     const worktree = mkdtempSync(join(tmpdir(), 'agy-profile-worktree-'));
@@ -188,7 +236,7 @@ describe('agy-profile-manager', () => {
     }
   });
 
-  test('rejects symlinked profile HOME before writing through the link', () => {
+  test('rejects symlinked profile HOME before writing through the link', (t) => {
     const home = mkdtempSync(join(tmpdir(), 'agy-real-home-'));
     const root = mkdtempSync(join(tmpdir(), 'agy-profile-root-'));
     const worktree = mkdtempSync(join(tmpdir(), 'agy-profile-worktree-'));
@@ -197,7 +245,7 @@ describe('agy-profile-manager', () => {
     const settingsPath = join(home, '.gemini', 'antigravity-cli', 'settings.json');
 
     try {
-      symlinkSync(home, join(root, 'gemini35'), 'dir');
+      if (!createDirectoryLinkOrSkip(t, home, join(root, 'gemini35'))) return;
 
       assert.throws(
         () =>
@@ -222,7 +270,7 @@ describe('agy-profile-manager', () => {
     }
   });
 
-  test('rejects symlinked profile settings components before writing through them', () => {
+  test('rejects symlinked profile settings components before writing through them', (t) => {
     const home = mkdtempSync(join(tmpdir(), 'agy-real-home-'));
     const root = mkdtempSync(join(tmpdir(), 'agy-profile-root-'));
     const worktree = mkdtempSync(join(tmpdir(), 'agy-profile-worktree-'));
@@ -234,7 +282,7 @@ describe('agy-profile-manager', () => {
     try {
       mkdirSync(profileHome, { recursive: true });
       mkdirSync(join(home, '.gemini'), { recursive: true });
-      symlinkSync(join(home, '.gemini'), join(profileHome, '.gemini'), 'dir');
+      if (!createDirectoryLinkOrSkip(t, join(home, '.gemini'), join(profileHome, '.gemini'))) return;
 
       assert.throws(
         () =>
