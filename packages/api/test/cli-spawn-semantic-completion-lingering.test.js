@@ -95,3 +95,41 @@ test('semantic completion finalizes without __cliTimeout when stdout stays open 
 
   assert.ok(mock.killed, 'lingering process must be killed by the post-completion grace');
 });
+
+test('semantic completion cancels the silence timeout even when timeoutMs < grace (no false __cliTimeout)', async () => {
+  const mock = createMockProcess();
+  const semantic = new AbortController();
+  const spawnFn = () => mock;
+
+  // Terminal result, then stdout stays OPEN (process lingers).
+  setImmediate(() => {
+    mock.stdout.write(`${JSON.stringify({ type: 'result', subtype: 'success' })}\n`);
+  });
+
+  const events = [];
+  const gen = spawnCli(
+    {
+      command: 'claude',
+      args: [],
+      // timeoutMs (200ms) < SEMANTIC_COMPLETION_GRACE_MS (5s): the silence timer would fire
+      // BEFORE the grace kill. Semantic completion must CANCEL the timeout so no spurious
+      // __cliTimeout is emitted (P1, 砚砚 review 2026-06-17). The lingering process is still
+      // reaped by the grace kill.
+      timeoutMs: 200,
+      semanticCompletionSignal: semantic.signal,
+    },
+    { spawnFn },
+  );
+
+  for await (const ev of gen) {
+    events.push(ev);
+    const raw = ev && typeof ev === 'object' ? ev : {};
+    if (raw.type === 'result' && raw.subtype === 'success') {
+      semantic.abort();
+    }
+  }
+
+  const timeouts = events.filter((e) => isCliTimeout(e));
+  assert.equal(timeouts.length, 0, 'timeoutMs < grace must NOT produce __cliTimeout once the turn is semantically complete');
+  assert.ok(mock.killed, 'lingering process must still be reaped by the grace kill');
+});

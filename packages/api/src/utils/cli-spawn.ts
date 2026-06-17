@@ -318,6 +318,10 @@ export async function* spawnCli(
   let killed = false;
   let timedOut = false;
   let stallKilled = false; // #774: set when idle-silent stall triggers auto-kill
+  // Issue #116 (extended, 砚砚 P1 2026-06-17): set when semanticCompletionSignal aborts.
+  // Cancels the silence timeout so a short timeoutMs (< grace) cannot fire a false
+  // __cliTimeout after the turn is already semantically complete.
+  let semanticCompleted = false;
   // F118 P1-fix: Snapshot process liveness at the moment timeout fires,
   // BEFORE killChild() — otherwise childExited is always true by yield time.
   let processAliveAtTimeout = false;
@@ -346,6 +350,7 @@ export async function* spawnCli(
   // first, the timer no-ops (killChild guards childExited; finally clears the timer).
   let semanticGraceTimer: ReturnType<typeof setTimeout> | undefined;
   const onSemanticCompletion = (): void => {
+    semanticCompleted = true; // disable the silence timeout — the turn is semantically done
     if (semanticGraceTimer !== undefined || killed || childExited) return;
     semanticGraceTimer = setTimeout(() => killChild(), SEMANTIC_COMPLETION_GRACE_MS);
     semanticGraceTimer.unref();
@@ -361,8 +366,14 @@ export async function* spawnCli(
   let probe: ProcessLivenessProbe | undefined; // F118: declared early for closure access
   const resetTimeout = (): void => {
     if (timeoutMs === 0) return; // Disabled
+    // 砚砚 P1: once the turn is semantically complete, never (re)arm the silence timeout —
+    // the one-shot grace kill reaps any lingering process instead.
+    if (semanticCompleted) return;
     if (timeoutTimer) clearTimeout(timeoutTimer);
     timeoutTimer = setTimeout(() => {
+      // 砚砚 P1: semantic completion may have fired after this timer was armed (timeoutMs <
+      // grace) — suppress the false timeout; the grace kill finalizes the lingering process.
+      if (semanticCompleted) return;
       // F118: If busy-silent (CPU growing), extend timeout unless hard cap exceeded
       if (probe?.shouldExtendTimeout()) {
         const innerElapsed = Date.now() - startedAt;
@@ -737,7 +748,9 @@ export async function* spawnCli(
     }
 
     // Yield timeout error (distinct from user cancel which stays silent)
-    if (timedOut) {
+    // 砚砚 P1: never surface a timeout once the turn is semantically complete (contract:
+    // semantic completion ⇒ no __cliTimeout), even if a late stall-kill set timedOut.
+    if (timedOut && !semanticCompleted) {
       // F212 AC-A1: include cliDiagnostics on timeout too (network timeout etc. often classifiable)
       // F212 Phase F (砚砚 R2 P1, post-merge follow-up): timeout branch was missing the
       // `stderrEmpty` signal to buildCliDiagnostics — without it, a timeout + empty stderr +
