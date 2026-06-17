@@ -828,7 +828,9 @@ export async function* spawnCli(
 
     // F153 Phase B: End CLI session span with appropriate status
     if (cliSpan) {
-      if (timedOut) {
+      // 砚砚 P2: keep span/log status consistent with the user-facing contract — a turn that
+      // semantically completed is not a timeout even if a late stall-kill set timedOut.
+      if (timedOut && !semanticCompleted) {
         cliSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'CLI timeout' });
         emitOtelLog('ERROR', 'cli_session_timeout', { 'cli.timeout_ms': timeoutMs }, cliSpan);
       } else if (exitCode !== null && exitCode !== 0) {
