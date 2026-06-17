@@ -813,6 +813,40 @@ test('does not pass --allowedTools — all tools available by default', async ()
   assert.ok(!args.includes('--allowedTools'), 'must NOT pass --allowedTools so all tools are available');
 });
 
+test('Issue #116: passes semanticCompletionSignal and aborts it on terminal result/success', async () => {
+  const service = createClaudeAgentService({ spawnFn: createMockSpawnFn(createMockProcess()) });
+  let capturedSignal;
+  const spawnCliOverride = (cliOpts) => {
+    capturedSignal = cliOpts.semanticCompletionSignal;
+    return (async function* () {
+      assert.equal(capturedSignal?.aborted, false, 'signal must not be aborted before the result event');
+      yield { type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } };
+      yield { type: 'result', subtype: 'success', usage: { input_tokens: 1, output_tokens: 1 } };
+    })();
+  };
+
+  await collect(service.invoke('hi', { spawnCliOverride }));
+
+  assert.ok(capturedSignal, 'semanticCompletionSignal must be passed to spawnCli');
+  assert.equal(capturedSignal.aborted, true, 'signal must be aborted once result/success is consumed');
+});
+
+test('Issue #116: does NOT abort semanticCompletionSignal on result/error (real error diagnostics flow)', async () => {
+  const service = createClaudeAgentService({ spawnFn: createMockSpawnFn(createMockProcess()) });
+  let capturedSignal;
+  const spawnCliOverride = (cliOpts) => {
+    capturedSignal = cliOpts.semanticCompletionSignal;
+    return (async function* () {
+      yield { type: 'result', subtype: 'error_during_execution', is_error: true, result: 'boom', errors: null };
+    })();
+  };
+
+  await collect(service.invoke('bad', { spawnCliOverride }));
+
+  assert.ok(capturedSignal, 'semanticCompletionSignal must be passed to spawnCli');
+  assert.equal(capturedSignal.aborted, false, 'must NOT abort on result/error — error path must not short-circuit grace');
+});
+
 test('resolves default MCP server path from API cwd (../mcp-server/dist/index.js)', () => {
   const root = mkdtempSync(join(tmpdir(), 'cat-cafe-mcp-path-'));
   const apiCwd = join(root, 'packages', 'api');

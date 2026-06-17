@@ -318,6 +318,10 @@ export async function* spawnCli(
   let killed = false;
   let timedOut = false;
   let stallKilled = false; // #774: set when idle-silent stall triggers auto-kill
+  // Issue #116 (extended, 砚砚 P1 2026-06-17): set when semanticCompletionSignal aborts.
+  // Cancels the silence timeout so a short timeoutMs (< grace) cannot fire a false
+  // __cliTimeout after the turn is already semantically complete.
+  let semanticCompleted = false;
   // F118 P1-fix: Snapshot process liveness at the moment timeout fires,
   // BEFORE killChild() — otherwise childExited is always true by yield time.
   let processAliveAtTimeout = false;
@@ -336,14 +340,40 @@ export async function* spawnCli(
     });
   }
 
+  // Issue #116 (extended): when the provider signals semantic completion (turn done) the
+  // process may keep stdout OPEN (Claude --chrome / MCP stdio keep the event loop alive),
+  // so the consume loop never sees EOF and would burn the full silence timeout — a false
+  // ~9-min timeout (lastEventType=result + processAlive=true) even though the turn SUCCEEDED.
+  // Fix: schedule a one-shot grace kill. killChild() makes the lingering process exit, which
+  // EOFs stdout so the loop drains any still-buffered events and breaks on `done` naturally
+  // (no truncation), with timedOut=false (no __cliTimeout). If the process exits on its own
+  // first, the timer no-ops (killChild guards childExited; finally clears the timer).
+  let semanticGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  const onSemanticCompletion = (): void => {
+    semanticCompleted = true; // disable the silence timeout — the turn is semantically done
+    if (semanticGraceTimer !== undefined || killed || childExited) return;
+    semanticGraceTimer = setTimeout(() => killChild(), SEMANTIC_COMPLETION_GRACE_MS);
+    semanticGraceTimer.unref();
+  };
+  if (options.semanticCompletionSignal) {
+    if (options.semanticCompletionSignal.aborted) onSemanticCompletion();
+    else options.semanticCompletionSignal.addEventListener('abort', onSemanticCompletion, { once: true });
+  }
+
   // Timeout: reset on any output, timeoutMs=0 disables
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   const startedAt = Date.now(); // F118: for hard cap calculation
   let probe: ProcessLivenessProbe | undefined; // F118: declared early for closure access
   const resetTimeout = (): void => {
     if (timeoutMs === 0) return; // Disabled
+    // 砚砚 P1: once the turn is semantically complete, never (re)arm the silence timeout —
+    // the one-shot grace kill reaps any lingering process instead.
+    if (semanticCompleted) return;
     if (timeoutTimer) clearTimeout(timeoutTimer);
     timeoutTimer = setTimeout(() => {
+      // 砚砚 P1: semantic completion may have fired after this timer was armed (timeoutMs <
+      // grace) — suppress the false timeout; the grace kill finalizes the lingering process.
+      if (semanticCompleted) return;
       // F118: If busy-silent (CPU growing), extend timeout unless hard cap exceeded
       if (probe?.shouldExtendTimeout()) {
         const innerElapsed = Date.now() - startedAt;
@@ -718,7 +748,9 @@ export async function* spawnCli(
     }
 
     // Yield timeout error (distinct from user cancel which stays silent)
-    if (timedOut) {
+    // 砚砚 P1: never surface a timeout once the turn is semantically complete (contract:
+    // semantic completion ⇒ no __cliTimeout), even if a late stall-kill set timedOut.
+    if (timedOut && !semanticCompleted) {
       // F212 AC-A1: include cliDiagnostics on timeout too (network timeout etc. often classifiable)
       // F212 Phase F (砚砚 R2 P1, post-merge follow-up): timeout branch was missing the
       // `stderrEmpty` signal to buildCliDiagnostics — without it, a timeout + empty stderr +
@@ -781,6 +813,10 @@ export async function* spawnCli(
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (escalationTimer !== undefined) clearTimeout(escalationTimer);
+    if (semanticGraceTimer !== undefined) clearTimeout(semanticGraceTimer);
+    if (options.semanticCompletionSignal) {
+      options.semanticCompletionSignal.removeEventListener('abort', onSemanticCompletion);
+    }
     if (options.signal) {
       options.signal.removeEventListener('abort', abortHandler);
     }
@@ -792,7 +828,9 @@ export async function* spawnCli(
 
     // F153 Phase B: End CLI session span with appropriate status
     if (cliSpan) {
-      if (timedOut) {
+      // 砚砚 P2: keep span/log status consistent with the user-facing contract — a turn that
+      // semantically completed is not a timeout even if a late stall-kill set timedOut.
+      if (timedOut && !semanticCompleted) {
         cliSpan.setStatus({ code: SpanStatusCode.ERROR, message: 'CLI timeout' });
         emitOtelLog('ERROR', 'cli_session_timeout', { 'cli.timeout_ms': timeoutMs }, cliSpan);
       } else if (exitCode !== null && exitCode !== 0) {

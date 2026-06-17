@@ -445,11 +445,19 @@ export class ClaudeAgentService implements AgentService {
         'Invoking Claude CLI',
       );
 
+      // Issue #116 (extended): signal CLI semantic completion on the terminal
+      // result/success event so spawnCli finalizes via the short grace instead of
+      // waiting for full process exit — which may never come when --chrome / MCP stdio
+      // keep the Claude process alive after the turn, causing a false ~9-min silence
+      // timeout (lastEventType=result + processAlive=true).
+      const semanticCompletion = new AbortController();
+
       const cliOpts = {
         command: claudeCommand,
         args,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         env: envOverrides,
+        semanticCompletionSignal: semanticCompletion.signal,
         ...(options?.signal ? { signal: options.signal } : {}),
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
         ...(options?.cliSessionId ? { cliSessionId: options.cliSessionId } : {}),
@@ -587,6 +595,10 @@ export class ClaudeAgentService implements AgentService {
           if (streamState.lastTurnInputTokens != null && metadata.usage) {
             metadata.usage.lastTurnInputTokens = streamState.lastTurnInputTokens;
           }
+          // Issue #116 (extended): turn is semantically complete — tell spawnCli to
+          // finalize via grace instead of waiting for process exit. Only on result/success
+          // (NOT result/error) so real error diagnostics keep flowing through the normal path.
+          semanticCompletion.abort();
         }
 
         const fromResultError = isResultErrorEvent(event);
