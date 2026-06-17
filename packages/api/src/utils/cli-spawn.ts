@@ -336,6 +336,25 @@ export async function* spawnCli(
     });
   }
 
+  // Issue #116 (extended): when the provider signals semantic completion (turn done) the
+  // process may keep stdout OPEN (Claude --chrome / MCP stdio keep the event loop alive),
+  // so the consume loop never sees EOF and would burn the full silence timeout — a false
+  // ~9-min timeout (lastEventType=result + processAlive=true) even though the turn SUCCEEDED.
+  // Fix: schedule a one-shot grace kill. killChild() makes the lingering process exit, which
+  // EOFs stdout so the loop drains any still-buffered events and breaks on `done` naturally
+  // (no truncation), with timedOut=false (no __cliTimeout). If the process exits on its own
+  // first, the timer no-ops (killChild guards childExited; finally clears the timer).
+  let semanticGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  const onSemanticCompletion = (): void => {
+    if (semanticGraceTimer !== undefined || killed || childExited) return;
+    semanticGraceTimer = setTimeout(() => killChild(), SEMANTIC_COMPLETION_GRACE_MS);
+    semanticGraceTimer.unref();
+  };
+  if (options.semanticCompletionSignal) {
+    if (options.semanticCompletionSignal.aborted) onSemanticCompletion();
+    else options.semanticCompletionSignal.addEventListener('abort', onSemanticCompletion, { once: true });
+  }
+
   // Timeout: reset on any output, timeoutMs=0 disables
   let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   const startedAt = Date.now(); // F118: for hard cap calculation
@@ -781,6 +800,10 @@ export async function* spawnCli(
   } finally {
     if (timeoutTimer) clearTimeout(timeoutTimer);
     if (escalationTimer !== undefined) clearTimeout(escalationTimer);
+    if (semanticGraceTimer !== undefined) clearTimeout(semanticGraceTimer);
+    if (options.semanticCompletionSignal) {
+      options.semanticCompletionSignal.removeEventListener('abort', onSemanticCompletion);
+    }
     if (options.signal) {
       options.signal.removeEventListener('abort', abortHandler);
     }
