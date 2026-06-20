@@ -1453,3 +1453,19 @@ created: 2026-02-26
 - 药方二：**Same-template scan**: spec 提到 "stderr log" 时，grep `'CLI stderr` literal 字符串，每个 hit 都核对契约 — abnormal-exit + timeout + success-exit 三个分支都该 sweep。我只 sweep 了一个。
 - 药方三：**Sibling-branch reminder**: cli-spawn 有 4 个 yield 分支（success / abnormal / timeout / cancel），改任一分支的 contract 时，必须对照同 file 其他分支看是否同 template、是否需要同改。这是 "audit-by-file-structure" 的具体落地。
 - 关联：F212 Phase F | PR #2011 + PR #2016 | LL-066（biome --unsafe 同型）| LL-068（同概念多处定义） | Maine Coon R2 post-merge BLOCKING catch
+
+### LL-070: Windows 上审查无 BOM UTF-8 文件，先显式解码再判断编码损坏
+- 状态：validated
+- 更新时间：2026-06-20
+
+- 坑：在 Windows + PowerShell/Codex 链路里，用默认文件读取查看无 BOM UTF-8 文本，中文被按系统 ANSI/GBK 解码成 mojibake；reviewer 误把显示假象判成文件损坏，并提出"重生成"修复，差点把正确文件改坏。
+- 根因：把终端/工具的默认显示结果当作文件真实字节事实，没有区分 "bytes on disk"、"decode codec"、"rendered text" 三层。无 BOM UTF-8 在 Windows 旧链路下尤其容易被错误按 ANSI code page 读取。
+- 触发条件：Windows 环境；文件是无 BOM UTF-8；通过 `Get-Content` 默认编码、旧 PowerShell、或未声明编码的读取路径查看中文/符号；review 结论涉及 mojibake、乱码、编码损坏、重生成。
+- 修复：对同一文件按字节复验：读取 bytes，显式 `decode('utf-8')`，核对关键行 codepoints；必要时用 `Get-Content -Encoding utf8` 复查显示层。只有显式 UTF-8 解码失败或 codepoint 本身错误，才允许报编码损坏。
+- 防护：报"编码损坏/mojibake"前必须三选一坐实：`Get-Content -Encoding utf8`、Python `Path.read_text(encoding='utf-8')`、或 bytes + codepoint 核对。默认 shell 显示只能作为线索，不能作为 finding 证据。
+- 来源锚点：
+  - cross-thread review correction `thread_mqmafajj1kudpvbn#0001781957105946-000212-8dd522b0`
+  - Maine Coon byte-level recheck `thread_mqmafajj1kudpvbn#0001781957177907-000214-77025dab`
+- 原理：编码问题是可验证的字节事实，不是视觉现象。review 证据必须落在原始字节和明确 codec 上，否则会把工具链显示问题误判为源文件问题。
+
+- 关联：Windows PowerShell | Codex file reads | review evidence quality | LL-006（新鲜验证证据）
