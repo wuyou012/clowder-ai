@@ -462,7 +462,14 @@ export class CodexAgentService implements AgentService {
     // --add-dir .git: 允许写入 .git/ 目录（index.lock、objects、refs），解锁 git commit
     // 注意：旧 session resume 时沿用创建时的沙箱参数，不会带 --add-dir。
     // 这是预期行为——新建会话即可获得 .git 写入权限。
-    const promptArgs = ['--', effectivePrompt];
+    // Incident 2026-05-29 (cross-thread-context-contamination): prompt 正文经 stdin
+    // 传入（见下方 cliOpts.stdinInput），绝不进 argv —— 否则 `ps -o command=` /
+    // /proc/<pid>/cmdline 会把完整对话历史（含跨 thread/猫/用户内容）暴露给任何
+    // 并发进程。'--' 结束选项解析，'-' 让 codex 从 stdin 读取 PROMPT。
+    // F-local: 把 prompt 移出 argv 也修复了 Windows `spawn ENAMETOOLONG`（重 thread
+    // 上下文撑爆 CreateProcess ~32KB 命令行上限，阻塞 cross-cat spawn）— upstream
+    // issue #840（CLOSED）。本地 cli-spawn 已支持 stdinInput，这里接上去用。
+    const promptArgs = ['--', '-'];
 
     // Dedup: skip system --config/--flag pairs that the user explicitly overrides (#567).
     const dedup = (src: string[]): string[] => {
@@ -593,6 +600,9 @@ export class CodexAgentService implements AgentService {
       const cliOpts = {
         command: codexCommand,
         args,
+        // 传入，不进 argv —— 防 `ps -o command=` / /proc/<pid>/cmdline 跨进程泄露，
+        // 并把重 thread 上下文移出命令行（修 Windows spawn ENAMETOOLONG，issue #840）。
+        stdinInput: effectivePrompt,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         env: codexEnv,
         ...(options?.signal ? { signal: options.signal } : {}),
