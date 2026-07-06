@@ -265,6 +265,31 @@ const anchorTelemetrySourceRefsShape = z
   })
   .describe('eval:anchor-first sourceRefs — replayable anchor telemetry rollup window selector.');
 
+/**
+ * F253 Phase C — qc-metrics-rollup sourceRefs. Replayable rollup window selector:
+ * provider resolves to a QcMetricsSnapshot (finding yield, false positive rate,
+ * reviewer delta, post-merge bug rate). Phase C bootstrap returns zero-baseline;
+ * live data sources wired in future phases.
+ *
+ * KEEP IN SYNC: packages/api/src/infrastructure/harness-eval/qc-metrics-provider.ts QcMetricsSelector
+ * + packages/api/.../publish-verdict/validation.ts validateQcMetricsSelector.
+ */
+const qcMetricsSourceRefsShape = z
+  .object({
+    kind: z.literal('qc-metrics-rollup'),
+    windowStartMs: z
+      .number()
+      .finite()
+      .describe(
+        'Inclusive epoch ms window start for QC metrics rollup (finding yield, FP rate, reviewer delta, post-merge bug rate).',
+      ),
+    windowEndMs: z
+      .number()
+      .finite()
+      .describe('Exclusive epoch ms window end for QC metrics rollup. Must be > windowStartMs.'),
+  })
+  .describe('eval:qc sourceRefs — replayable QC metrics rollup window selector (F253 Phase C).');
+
 const sourceRefsShape = z
   .union([
     a2aSourceRefsShape,
@@ -274,9 +299,10 @@ const sourceRefsShape = z
     sopSourceRefsShape,
     frictionRollupSourceRefsShape,
     anchorTelemetrySourceRefsShape,
+    qcMetricsSourceRefsShape,
   ])
   .describe(
-    'Discriminated union by `kind` field. a2a kind is default (backward compat); capability-wakeup-trial-window kind wired in PR-2; memory-recall-snapshot kind wired in F192 memory wire-up; task-outcome-snapshot kind wired in task-outcome PR; sop-trace-eval kind wired in F192 sop-wiring; friction-rollup-snapshot kind wired in F245 PR1b; anchor-telemetry-snapshot kind wired in F236 Track-2.',
+    'Discriminated union by `kind` field. a2a kind is default (backward compat); capability-wakeup-trial-window kind wired in PR-2; memory-recall-snapshot kind wired in F192 memory wire-up; task-outcome-snapshot kind wired in task-outcome PR; sop-trace-eval kind wired in F192 sop-wiring; friction-rollup-snapshot kind wired in F245 PR1b; anchor-telemetry-snapshot kind wired in F236 Track-2; qc-metrics-rollup kind wired in F253 Phase C.',
   );
 
 export const publishVerdictInputSchema = {
@@ -348,6 +374,11 @@ type PublishVerdictToolInput = {
         kind: 'anchor-telemetry-snapshot';
         windowStartMs: number;
         windowEndMs: number;
+      }
+    | {
+        kind: 'qc-metrics-rollup';
+        windowStartMs: number;
+        windowEndMs: number;
       };
   agentKeyCatId?: string | undefined;
 };
@@ -377,7 +408,7 @@ export const publishVerdictTools = [
       'Use after your analysis converges to a verdict for your assigned eval domain. ' +
       'Pass the complete VerdictHandoffPacket + sourceRefs (shape depends on your domain — see your eval cat invocation instructions for the exact selector shape). ' +
       'The handler validates schema, dispatches to the per-domain generator inside an isolated git worktree, commits + pushes the branch verdict/auto/<domain-slug>/<verdict-id>, and opens an auto-PR. Returns { commitSha, prUrl }. ' +
-      'GOTCHA: wired domains: eval:a2a (snapshot/attribution YAML basenames) + eval:capability-wakeup (replayable trial-window selector) + eval:memory (memory-recall-snapshot selector) + eval:sop (sop-trace-eval replayable SOP trace selector) + eval:task-outcome (task-outcome-snapshot replay window) + eval:friction (friction-rollup-snapshot replay window) + eval:anchor-first (anchor-telemetry-snapshot rollup window). Unregistered domains return 501. ' +
+      'GOTCHA: wired domains: eval:a2a (snapshot/attribution YAML basenames) + eval:capability-wakeup (replayable trial-window selector) + eval:memory (memory-recall-snapshot selector) + eval:sop (sop-trace-eval replayable SOP trace selector) + eval:task-outcome (task-outcome-snapshot replay window) + eval:friction (friction-rollup-snapshot replay window) + eval:anchor-first (anchor-telemetry-snapshot rollup window) + eval:qc (qc-metrics-rollup replay window). Unregistered domains return 501. ' +
       'GOTCHA: catId must match the registered eval cat for the domain (or its OQ-20 Redis override); 403 not_allowed otherwise. ' +
       'GOTCHA: DO NOT run git push/commit/add yourself; this tool owns the publish lifecycle.',
     inputSchema: publishVerdictInputSchema,

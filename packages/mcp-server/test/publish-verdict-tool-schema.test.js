@@ -361,6 +361,45 @@ describe('cat_cafe_publish_verdict MCP schema (砚砚 R1 Q3: discriminated union
     assert.ok(!result.success, 'non-integer topN should fail Zod int()');
   });
 
+  // F253 Phase C — qc-metrics-rollup kind (eval:qc wire-up)
+  it('accepts qc-metrics-rollup sourceRefs (eval:qc wire-up)', () => {
+    const result = schema.safeParse({
+      domainId: 'eval:qc',
+      packet: { ...validPacket, domainId: 'eval:qc' },
+      sourceRefs: {
+        kind: 'qc-metrics-rollup',
+        windowStartMs: 1782662400000,
+        windowEndMs: 1783267200000,
+      },
+    });
+    assert.ok(result.success, `expected accept, got: ${JSON.stringify(result)}`);
+  });
+
+  it('rejects qc-metrics-rollup with non-finite windowStartMs', () => {
+    const result = schema.safeParse({
+      domainId: 'eval:qc',
+      packet: { ...validPacket, domainId: 'eval:qc' },
+      sourceRefs: {
+        kind: 'qc-metrics-rollup',
+        windowStartMs: 'not-a-number',
+        windowEndMs: 1783267200000,
+      },
+    });
+    assert.ok(!result.success, 'non-finite windowStartMs should fail');
+  });
+
+  it('rejects qc-metrics-rollup with missing windowEndMs', () => {
+    const result = schema.safeParse({
+      domainId: 'eval:qc',
+      packet: { ...validPacket, domainId: 'eval:qc' },
+      sourceRefs: {
+        kind: 'qc-metrics-rollup',
+        windowStartMs: 1782662400000,
+      },
+    });
+    assert.ok(!result.success, 'missing windowEndMs should fail');
+  });
+
   it('rejects sop-trace-eval with missing gitState.branch', () => {
     const result = schema.safeParse({
       domainId: 'eval:sop',
