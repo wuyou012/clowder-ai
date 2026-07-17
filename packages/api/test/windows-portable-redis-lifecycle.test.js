@@ -106,6 +106,7 @@ test('Windows startup preserves runtime Redis overrides, validates artifacts, an
   assert.match(startWindowsScript, /\$apiEntry = Join-Path \$ProjectRoot "packages\/api\/dist\/index\.js"/);
   assert.match(startWindowsScript, /API build artifact not found - run without -Quick first to build/);
   assert.match(startWindowsScript, /Write-Err "Build failed: shared";\s+throw "Build failed: shared"/);
+  assert.match(startWindowsScript, /Write-Err "Build failed: finance";\s+throw "Build failed: finance"/);
   assert.match(startWindowsScript, /Write-Err "Build failed: mcp-server";\s+throw "Build failed: mcp-server"/);
   assert.match(startWindowsScript, /Write-Err "Build failed: api";\s+throw "Build failed: api"/);
   assert.match(startWindowsScript, /Write-Err "Build failed: web";\s+throw "Build failed: web"/);

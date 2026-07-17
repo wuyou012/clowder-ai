@@ -156,6 +156,34 @@ if (-not $pnpmCommand) {
 }
 Write-Ok "pnpm: $pnpmCommand"
 
+function Ensure-ProjectDependencies {
+    $missing = @()
+    $rootTscCmd = Join-Path $ProjectRoot "node_modules/.bin/tsc.CMD"
+    $rootTscUnix = Join-Path $ProjectRoot "node_modules/.bin/tsc"
+    $financeWorkspaceLink = Join-Path $ProjectRoot "packages/mcp-server/node_modules/@cat-cafe/finance/package.json"
+
+    if (-not ((Test-Path $rootTscCmd) -or (Test-Path $rootTscUnix))) {
+        $missing += "root:typescript"
+    }
+    if (-not (Test-Path $financeWorkspaceLink)) {
+        $missing += "packages/mcp-server:@cat-cafe/finance"
+    }
+
+    if ($missing.Count -eq 0) {
+        return
+    }
+
+    Write-Warn "Dependencies incomplete ($($missing -join ', ')) - running pnpm install --frozen-lockfile"
+    & $pnpmCommand install --frozen-lockfile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "pnpm install --frozen-lockfile failed"
+        exit 1
+    }
+    Write-Ok "Dependencies installed"
+}
+
+Ensure-ProjectDependencies
+
 # -- Ports ---------------------------------------------------
 $ApiPort = if ($env:API_SERVER_PORT) { $env:API_SERVER_PORT } else { "3004" }
 $WebPort = if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { "3003" }
@@ -437,6 +465,13 @@ try {
         if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Err "Build failed: shared"; throw "Build failed: shared" }
         Pop-Location
         Write-Ok "shared"
+
+        Write-Host "  Building finance..."
+        Push-Location (Join-Path $ProjectRoot "packages/finance")
+        & $pnpmCommand run build
+        if ($LASTEXITCODE -ne 0) { Pop-Location; Write-Err "Build failed: finance"; throw "Build failed: finance" }
+        Pop-Location
+        Write-Ok "finance"
 
         Write-Host "  Building mcp-server..."
         Push-Location (Join-Path $ProjectRoot "packages/mcp-server")

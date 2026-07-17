@@ -977,6 +977,7 @@ ok "Using project: $PROJECT_DIR"
 pnpm_install_with_fallback || { fail "pnpm install failed in $PROJECT_DIR"; exit 1; }
 ok "Packages installed"
 build_step "shared" pnpm --dir packages/shared run build
+build_step "finance" pnpm --dir packages/finance run build
 build_step "mcp-server" pnpm --dir packages/mcp-server run build
 build_step "api" pnpm --dir packages/api run build
 build_step "web" env NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=3072}" pnpm --dir packages/web run build

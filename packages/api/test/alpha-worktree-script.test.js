@@ -25,6 +25,7 @@ function createTempProject(name) {
   mkdirSync(join(projectDir, 'packages', 'api'), { recursive: true });
   mkdirSync(join(projectDir, 'packages', 'mcp-server'), { recursive: true });
   mkdirSync(join(projectDir, 'packages', 'shared'), { recursive: true });
+  mkdirSync(join(projectDir, 'packages', 'finance'), { recursive: true });
 
   writeFileSync(join(projectDir, 'scripts', 'alpha-worktree.sh'), readFileSync(alphaScriptSource, 'utf8'), {
     mode: 0o755,
@@ -50,6 +51,7 @@ function createTempProject(name) {
   writeFileSync(join(projectDir, 'packages', 'api', 'package.json'), '{}\n', 'utf8');
   writeFileSync(join(projectDir, 'packages', 'mcp-server', 'package.json'), '{}\n', 'utf8');
   writeFileSync(join(projectDir, 'packages', 'shared', 'package.json'), '{}\n', 'utf8');
+  writeFileSync(join(projectDir, 'packages', 'finance', 'package.json'), '{}\n', 'utf8');
 
   return projectDir;
 }
@@ -78,6 +80,8 @@ if [ "\${1:-}" = "install" ] && [ "\${2:-}" = "--frozen-lockfile" ]; then
   : > "$target_dir/packages/api/node_modules/tsx/package.json"
   mkdir -p "$target_dir/packages/mcp-server/node_modules/typescript"
   : > "$target_dir/packages/mcp-server/node_modules/typescript/package.json"
+  mkdir -p "$target_dir/packages/mcp-server/node_modules/@cat-cafe/finance"
+  : > "$target_dir/packages/mcp-server/node_modules/@cat-cafe/finance/package.json"
   exit 0
 fi
 exit 0

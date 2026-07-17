@@ -28,6 +28,7 @@ function createTempProject(name) {
   mkdirSync(join(projectDir, 'packages', 'api'), { recursive: true });
   mkdirSync(join(projectDir, 'packages', 'mcp-server'), { recursive: true });
   mkdirSync(join(projectDir, 'packages', 'shared'), { recursive: true });
+  mkdirSync(join(projectDir, 'packages', 'finance'), { recursive: true });
   writeFileSync(join(projectDir, 'scripts', 'runtime-worktree.sh'), readFileSync(runtimeScriptSource, 'utf8'), {
     mode: 0o755,
   });
@@ -108,6 +109,8 @@ if [ "\${1:-}" = "install" ] && [ "\${2:-}" = "--frozen-lockfile" ]; then
   : > "$target_dir/packages/api/node_modules/tsx/package.json"
   mkdir -p "$target_dir/packages/mcp-server/node_modules/typescript"
   : > "$target_dir/packages/mcp-server/node_modules/typescript/package.json"
+  mkdir -p "$target_dir/packages/mcp-server/node_modules/@cat-cafe/finance"
+  : > "$target_dir/packages/mcp-server/node_modules/@cat-cafe/finance/package.json"
   exit 0
 fi
 if [ "\${1:-}" = "install" ] && [ "\${2:-}" = "--no-frozen-lockfile" ]; then
@@ -118,11 +121,17 @@ if [ "\${1:-}" = "install" ] && [ "\${2:-}" = "--no-frozen-lockfile" ]; then
   : > "$target_dir/packages/api/node_modules/tsx/package.json"
   mkdir -p "$target_dir/packages/mcp-server/node_modules/typescript"
   : > "$target_dir/packages/mcp-server/node_modules/typescript/package.json"
+  mkdir -p "$target_dir/packages/mcp-server/node_modules/@cat-cafe/finance"
+  : > "$target_dir/packages/mcp-server/node_modules/@cat-cafe/finance/package.json"
   exit 0
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build" ]; then
   case "$target_dir" in
     */packages/shared)
+      mkdir -p "$target_dir/dist"
+      : > "$target_dir/dist/index.js"
+      ;;
+    */packages/finance)
       mkdir -p "$target_dir/dist"
       : > "$target_dir/dist/index.js"
       ;;
@@ -166,11 +175,18 @@ function seedRuntimeDependencyMarkers(projectDir) {
   writeFileSync(join(projectDir, 'packages', 'api', 'node_modules', 'tsx', 'package.json'), '{}');
   mkdirSync(join(projectDir, 'packages', 'mcp-server', 'node_modules', 'typescript'), { recursive: true });
   writeFileSync(join(projectDir, 'packages', 'mcp-server', 'node_modules', 'typescript', 'package.json'), '{}');
+  mkdirSync(join(projectDir, 'packages', 'mcp-server', 'node_modules', '@cat-cafe', 'finance'), { recursive: true });
+  writeFileSync(
+    join(projectDir, 'packages', 'mcp-server', 'node_modules', '@cat-cafe', 'finance', 'package.json'),
+    '{}',
+  );
 }
 
 function seedRuntimeBuildArtifacts(projectDir) {
   mkdirSync(join(projectDir, 'packages', 'shared', 'dist'), { recursive: true });
   writeFileSync(join(projectDir, 'packages', 'shared', 'dist', 'index.js'), '');
+  mkdirSync(join(projectDir, 'packages', 'finance', 'dist'), { recursive: true });
+  writeFileSync(join(projectDir, 'packages', 'finance', 'dist', 'index.js'), '');
   mkdirSync(join(projectDir, 'packages', 'api', 'dist'), { recursive: true });
   writeFileSync(join(projectDir, 'packages', 'api', 'dist', 'index.js'), '');
   mkdirSync(join(projectDir, 'packages', 'mcp-server', 'dist'), { recursive: true });
@@ -458,11 +474,12 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     assert.match(result.stdout, /STARTED:/);
     const pnpmLog = readFileSync(env.RUNTIME_TEST_PNPM_LOG, 'utf8').trim().split('\n');
     // After the no-frozen-lockfile install succeeds, the ADR-039 build invariant
-    // rebuilds the missing dist artifacts (shared/api/mcp-server/web) before start.
+    // rebuilds the missing dist artifacts (shared/finance/api/mcp-server/web) before start.
     assert.deepEqual(pnpmLog, [
       '-C ' + projectDir + ' install --frozen-lockfile',
       '-C ' + projectDir + ' install --no-frozen-lockfile',
       '-C ' + projectDir + '/packages/shared run build',
+      '-C ' + projectDir + '/packages/finance run build',
       '-C ' + projectDir + '/packages/api run build',
       '-C ' + projectDir + '/packages/mcp-server run build',
       '-C ' + projectDir + '/packages/web run build',
@@ -603,6 +620,7 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
 
     assert.equal(result.status, 0);
     assert.match(result.stdout, /runtime dist: shared stale\/missing/);
+    assert.match(result.stdout, /runtime dist: finance stale\/missing/);
     assert.match(result.stdout, /runtime dist: api stale\/missing/);
     assert.match(result.stdout, /runtime dist: MCP server stale\/missing/);
     assert.match(result.stdout, /runtime dist: web production build stale\/missing/);
@@ -610,6 +628,7 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
 
     const pnpmLog = readFileSync(env.RUNTIME_TEST_PNPM_LOG, 'utf8');
     assert.match(pnpmLog, /-C .*packages\/shared run build/);
+    assert.match(pnpmLog, /-C .*packages\/finance run build/);
     assert.match(pnpmLog, /-C .*packages\/api run build/);
     assert.match(pnpmLog, /-C .*packages\/mcp-server run build/);
     assert.match(pnpmLog, /-C .*packages\/web run build/);

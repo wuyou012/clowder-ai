@@ -204,6 +204,7 @@ ensure_alpha_dependencies() {
   [ -f "$ALPHA_DIR/packages/web/node_modules/next/package.json" ] || missing+=("packages/web:next")
   [ -f "$ALPHA_DIR/packages/api/node_modules/tsx/package.json" ] || missing+=("packages/api:tsx")
   [ -f "$ALPHA_DIR/packages/mcp-server/node_modules/typescript/package.json" ] || missing+=("packages/mcp-server:typescript")
+  [ -f "$ALPHA_DIR/packages/mcp-server/node_modules/@cat-cafe/finance/package.json" ] || missing+=("packages/mcp-server:@cat-cafe/finance")
 
   if [ "${#missing[@]}" -eq 0 ]; then
     return 0
@@ -410,12 +411,19 @@ build_alpha_stale_packages() {
   local head_commit
   head_commit="$(git -C "$ALPHA_DIR" rev-parse HEAD 2>/dev/null || echo "")"
 
-  # Order: shared first (api/mcp-server depend on it), then api, then mcp-server.
+  # Order: workspace libs first (api/mcp-server depend on them), then api, then mcp-server.
   if needs_rebuild "$ALPHA_DIR/packages/shared/dist/index.js" \
       "$ALPHA_DIR/packages/shared/dist/.build-commit" "$head_commit"; then
     info "alpha dist: shared stale/missing; rebuilding"
     pnpm -C "$ALPHA_DIR/packages/shared" run build
     record_build_stamp "$ALPHA_DIR/packages/shared/dist/.build-commit" "$head_commit"
+  fi
+
+  if needs_rebuild "$ALPHA_DIR/packages/finance/dist/index.js" \
+      "$ALPHA_DIR/packages/finance/dist/.build-commit" "$head_commit"; then
+    info "alpha dist: finance stale/missing; rebuilding"
+    pnpm -C "$ALPHA_DIR/packages/finance" run build
+    record_build_stamp "$ALPHA_DIR/packages/finance/dist/.build-commit" "$head_commit"
   fi
 
   if needs_rebuild "$ALPHA_DIR/packages/api/dist/index.js" \

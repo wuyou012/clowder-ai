@@ -616,6 +616,7 @@ Write-Ok "Dependencies installed"
 if (-not $SkipBuild) {
     $buildSteps = @(
         @{ Name = "shared"; Path = "packages/shared" },
+        @{ Name = "finance"; Path = "packages/finance" },
         @{ Name = "mcp-server"; Path = "packages/mcp-server" },
         @{ Name = "api"; Path = "packages/api" },
         @{ Name = "web"; Path = "packages/web" }

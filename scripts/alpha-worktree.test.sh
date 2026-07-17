@@ -252,6 +252,7 @@ test_build_alpha_stale_packages_rebuilds_missing_dist() {
 
   # Create dist dirs with no dist artifact and no .build-commit stamp (simulates fresh worktree, never built)
   mkdir -p "$ALPHA_DIR/packages/shared/dist"
+  mkdir -p "$ALPHA_DIR/packages/finance/dist"
   mkdir -p "$ALPHA_DIR/packages/api/dist"
   mkdir -p "$ALPHA_DIR/packages/mcp-server/dist"
 
@@ -263,6 +264,10 @@ test_build_alpha_stale_packages_rebuilds_missing_dist() {
 
   echo "$pnpm_calls" | grep -q "packages/shared" || {
     echo "FAIL: shared should be rebuilt when dist is missing"
+    exit 1
+  }
+  echo "$pnpm_calls" | grep -q "packages/finance" || {
+    echo "FAIL: finance should be rebuilt when dist is missing"
     exit 1
   }
   echo "$pnpm_calls" | grep -q "packages/api" || {
@@ -307,7 +312,7 @@ test_build_alpha_stale_packages_skips_fresh_packages() {
   # Create fresh dist artifacts + stamps matching current HEAD
   local head
   head="$(git -C "$ALPHA_DIR" rev-parse HEAD)"
-  for pkg in shared api mcp-server; do
+  for pkg in shared finance api mcp-server; do
     mkdir -p "$ALPHA_DIR/packages/$pkg/dist"
     echo "fake-built" > "$ALPHA_DIR/packages/$pkg/dist/index.js"
     echo "$head" > "$ALPHA_DIR/packages/$pkg/dist/.build-commit"
@@ -357,7 +362,7 @@ test_build_alpha_stale_packages_rebuilds_when_head_moved() {
   # Simulate "built at old HEAD": stamp set to old commit, but current HEAD will move after sync
   local old_head
   old_head="$(git -C "$ALPHA_DIR" rev-parse HEAD)"
-  for pkg in shared api mcp-server; do
+  for pkg in shared finance api mcp-server; do
     mkdir -p "$ALPHA_DIR/packages/$pkg/dist"
     echo "fake-built" > "$ALPHA_DIR/packages/$pkg/dist/index.js"
     echo "$old_head" > "$ALPHA_DIR/packages/$pkg/dist/.build-commit"
@@ -387,6 +392,10 @@ test_build_alpha_stale_packages_rebuilds_when_head_moved() {
 
   echo "$pnpm_calls" | grep -q "packages/shared" || {
     echo "FAIL: shared should be rebuilt after HEAD moved past its stamp"
+    exit 1
+  }
+  echo "$pnpm_calls" | grep -q "packages/finance" || {
+    echo "FAIL: finance should be rebuilt after HEAD moved past its stamp"
     exit 1
   }
   echo "$pnpm_calls" | grep -q "packages/api" || {

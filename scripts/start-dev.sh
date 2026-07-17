@@ -1086,6 +1086,11 @@ build_packages() {
     echo -e "${GREEN}  ✓ shared 构建完成${NC}"
 
     echo ""
+    echo -e "${CYAN}构建 finance...${NC}"
+    run_logged_step "finance 构建" 3 run_in_dir "$PROJECT_DIR/packages/finance" pnpm run build
+    echo -e "${GREEN}  ✓ finance 构建完成${NC}"
+
+    echo ""
     echo -e "${CYAN}构建 MCP Server...${NC}"
     run_logged_step "MCP Server 构建" 3 run_in_dir "$PROJECT_DIR/packages/mcp-server" pnpm run build
     echo -e "${GREEN}  ✓ MCP Server 构建完成${NC}"
@@ -1295,7 +1300,7 @@ main() {
     sanitize_lockfiles
 
     # 2.5. 自动安装依赖（worktree 等场景 node_modules 可能不存在或不完整）
-    if [ ! -x "$PROJECT_DIR/node_modules/.bin/tsc" ]; then
+    if [ ! -x "$PROJECT_DIR/node_modules/.bin/tsc" ] || [ ! -f "$PROJECT_DIR/packages/mcp-server/node_modules/@cat-cafe/finance/package.json" ]; then
         echo ""
         echo -e "${YELLOW}检测到依赖不完整，自动安装...${NC}"
         run_logged_step "pnpm install" 5 \

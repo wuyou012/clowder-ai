@@ -291,6 +291,7 @@ ensure_runtime_dependencies() {
   [ -f "$RUNTIME_DIR/packages/web/node_modules/next/package.json" ] || missing+=("packages/web:next")
   [ -f "$RUNTIME_DIR/packages/api/node_modules/tsx/package.json" ] || missing+=("packages/api:tsx")
   [ -f "$RUNTIME_DIR/packages/mcp-server/node_modules/typescript/package.json" ] || missing+=("packages/mcp-server:typescript")
+  [ -f "$RUNTIME_DIR/packages/mcp-server/node_modules/@cat-cafe/finance/package.json" ] || missing+=("packages/mcp-server:@cat-cafe/finance")
 
   if [ "${#missing[@]}" -eq 0 ]; then
     return 0
@@ -319,12 +320,19 @@ ensure_runtime_dist_freshness() {
   local head_commit
   head_commit="$(git -C "$RUNTIME_DIR" rev-parse HEAD 2>/dev/null || echo "")"
 
-  # Order matters: shared first (api/mcp depend on it), then api, then mcp, then web.
+  # Order matters: workspace libs first (api/mcp depend on them), then api, then mcp, then web.
   if needs_rebuild "$RUNTIME_DIR/packages/shared/dist/index.js" \
       "$RUNTIME_DIR/packages/shared/dist/.build-commit" "$head_commit"; then
     info "runtime dist: shared stale/missing; running pnpm -C \"$RUNTIME_DIR/packages/shared\" run build"
     pnpm -C "$RUNTIME_DIR/packages/shared" run build
     record_build_stamp "$RUNTIME_DIR/packages/shared/dist/.build-commit" "$head_commit"
+  fi
+
+  if needs_rebuild "$RUNTIME_DIR/packages/finance/dist/index.js" \
+      "$RUNTIME_DIR/packages/finance/dist/.build-commit" "$head_commit"; then
+    info "runtime dist: finance stale/missing; running pnpm -C \"$RUNTIME_DIR/packages/finance\" run build"
+    pnpm -C "$RUNTIME_DIR/packages/finance" run build
+    record_build_stamp "$RUNTIME_DIR/packages/finance/dist/.build-commit" "$head_commit"
   fi
 
   if needs_rebuild "$RUNTIME_DIR/packages/api/dist/index.js" \
