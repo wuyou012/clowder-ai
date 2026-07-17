@@ -636,6 +636,8 @@ export class ClaudeAgentService implements AgentService {
         if (summary.stderrExcerpt) successfulExitStderr.stderrExcerpt = summary.stderrExcerpt;
       };
 
+      const semanticCompletionController = new AbortController();
+
       const cliOpts = {
         command: claudeCommand,
         args,
@@ -652,6 +654,7 @@ export class ClaudeAgentService implements AgentService {
         ...(options?.invocationId && this.rawArchive.getPath
           ? { rawArchivePath: this.rawArchive.getPath(options.invocationId) }
           : {}),
+        semanticCompletionSignal: semanticCompletionController.signal,
       };
       const events = options?.spawnCliOverride
         ? options.spawnCliOverride(cliOpts)
@@ -793,7 +796,7 @@ export class ClaudeAgentService implements AgentService {
           // Issue #116 (extended): turn is semantically complete — tell spawnCli to
           // finalize via grace instead of waiting for process exit. Only on result/success
           // (NOT result/error) so real error diagnostics keep flowing through the normal path.
-          semanticCompletion.abort();
+          semanticCompletionController.abort();
         }
 
         const fromResultError = isResultErrorEvent(event);

@@ -173,18 +173,19 @@ export class ConnectorRouter {
   }
 
   private getValidDefaultCatId(): CatId {
-    if (catRegistry.tryGet(this.opts.defaultCatId)) return this.opts.defaultCatId;
+    const configuredDefaultCatId = this.getDefaultCatId();
+    if (catRegistry.tryGet(configuredDefaultCatId)) return configuredDefaultCatId;
 
     const fallback = catRegistry.getAllIds()[0];
     if (fallback) {
       this.opts.log.warn(
-        { configuredDefaultCatId: this.opts.defaultCatId, fallbackCatId: fallback },
+        { configuredDefaultCatId, fallbackCatId: fallback },
         '[ConnectorRouter] Default cat is not registered, using first available cat',
       );
       return fallback;
     }
 
-    return this.opts.defaultCatId;
+    return configuredDefaultCatId;
   }
 
   async route(

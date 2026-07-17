@@ -882,16 +882,6 @@ export type {
   VoiceStreamEvent,
   VoiceStreamStartEvent,
 } from './tts.js';
-// Plugin Framework types (F202 声明式插件注册与资源编排)
-export type {
-  PluginConfigField,
-  PluginHealthCheck,
-  PluginInfo,
-  PluginManifest,
-  PluginResourceDef,
-  PluginResourceStatus,
-  PluginStatus,
-} from './plugin.js';
 // User preferences types (F166 猫猫排序自定义)
 export type { UserPreferences } from './user-preferences.js';
 // Workflow SOP types (F073 告示牌)
