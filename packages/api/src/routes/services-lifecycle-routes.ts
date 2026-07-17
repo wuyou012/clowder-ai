@@ -5,6 +5,7 @@ import { getServiceConfig, setServiceConfig } from '../domains/services/service-
 import {
   appendServiceLog,
   findPidsByPort,
+  isPrimaryServiceProcess,
   isServiceProcessCommand,
   listProcesses,
   type ProcessSnapshot,
@@ -164,6 +165,37 @@ async function probeServiceReady(input: {
   }
 }
 
+/**
+ * Deep health probe: verifies that a service can actually perform its core
+ * function (e.g. TTS synthesis), not just respond to HTTP health endpoints.
+ * Used by startService to detect zombie processes — HTTP alive but inference
+ * pipeline broken (e.g. Broken pipe after prolonged uptime).
+ *
+ * Returns true if no deepHealthPath is configured (services without deep
+ * health are assumed healthy when shallow health passes).
+ */
+async function probeServiceDeepHealth(input: {
+  service: ServiceManifest;
+  env: NodeJS.ProcessEnv;
+  config: ServiceConfig | undefined;
+  fetchHealth: FetchServiceHealth;
+}): Promise<boolean> {
+  if (!input.service.deepHealthPath) return true;
+  const endpoint = resolveServiceEndpoint(input.service, input.env, input.config);
+  if (!endpoint) return false;
+  try {
+    const baseUrl = endpoint.replace(/\/+$/, '');
+    const deepUrl = `${baseUrl}${input.service.deepHealthPath}`;
+    // fetchHealth dispatches the correct timeout internally: deep-health
+    // paths get service.deepHealthTimeoutMs (default 20s) instead of the
+    // standard 1500ms shallow-probe timeout.  (Codex P1 — PR #2122)
+    const health = await input.fetchHealth(deepUrl, input.service);
+    return health.ok;
+  } catch {
+    return false;
+  }
+}
+
 function hasErrorCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
 }
@@ -201,6 +233,28 @@ export async function registerServiceLifecycleRoutes(
     lookupProcessCommand,
     log: app.log,
   });
+
+  /**
+   * Detect non-runtime environments where sidecar lifecycle should be blocked.
+   * Dev worktrees set WORKTREE_PORT_OFFSET; alpha worktrees set
+   * CAT_CAFE_SIDECAR_LIFECYCLE_DISABLED. Both share ~/.cat-cafe/services.json
+   * whose persistent config overrides env-level flags (EMBED_ENABLED=0 etc.),
+   * so we must guard at the API level.
+   */
+  function isNonRuntimeEnv(): boolean {
+    const offset = lifecycleEnv.WORKTREE_PORT_OFFSET;
+    if (offset && offset !== '0') return true;
+    return lifecycleEnv.CAT_CAFE_SIDECAR_LIFECYCLE_DISABLED === '1';
+  }
+
+  /** Reject sidecar lifecycle mutations from worktree environments. */
+  function rejectIfWorktree(reply: LifecycleReply): boolean {
+    if (isNonRuntimeEnv()) {
+      reply.status(409);
+      return true;
+    }
+    return false;
+  }
 
   async function findOwnedServiceProcessPids(service: ServiceManifest): Promise<number[]> {
     const processes = await lookupProcesses();
@@ -373,6 +427,9 @@ export async function registerServiceLifecycleRoutes(
     async (request, reply) => {
       const operator = requireLifecycleOwner(request, reply);
       if (!operator) return lifecycleOwnerError(reply);
+      if (rejectIfWorktree(reply)) {
+        return { error: 'Service sidecar management is disabled in worktree environments' };
+      }
       const service = getServiceManifest(request.params.id);
       if (!service) {
         reply.status(404);
@@ -457,6 +514,9 @@ export async function registerServiceLifecycleRoutes(
     async (request, reply) => {
       const operator = requireLifecycleOwner(request, reply);
       if (!operator) return lifecycleOwnerError(reply);
+      if (rejectIfWorktree(reply)) {
+        return { error: 'Service sidecar management is disabled in worktree environments' };
+      }
       const service = getServiceManifest(request.params.id);
       if (!service) {
         reply.status(404);
@@ -586,6 +646,9 @@ export async function registerServiceLifecycleRoutes(
   app.post<{ Params: { id: string } }>('/api/services/:id/uninstall', async (request, reply) => {
     const operator = requireLifecycleOwner(request, reply);
     if (!operator) return lifecycleOwnerError(reply);
+    if (rejectIfWorktree(reply)) {
+      return { error: 'Service sidecar management is disabled in worktree environments' };
+    }
     const service = getServiceManifest(request.params.id);
     if (!service) {
       reply.status(404);
@@ -641,6 +704,10 @@ export async function registerServiceLifecycleRoutes(
   });
 
   async function startService(service: ServiceManifest, operator: string, reply: LifecycleReply) {
+    if (rejectIfWorktree(reply)) {
+      return { error: 'Service sidecar management is disabled in worktree environments' };
+    }
+
     const startScript = service.scripts?.start;
     if (!startScript) {
       reply.status(400);
@@ -689,16 +756,60 @@ export async function registerServiceLifecycleRoutes(
             fetchHealth: healthProbe,
           });
           if (healthy) {
-            serviceConfigStore.set(service.id, { installed: true, enabled: true });
-            await audit({
-              serviceId: service.id,
-              action: 'start',
-              operator,
-              status: 'completed',
-              reason: 'already-running',
-            });
-            notifyServiceReady(service, operator, 'already-running');
-            return { ok: true, message: `${service.name} is already running`, pids: portProbe.owned };
+            // Deep health probe: detect zombie processes (HTTP alive but
+            // inference pipeline broken, e.g. Broken pipe after 11 days).
+            // If shallow health passes but deep health fails → kill and restart.
+            let deepHealthPassed = true;
+            if (service.deepHealthPath) {
+              deepHealthPassed = await probeServiceDeepHealth({
+                service,
+                env: lifecycleEnv,
+                config: startEffectiveCfg,
+                fetchHealth: healthProbe,
+              });
+              if (!deepHealthPassed) {
+                app.log.warn(
+                  { serviceId: service.id, pids: portProbe.owned },
+                  'service shallow health OK but deep health failed — killing zombie process(es)',
+                );
+                appendServiceLog(
+                  service.id,
+                  `[start] zombie detected: shallow health OK, deep health FAILED — restarting\n`,
+                );
+              }
+            }
+
+            if (deepHealthPassed) {
+              // Verify at least one owned process is the current start
+              // script, not a legacy additionalRuntimeScript (#863).
+              // Legacy processes should be terminated and replaced.
+              let hasPrimaryProcess = false;
+              for (const pid of portProbe.owned) {
+                const cmd = await lookupProcessCommand(pid);
+                if (cmd && isPrimaryServiceProcess(cmd, service)) {
+                  hasPrimaryProcess = true;
+                  break;
+                }
+              }
+              if (hasPrimaryProcess) {
+                serviceConfigStore.set(service.id, { installed: true, enabled: true });
+                await audit({
+                  serviceId: service.id,
+                  action: 'start',
+                  operator,
+                  status: 'completed',
+                  reason: 'already-running',
+                });
+                notifyServiceReady(service, operator, 'already-running');
+                return { ok: true, message: `${service.name} is already running`, pids: portProbe.owned };
+              }
+              // Legacy-only listener: log and fall through to terminate
+              app.log.info(
+                { serviceId: service.id, pids: portProbe.owned },
+                'owned listener is legacy — terminating for current start script',
+              );
+              appendServiceLog(service.id, `[start] legacy process on port — replacing with current start script\n`);
+            }
           }
 
           const stopped: number[] = [];
@@ -995,6 +1106,23 @@ export async function registerServiceLifecycleRoutes(
   }
 
   async function reconcileServiceStartup(): Promise<void> {
+    // Worktrees share ~/.cat-cafe/services.json with the runtime, so a
+    // user-installed service (enabled: true) would auto-start in EVERY
+    // worktree API, all fighting for the same port (e.g. 131 embed-api.py
+    // zombies on 9880). Worktrees disable sidecars via EMBED_ENABLED=0 in
+    // start-dev.sh, but resolveEffectiveServiceConfig reads the persistent
+    // config first and never falls through to env-based derivation.
+    // Guard: skip auto-start entirely when running in a non-runtime env
+    // (dev worktrees via WORKTREE_PORT_OFFSET, alpha via SIDECAR_LIFECYCLE_DISABLED).
+    if (isNonRuntimeEnv()) {
+      app.log.info(
+        'service startup reconciler skipped (worktree offset=%s, sidecar-disabled=%s)',
+        lifecycleEnv.WORKTREE_PORT_OFFSET ?? '<unset>',
+        lifecycleEnv.CAT_CAFE_SIDECAR_LIFECYCLE_DISABLED ?? '<unset>',
+      );
+      return;
+    }
+
     const candidates = SERVICE_MANIFESTS.filter((service) => service.scripts?.start);
     if (candidates.length === 0) return;
 
@@ -1032,6 +1160,9 @@ export async function registerServiceLifecycleRoutes(
   app.post<{ Params: { id: string } }>('/api/services/:id/stop', async (request, reply) => {
     const operator = requireLifecycleOwner(request, reply);
     if (!operator) return lifecycleOwnerError(reply);
+    if (rejectIfWorktree(reply)) {
+      return { error: 'Service sidecar management is disabled in worktree environments' };
+    }
     const service = getServiceManifest(request.params.id);
     if (!service) {
       reply.status(404);
@@ -1110,6 +1241,7 @@ export async function registerServiceLifecycleRoutes(
     async (request, reply) => {
       const operator = requireLifecycleOwner(request, reply);
       if (!operator) return lifecycleOwnerError(reply);
+      if (rejectIfWorktree(reply)) return { error: 'Service sidecar management is disabled in worktree environments' };
       const service = getServiceManifest(request.params.id);
       if (!service) {
         reply.status(404);

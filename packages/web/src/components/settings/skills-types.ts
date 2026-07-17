@@ -1,10 +1,13 @@
 import type { CapabilityBoardItem } from '../capability-board-ui';
 
+export type StandardMountPointKey = 'claude' | 'codex' | 'gemini' | 'kimi';
+
 export interface SkillMount {
   claude: boolean;
   codex: boolean;
   gemini: boolean;
   kimi: boolean;
+  [mountPointId: string]: boolean;
 }
 
 export interface SkillMcpDependency {
@@ -12,45 +15,17 @@ export interface SkillMcpDependency {
   status: 'ready' | 'missing' | 'unresolved';
 }
 
-export interface SkillEntry {
-  name: string;
-  category: string;
-  trigger: string;
-  description?: string;
-  mounts: SkillMount;
-  requiresMcp: SkillMcpDependency[];
+export interface SkillMountHealth {
+  enabledMountPoints: string[];
+  mountedCount: number;
+  requiredCount: number;
+  allMounted: boolean;
 }
 
-export interface SkillsStaleness {
-  stale: boolean;
-  newSkills: string[];
-  removedSkills: string[];
-}
-
-export interface SkillConflict {
-  skillName: string;
-  projectTarget: string;
-  userTarget: string;
-  activeLayer: 'user' | 'project';
-}
-
-export interface SkillsData {
-  skills: SkillEntry[];
-  summary: {
-    total: number;
-    allMounted: boolean;
-    registrationConsistent: boolean;
-  };
-  staleness: SkillsStaleness | null;
-  conflicts: SkillConflict[];
-}
-
-export interface SkillsApiEntry extends Omit<SkillEntry, 'requiresMcp'> {
-  requiresMcp?: SkillMcpDependency[];
-}
-
-export interface SkillsApiData extends Omit<SkillsData, 'skills'> {
-  skills: SkillsApiEntry[];
+export interface SkillsSummary {
+  total: number;
+  allMounted: boolean;
+  registrationConsistent: boolean;
 }
 
 export interface SettingsSkillItem {
@@ -59,12 +34,16 @@ export interface SettingsSkillItem {
   category: string;
   trigger: string;
   description?: string;
+  source: 'cat-cafe' | 'external';
+  mountPaths?: string[];
   pluginId?: string;
   governance: {
     mounts: SkillMount;
     mountedCount: number;
+    requiredMountCount: number;
+    allMounted: boolean;
+    enabledMountPoints: string[];
     requiresMcp: SkillMcpDependency[];
-    hasConflict: boolean;
     isStaleNew: boolean;
     isStaleRemoved: boolean;
   };
@@ -73,20 +52,24 @@ export interface SettingsSkillItem {
     enabled: boolean;
     cats: Record<string, boolean>;
     canToggle: boolean;
-  } | null;
+  };
+}
+
+export interface SkillProjectSyncSummary {
+  totalProjects: number;
+  syncedProjects: number;
+  status: 'all' | 'partial' | 'none' | 'unknown';
 }
 
 export const ALL_CATEGORIES = '全部';
-export const PROVIDER_KEYS: Array<keyof SkillMount> = ['claude', 'codex', 'gemini', 'kimi'];
+export const MOUNT_POINT_KEYS: StandardMountPointKey[] = ['claude', 'codex', 'gemini', 'kimi'];
+
+export type SkillScope = 'all' | 'project';
+export const SCOPE_ALL: SkillScope = 'all';
+export const SCOPE_PROJECT: SkillScope = 'project';
 
 export function getMountedCount(mounts: SkillMount): number {
-  return PROVIDER_KEYS.filter((key) => mounts[key]).length;
-}
-
-export function dependencyTone(status: SkillMcpDependency['status']): string {
-  if (status === 'ready') return 'bg-emerald-100 text-emerald-700';
-  if (status === 'missing') return 'bg-rose-100 text-rose-700';
-  return 'bg-conn-amber-bg text-conn-amber-text';
+  return MOUNT_POINT_KEYS.filter((key) => mounts[key]).length;
 }
 
 export function normalizeSearch(value: string): string {
@@ -97,51 +80,64 @@ export function matchesSkillSearch(skill: SettingsSkillItem, needle: string): bo
   return `${skill.name} ${skill.category} ${skill.trigger} ${skill.description ?? ''}`.toLowerCase().includes(needle);
 }
 
-export function normalizeSkillsData(payload: SkillsApiData): SkillsData {
-  return {
-    ...payload,
-    skills: payload.skills.map((skill) => ({
-      ...skill,
-      requiresMcp: skill.requiresMcp ?? [],
-    })),
-  };
+/** Staleness context derived from capabilities skillHealth. */
+export interface SkillStalenessCtx {
+  unregistered: string[];
+  phantom: string[];
 }
 
-export function composeSkillItems(governance: SkillsData, capabilityItems: CapabilityBoardItem[]): SettingsSkillItem[] {
-  const capMap = new Map<string, CapabilityBoardItem>();
-  for (const item of capabilityItems) {
-    capMap.set(item.id, item);
-  }
+/**
+ * Build skill items from capabilities data.
+ *
+ * Capabilities items are the sole iteration source — plugin skills
+ * show up automatically via their CapabilityBoardItem entries.
+ */
+export function composeSkillItems(
+  capabilityItems: CapabilityBoardItem[],
+  staleness?: SkillStalenessCtx | null,
+): SettingsSkillItem[] {
+  const skillCaps = capabilityItems.filter((i) => i.type === 'skill');
+  const staleNewNames = new Set(staleness?.unregistered ?? []);
+  const staleRemovedNames = new Set(staleness?.phantom ?? []);
 
-  const conflictNames = new Set(governance.conflicts.map((c) => c.skillName));
-  const staleNewNames = new Set(governance.staleness?.newSkills ?? []);
-  const staleRemovedNames = new Set(governance.staleness?.removedSkills ?? []);
-
-  return governance.skills.map((skill) => {
-    const cap = capMap.get(skill.name);
+  return skillCaps.map((cap) => {
+    const mounts: SkillMount = (cap.mounts as SkillMount) ?? {
+      claude: false,
+      codex: false,
+      gemini: false,
+      kimi: false,
+    };
+    const mountedCount = cap.mountHealth?.mountedCount ?? getMountedCount(mounts);
+    const requiredMountCount = cap.mountHealth?.requiredCount ?? MOUNT_POINT_KEYS.length;
+    const allMounted = cap.mountHealth?.allMounted ?? mountedCount === requiredMountCount;
+    const enabledMountPoints = cap.mountHealth?.enabledMountPoints ?? MOUNT_POINT_KEYS;
+    const trigger = cap.triggers?.join('、') || '';
+    const category = cap.category ?? '未分类';
     return {
-      id: skill.name,
-      name: skill.name,
-      category: skill.category,
-      trigger: skill.trigger,
-      description: skill.description,
-      pluginId: cap?.pluginId,
+      id: cap.id,
+      name: cap.id,
+      category,
+      trigger,
+      description: cap.description,
+      source: cap.source,
+      mountPaths: cap.mountPaths,
+      pluginId: cap.pluginId,
       governance: {
-        mounts: skill.mounts,
-        mountedCount: getMountedCount(skill.mounts),
-        requiresMcp: skill.requiresMcp,
-        hasConflict: conflictNames.has(skill.name),
-        isStaleNew: staleNewNames.has(skill.name),
-        isStaleRemoved: staleRemovedNames.has(skill.name),
+        mounts,
+        mountedCount,
+        requiredMountCount,
+        allMounted,
+        enabledMountPoints,
+        requiresMcp: (cap.requiresMcp ?? []) as SkillMcpDependency[],
+        isStaleNew: staleNewNames.has(cap.id),
+        isStaleRemoved: staleRemovedNames.has(cap.id),
       },
-      controls: cap
-        ? {
-            source: cap.source,
-            enabled: cap.enabled,
-            cats: cap.cats ?? {},
-            canToggle: true,
-          }
-        : null,
+      controls: {
+        source: cap.source,
+        enabled: cap.globalEnabled ?? cap.enabled,
+        cats: cap.cats ?? {},
+        canToggle: true,
+      },
     };
   });
 }

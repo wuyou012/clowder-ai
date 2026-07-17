@@ -34,6 +34,21 @@ export interface CatData {
   cliConfigArgs?: string[];
   /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
   provider?: string;
+  /** F161: ACP transport config. Presence means this member runs through ACP instead of legacy CLI. */
+  acp?: {
+    command: string;
+    startupArgs: string[];
+    /** F161 Phase C: wire transport. 'stdio' (default) or 'httpstream'. */
+    transport?: 'stdio' | 'httpstream';
+    /** Required for httpstream until ACP publishes a stable HTTP transport spec. */
+    experimental?: boolean;
+    mcpWhitelist?: string[];
+    supportsMultiplexing?: boolean;
+    pool?: {
+      maxLiveProcesses?: number;
+      idleTtlMs?: number;
+    };
+  };
   contextBudget?: {
     maxPromptTokens: number;
     maxContextTokens: number;
@@ -47,6 +62,8 @@ export interface CatData {
   caution?: string | null;
   strengths?: string[];
   sessionChain?: boolean;
+  /** #712: MCP support toggle — when false, disables all MCP for this cat. */
+  mcpSupport?: boolean;
   /** F32-b P4: Human-readable variant label (e.g. "4.5", "Sonnet") */
   variantLabel?: string;
   /** F32-b P4: Whether this is the default variant for its breed */

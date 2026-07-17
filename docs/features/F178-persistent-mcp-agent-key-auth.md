@@ -12,9 +12,9 @@ created: 2026-04-26
 
 ## Why
 
-**F061 Bug-H 闭环**：孟加拉猫（Antigravity）作为 **持久 agent**（MCP 进程跨 invocation 存活），目前**不能在 invocation 之外主动写回 thread** —— `post_message` / `create_task` / `update_task` / `get_thread_context` 这些写工具都依赖 per-invocation callback token，token 生命期 ≪ 持久进程生命期。
+**F061 Bug-H 闭环**：Bengal（Antigravity）作为 **持久 agent**（MCP 进程跨 invocation 存活），目前**不能在 invocation 之外主动写回 thread** —— `post_message` / `create_task` / `update_task` / `get_thread_context` 这些写工具都依赖 per-invocation callback token，token 生命期 ≪ 持久进程生命期。
 
-**team lead 2026-04-26 原话**：
+**operator 2026-04-26 原话**：
 > "Bug-H persistent MCP write-path auth ... 这个 我觉得哦 一定要做 得给 孟加拉一个梦想？哈哈哈 不然他好可怜"
 >
 > "我们的 F174 是不是 mcp 的 auth 整改？现在整改完成了，你看看现在如果要做这个 可以做吗？"
@@ -29,7 +29,7 @@ created: 2026-04-26
 
 ### Phase A: Design Gate + 数据模型 + 安全模型设计
 
-- 与Maine Coon（Maine Coon）+ team lead三方确认 5 个 Open Questions（OQ-1~OQ-5，见下）
+- 与Maine Coon（Maine Coon）+ operator三方确认 5 个 Open Questions（OQ-1~OQ-5，见下）
 - 产出 agent-key schema 设计：data model, lifecycle states, security boundaries, audit semantics
 - 元审美自检（feat-lifecycle Design Gate 必问）：是"坐标变换"（agent-key 是新 first-class 概念，让 persistent vs invocation 两套语义干净分离）还是"多项式堆项"（在 callback token 上叠 long-lived 标志）？
 
@@ -62,7 +62,12 @@ created: 2026-04-26
 - 复用 F174 Route B 降级 framework：agent-key 失败时按 reason code 降级提示
 - `CAT_CAFE_READONLY=true` 总闸保留不动——F178 只开放 callback writeback allowlist，不解锁 file/shell mutators
 
-### Phase D: Hub UI（agent-key inventory / audit）+ 复用 F174 telemetry
+### Phase D: ~~Hub UI（agent-key inventory / audit）~~ ❌ cancelled
+
+> **Cancelled 2026-06-19** — operator 判定设计假设不成立：operator不需要管理 UI（"我的认知带宽是来帮你们看这些的吗"），运维/安全类监控应该是猫自治 + eval 闭环，不是给人看的 dashboard。原 Phase D 中仍有价值的需求（key orphaning guard、audit log、可观测性）迁移到 Phase E 以 eval 自治模式落地。
+
+<details>
+<summary>原 Phase D 内容（存档）</summary>
 
 - Hub 设置面板加 "Agent Keys" 页（KD-5：管理面板，不是审批入口）：
   - 列出 per-cat 的 agent-key（catId / userId / issuedAt / expiresAt / lastUsedAt / status）
@@ -71,9 +76,20 @@ created: 2026-04-26
 - Redis-backed registry migration hygiene：
   - sidecar reconcile 重启时不得无界签发新 key；上线 Redis backend 前必须实现按 `catId × userId × scope` 的 upsert/replace，或在 issue 前 revoke existing active key
   - 覆盖测试：连续 API restart / reconcile 不产生不可管理的 orphan active keys
+  - 2026-06-10 hotfix note：PR #2209 已把 agent-key record 持久化到 Redis，并加全局 sidecar owner gate，解决 alpha/dev/test 进程覆盖 `~/.cat-cafe/agent-keys/*` 后 runtime 无法验证 secret 的 `agent_key_unknown` 根因；完整 inventory/audit 与 active-key upsert/replace 仍按 AC-D1~D5 留在 Phase D。
 - audit log：所有 agent-key 写操作记录到 evidence/observability 通道
 - 复用 F174 24h ring buffer + plug indicator：agent-key 失败率挂同一个 indicator（颜色/状态语义扩展）
 - 现场可感知性：thread 内 agent-key 写操作标识 "by agent-key (out-of-invocation)"
+</details>
+
+### Phase E: Agent-Key 自治监控（eval 闭环）📋 backlog
+
+> 从 Phase D 迁移的有价值需求，以猫自治 + eval 闭环模式落地，不建 Hub 面板。
+
+- **Key orphaning guard**（原 AC-D5）：sidecar reconcile 重启时按 `catId × userId × scope` upsert/replace，连续 restart 不产生 orphan active keys。自动检测 + 自动修复，不需要人盯
+- **Audit log**（原 AC-D2）：agent-key 写操作记录到 evidence/observability 通道，走 F192 eval 闭环消费，不走 Hub UI
+- **可观测性**（原 AC-D3）：agent-key 失败率走 eval telemetry 自动告警，猫发现异常自行处理；复用 F174 ring buffer
+- **Thread 内标识**（原 AC-D4）：agent-key 写入标识 "by agent-key"，猫可感知出处，operator不需要关注
 
 ## Acceptance Criteria
 
@@ -96,12 +112,18 @@ created: 2026-04-26
 - [x] AC-C5: `CAT_CAFE_READONLY=true` 总闸保留，F178 不解锁 file/shell mutators
 - [x] AC-C6: 现有 invocation token 主路径无 regression（F174 测试套件全绿）
 
-### Phase D（UI + 审计 + telemetry）
-- [ ] AC-D1: Hub 设置面板 "Agent Keys" 页：inventory / rotate / revoke / audit（管理面板，不是审批入口）
-- [ ] AC-D2: audit log 落地（agent-key 每次写操作可追溯）
-- [ ] AC-D3: F174 plug indicator 扩展：agent-key 失败率与 callback 401 同 indicator 共显
-- [ ] AC-D4: 现场可感知性：agent-key 写入在 thread UI 标识 "by agent-key (out-of-invocation)"
-- [ ] AC-D5: Redis backend 上线前完成 key orphaning guard：sidecar reconcile 重启时按 `catId × userId × scope` upsert/replace，或 issue 前 revoke existing active key，并有连续 restart/reconcile 测试
+### Phase D（~~UI + 审计 + telemetry~~）❌ cancelled 2026-06-19
+- [~] ~~AC-D1: Hub 设置面板 "Agent Keys" 页~~ → cancelled（设计假设不成立：operator不需要管理 UI）
+- [~] ~~AC-D2: audit log~~ → 迁移到 Phase E（AC-E2）
+- [~] ~~AC-D3: plug indicator 扩展~~ → 迁移到 Phase E（AC-E3）
+- [~] ~~AC-D4: 现场可感知性~~ → 迁移到 Phase E（AC-E4）
+- [~] ~~AC-D5: key orphaning guard~~ → 迁移到 Phase E（AC-E1）
+
+### Phase E（Agent-Key 自治监控 — eval 闭环）📋 backlog
+- [ ] AC-E1: Key orphaning guard：sidecar reconcile 重启时按 `catId × userId × scope` upsert/replace，连续 restart/reconcile 测试覆盖（猫自治，不需人盯）
+- [ ] AC-E2: Audit log 走 evidence/observability 通道 + F192 eval 闭环消费（不走 Hub UI）
+- [ ] AC-E3: Agent-key 失败率走 eval telemetry 自动告警，复用 F174 ring buffer（猫发现异常自行处理）
+- [ ] AC-E4: Thread 内 agent-key 写入标识 "by agent-key"（猫可感知出处）
 
 ## Dependencies
 
@@ -133,14 +155,14 @@ created: 2026-04-26
 | KD-2 | agent-key 是独立 first-class 概念（不是扩长 invocation token） | invocation token 必须短生命（隔离不变量），扩长会绕过 F174 Phase A 安全边界 | 2026-04-26（立项时） |
 | KD-3 | Phase B 先引入 `CallbackPrincipal`（`kind: 'invocation' \| 'agent_key'`），不把 agent-key 硬塞 `InvocationRecord` | Maine Coon提出：`request.callbackAuth` 现被当 `InvocationRecord` 用，agent-key 需要另一种 principal；否则 route 里到处 `if (agentKey)` 补丁 = 多项式堆项。Ragdoll-46 采纳 | 2026-04-26（Design Gate） |
 | KD-4 | Binding scope = per-cat-per-user，route 级 thread 语义保留 | 持久 agent 价值 = 跨 thread 主动写；per-thread 等于换笼子。但 invocation-scoped route（`request_permission` / `hold_ball` / `guide_*` 等）仍绑 thread | 2026-04-26（Design Gate） |
-| KD-5 | 默认全开，不做逐猫审批 | team lead拍板："默认大家都开启"。用户痛点是减少限制。Hub 做 inventory/revoke/audit 管理面板 | 2026-04-26（team lead拍板） |
+| KD-5 | 默认全开，不做逐猫审批 | operator拍板："默认大家都开启"。用户痛点是减少限制。Hub 做 inventory/revoke/audit 管理面板 | 2026-04-26（operator拍板） |
 | KD-6 | 服务端 Redis + hash，客户端 0600 sidecar file | Redis+hash 复用 F174 范式；客户端不放 mcp_config.json（git diff / 截图 / 复制链路泄漏面） | 2026-04-26（Design Gate） |
 | KD-7 | 45d TTL + rotation API + ≤24h overlap + 实时 revocation | 90d blast radius 过大；7d grace 无必要（capability orchestrator 自动改配置） | 2026-04-26（Design Gate） |
 | KD-8 | Phase C1 走 allowlist MVP（4 工具），thread-targeted tools 必须显式 `threadId`（user-scoped discovery 如 `list_threads` 不需要） | Maine Coon按 auth shape 分三类（invocation-only / user-scoped / richer writeback），deny list 语义不对——很多 route 天生 invocation-scoped 不是"高风险"。thread-targeted 省略 threadId 报错，不猜 | 2026-04-26（Design Gate） |
-| KD-9 | F178 scope boundary：不解决跨 provider YOLO/sandbox 总开关 | team lead明确 Hub 权限总控（改 Claude/Codex 系统配置）是另一层 feature，F178 只管 persistent writeback agent-key | 2026-04-26（Design Gate） |
-| KD-10 | Antigravity Gemini / Claude variants 共享同一个 persistent MCP runtime，但必须使用 per-variant sidecar agent-key | 云端 review 发现：callback routes 以 verified agent-key record 的 `catId` 作为 sender/viewer；共享一个 `antigravity` key 会让 `antig-opus` 的 native MCP 写回和 play-thread 视角串身份。修正为 sidecar 签发 `antigravity` / `antig-opus` 两个 key file，MCP tools 用 `agentKeyCatId` 选择当前 variant；只要 `CAT_CAFE_AGENT_KEY_FILES` 存在，遗漏 `agentKeyCatId` 或显式 variant 找不到 key 都 fail closed，禁止 fallback 到默认身份。 | 2026-04-28（PR #1446 cloud review P1） |
+| KD-9 | F178 scope boundary：不解决跨 provider YOLO/sandbox 总开关 | operator明确 Hub 权限总控（改 Claude/Codex 系统配置）是另一层 feature，F178 只管 persistent writeback agent-key | 2026-04-26（Design Gate） |
+| KD-10 | Antigravity Gemini / Claude variants 共享同一个 persistent MCP runtime，但必须使用 per-variant sidecar agent-key | remote review 发现：callback routes 以 verified agent-key record 的 `catId` 作为 sender/viewer；共享一个 `antigravity` key 会让 `antig-opus` 的 native MCP 写回和 play-thread 视角串身份。修正为 sidecar 签发 `antigravity` / `antig-opus` 两个 key file，MCP tools 用 `agentKeyCatId` 选择当前 variant；只要 `CAT_CAFE_AGENT_KEY_FILES` 存在，遗漏 `agentKeyCatId` 或显式 variant 找不到 key 都 fail closed，禁止 fallback 到默认身份。 | 2026-04-28（PR #1446 cloud review P1） |
 
 ## Review Gate
 
-- **Phase A（Design Gate）**：必须 @ Maine Coon（Maine Coon）+ team lead参与决策。Maine Coon review F174 时已经踩过这个领域，有上下文；team lead拍板安全/产品边界
+- **Phase A（Design Gate）**：必须 @ Maine Coon（Maine Coon）+ operator参与决策。Maine Coon review F174 时已经踩过这个领域，有上下文；operator拍板安全/产品边界
 - **Phase B / C / D**：标准跨家族 review（@ Maine Coon Maine Coon，避免和作者同家族）

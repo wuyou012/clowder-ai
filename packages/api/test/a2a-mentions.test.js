@@ -135,7 +135,7 @@ describe('parseA2AMentions', () => {
 
   it('routes when content comes before @mention (content-before-mention pattern)', async () => {
     const { parseA2AMentions } = await import('../dist/domains/cats/services/agents/routing/a2a-mentions.js');
-    const text = '这是交接文档，DARE 源码目录执行 + 业务项目 workspace\n是否接受完全禁用 --api-key argv\n@opus';
+    const text = '这是交接文档，源码目录执行 + 业务项目 workspace\n是否接受完全禁用 --api-key argv\n@opus';
     const result = parseA2AMentions(text, 'codex');
     assert.deepEqual(result, ['opus']);
   });
@@ -168,22 +168,13 @@ describe('parseA2AMentions', () => {
     assert.deepEqual(result, ['kimi']);
   });
 
-  it('analyzeA2AMentions returns empty suppressed (no suppression system)', async () => {
+  it('analyzeA2AMentions returns mentions and routing_warnings (suppression system removed)', async () => {
     const { analyzeA2AMentions } = await import('../dist/domains/cats/services/agents/routing/a2a-mentions.js');
     const result = analyzeA2AMentions('@布偶猫', 'codex');
     assert.deepEqual(result.mentions, ['opus']);
-    assert.deepEqual(result.suppressed, []);
-  });
-
-  // === Backward compat: mode option is accepted but ignored ===
-
-  it('mode option is accepted but does not affect routing (backward compat)', async () => {
-    const { parseA2AMentions } = await import('../dist/domains/cats/services/agents/routing/a2a-mentions.js');
-    const text = '@布偶猫\n\n这是交接文档';
-    const strict = parseA2AMentions(text, 'codex', { mode: 'strict' });
-    const relaxed = parseA2AMentions(text, 'codex', { mode: 'relaxed' });
-    assert.deepEqual(strict, ['opus']);
-    assert.deepEqual(relaxed, ['opus']);
+    // suppressed field removed — no longer part of the interface
+    assert.equal(result.suppressed, undefined);
+    assert.ok(Array.isArray(result.routing_warnings));
   });
 
   it('does NOT trigger for non-line-start @mention', async () => {

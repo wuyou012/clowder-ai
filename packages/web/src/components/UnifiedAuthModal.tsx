@@ -9,7 +9,7 @@ import { HubIcon } from './hub-icons';
 import { TagEditor } from './hub-tag-editor';
 import { formInputClass } from './mcp-form-helpers';
 
-const CLIENT_OPTIONS: BuiltinAccountClient[] = ['anthropic', 'openai', 'google', 'kimi', 'dare', 'opencode'];
+const CLIENT_OPTIONS: BuiltinAccountClient[] = ['anthropic', 'openai', 'google', 'kimi', 'opencode', 'acp'];
 
 /** Suggested models per client — kept in sync with cat-template.json clientDefaults. */
 const MODEL_SUGGESTIONS: Partial<Record<BuiltinAccountClient, string[]>> = {
@@ -21,8 +21,7 @@ const MODEL_SUGGESTIONS: Partial<Record<BuiltinAccountClient, string[]>> = {
     'claude-opus-4-5-20251101',
   ],
   openai: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.3-codex-spark'],
-  google: ['gemini-2.5-pro', 'gemini-3-flash-preview', 'gemini-3.1-pro-preview'],
-  dare: ['claude-sonnet-4-6'],
+  google: ['Gemini 3.1 Pro (High)', 'Gemini 3.1 Pro (Low)', 'Gemini 3.5 Flash (High)', 'Claude Opus 4.6 (Thinking)'],
   opencode: ['claude-sonnet-4-6', 'claude-opus-4-6'],
 };
 
@@ -210,7 +209,7 @@ export function UnifiedAuthModal({ open, onClose, onCreated, editProfile, initia
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-[var(--console-overlay-medium)] px-4"
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-[var(--console-overlay-medium)] px-4 backdrop-blur-sm"
       onClick={handleClose}
     >
       <div
@@ -376,31 +375,35 @@ export function UnifiedAuthModal({ open, onClose, onCreated, editProfile, initia
                 <div className="space-y-1.5">
                   {envEntries.map((entry, i) => (
                     <div key={i} className="flex items-center gap-1.5">
-                      <input
-                        value={entry.key}
-                        onChange={(e) => {
-                          const next = [...envEntries];
-                          next[i] = { ...next[i], key: e.target.value };
-                          setEnvEntries(next);
-                        }}
-                        placeholder="KEY"
-                        className={`w-[38%] font-mono ${
-                          entry.key.trim() && !isValidEnvKey(entry.key.trim())
-                            ? `${formInputClass} !border-semantic-critical !bg-semantic-critical-surface !text-semantic-critical`
-                            : formInputClass
-                        }`}
-                      />
+                      <div className="w-[38%] shrink-0">
+                        <input
+                          value={entry.key}
+                          onChange={(e) => {
+                            const next = [...envEntries];
+                            next[i] = { ...next[i], key: e.target.value };
+                            setEnvEntries(next);
+                          }}
+                          placeholder="KEY"
+                          className={`font-mono ${
+                            entry.key.trim() && !isValidEnvKey(entry.key.trim())
+                              ? `${formInputClass} !border-semantic-critical !bg-semantic-critical-surface !text-semantic-critical`
+                              : formInputClass
+                          }`}
+                        />
+                      </div>
                       <span className="text-micro text-cafe-muted">=</span>
-                      <input
-                        value={entry.value}
-                        onChange={(e) => {
-                          const next = [...envEntries];
-                          next[i] = { ...next[i], value: e.target.value };
-                          setEnvEntries(next);
-                        }}
-                        placeholder="value"
-                        className={`flex-1 font-mono ${formInputClass}`}
-                      />
+                      <div className="min-w-0 flex-1">
+                        <input
+                          value={entry.value}
+                          onChange={(e) => {
+                            const next = [...envEntries];
+                            next[i] = { ...next[i], value: e.target.value };
+                            setEnvEntries(next);
+                          }}
+                          placeholder="value"
+                          className={`font-mono ${formInputClass}`}
+                        />
+                      </div>
                       <button
                         type="button"
                         onClick={() => setEnvEntries(envEntries.filter((_, j) => j !== i))}

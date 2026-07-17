@@ -8,6 +8,7 @@ import { EvidenceWriteQueue } from './evidence-write-queue.js';
 import { ContradictionDetector } from './f163-contradiction-detector.js';
 import { type F163Authority, freezeFlags, pathToAuthority } from './f163-types.js';
 import { freezeF200Flags } from './f200-types.js';
+import { buildProgressiveFtsQueries } from './fts-query-builder.js';
 import type {
   Edge,
   EntityMatch,
@@ -51,6 +52,19 @@ export interface PassageResult {
   createdAt?: string;
   /** AC-I8: surrounding passages within the context window */
   context?: PassageResult[];
+  /**
+   * @internal Whether this passage was found via semantic NN or entity registry
+   * (not cross-post lexical FTS). Used by BUG-UX-14 scope guard to allow
+   * semantically-relevant new items while blocking lexical cross-post contamination.
+   */
+  _semanticHit?: boolean;
+  /**
+   * @internal Whether this NN-tagged passage was ALSO found via lexical FTS
+   * (set during hybrid RRF merge). Cross-posts share literal query terms and
+   * appear in both lexical and NN results. Purely semantic discoveries appear
+   * only in NN results. The scope guard uses this to distinguish them.
+   */
+  _alsoLexical?: boolean;
 }
 
 export interface EmbedDeps {
@@ -232,13 +246,10 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     }
 
     // ── FTS5 full-text search ────────────────────────────────────────
-    const ftsQuery = trimmed
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((w) => `"${w.replace(/"/g, '""')}"`)
-      .join(' ');
+    // HW-6: Progressive relaxation — try AND-all first, then relax to OR
+    const ftsQueries = buildProgressiveFtsQueries(trimmed);
 
-    if (ftsQuery) {
+    for (const ftsQuery of ftsQueries) {
       try {
         let sql = `
 				SELECT d.*, bm25(evidence_fts, 5.0, 1.0) AS rank
@@ -310,9 +321,9 @@ export class SqliteEvidenceStore implements IEvidenceStore {
             seenAnchors.add(row.anchor);
           }
         }
-      } catch {
-        // FTS5 syntax error (malformed query) — degrade to anchor-only results
-      }
+        // HW-6: if this relaxation level found results, stop trying looser levels
+        if (rows.length > 0) break;
+      } catch {}
     }
 
     // ── Lexical contains backfill: recover substring hits that unicode61 FTS misses ──
@@ -419,7 +430,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
 
     // ── F163: Post-retrieval authority boost (fail-open: Task 11) ──
     try {
-      applyAuthorityBoost(results);
+      applyAuthorityBoost(results, trimmed);
     } catch {
       // Kill-switch: boost failure → continue with original ranking
     }
@@ -740,6 +751,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       speaker: hit.speaker,
       position: hit.position,
       createdAt: hit.createdAt,
+      _semanticHit: true, // entity registry is a strong signal, not cross-post contamination
     };
   }
 
@@ -798,6 +810,13 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       const passage = semanticPassages[i];
       const key = passageVectorKey(passage.docAnchor, passage.passageId);
       scores.set(key, (scores.get(key) ?? 0) + nnWeight / (rrfK + i));
+      // BUG-UX-14 R4: if this passage was already found by lexical FTS,
+      // mark it _alsoLexical so the scope guard can distinguish cross-posts
+      // (found by both lexical+NN) from pure NN discoveries (NN only).
+      const existing = passageMap.get(key);
+      if (existing && !existing._semanticHit) {
+        passage._alsoLexical = true;
+      }
       passageMap.set(key, passage);
     }
 
@@ -867,6 +886,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
         position: row.position ?? undefined,
         rank: hit.distance ?? index,
         createdAt: row.created_at ?? undefined,
+        _semanticHit: true,
       });
     }
     return passages;
@@ -893,13 +913,59 @@ export class SqliteEvidenceStore implements IEvidenceStore {
       if (!passageOrder.has(passage.docAnchor)) passageOrder.set(passage.docAnchor, index);
     }
 
+    // BUG-UX-14 fix: when a scope filter is active (scope != 'all'), guard against
+    // cross-post contamination from passage matches (both lexical AND semantic).
+    //
+    // Passage FTS/NN searches ALL passages without scope filter. A cross-posted
+    // passage in thread B that references topic X causes thread B to leak into
+    // results, leading to teleport buttons that navigate to the wrong thread.
+    //
+    // Guard strategy:
+    //  When doc-level FTS already found primary matches (hasDocLevelResults=true),
+    //  block passage-only new items UNLESS they have at least one purely-semantic
+    //  passage (found by NN only, not by lexical FTS). Cross-posts share literal
+    //  query terms and appear in BOTH lexical and NN results (_alsoLexical=true).
+    //  Pure NN discoveries don't share literal terms — they're semantically
+    //  related via embedding similarity but not lexical cross-posts.
+    //
+    //  When doc-level FTS found nothing (hasDocLevelResults=false), passage search
+    //  is the sole discovery channel — allow through, but verify parent doc kind
+    //  matches scope (R3 kind-scope check below).
+    //
+    // When threadId is specified, passages already passed the threadAnchor filter
+    // (line 887), so they belong to the explicitly requested thread — always allowed.
+    const scopeActive = options?.scope && options.scope !== 'all';
+    const hasExplicitThreadTarget = !!threadAnchor;
+    const hasDocLevelResults = results.length > 0;
+
     for (const [anchor, pList] of passagesByAnchor) {
       let item = results.find((r) => r.anchor === anchor);
       if (!item) {
+        // When scope is active, no explicit thread target, AND doc-level FTS
+        // already found primary matches — block passage-only new items unless
+        // at least one passage is a pure NN discovery (semantic but NOT also
+        // found by lexical FTS). Cross-posts are found by lexical FTS because
+        // they share literal query terms; pure NN discoveries only match via
+        // embedding similarity (BUG-UX-14 R4, cloud P1 on hybrid cross-posts).
+        if (scopeActive && !hasExplicitThreadTarget && hasDocLevelResults) {
+          const hasPurelySemanticDiscovery = pList.some((p) => p._semanticHit && !p._alsoLexical);
+          if (!hasPurelySemanticDiscovery) continue;
+        }
         const parentDoc = this.db?.prepare('SELECT * FROM evidence_docs WHERE anchor = ?').get(anchor) as
           | RowShape
           | undefined;
         if (parentDoc) {
+          // BUG-UX-14 R3 (cloud P1): verify parent doc kind matches scope filter.
+          // Even when the lexical guard above is skipped (hasDocLevelResults=false),
+          // a doc of the wrong kind must not leak into scoped results.
+          // e.g. a session doc passage must not appear in scope='threads' results.
+          if (scopeActive && !hasExplicitThreadTarget) {
+            const effectiveKind =
+              options?.scope === 'threads' ? 'thread' : options?.scope === 'sessions' ? 'session' : undefined;
+            const excludeSessionAndThread = options?.scope === 'docs' || options?.scope === 'memory';
+            if (effectiveKind && parentDoc.kind !== effectiveKind) continue;
+            if (excludeSessionAndThread && (parentDoc.kind === 'session' || parentDoc.kind === 'thread')) continue;
+          }
           item = rowToItem(parentDoc);
           item.summary = `[passage match] ${pList[0].speaker ? `${pList[0].speaker}: ` : ''}${pList[0].content.slice(0, 200)}`;
           results.push(item);
@@ -1015,7 +1081,7 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     query = '',
   ): EvidenceItem[] {
     try {
-      if (this.db) applyConsumptionRerank(results, this.db, targetLimit);
+      if (this.db) applyConsumptionRerank(results, this.db, targetLimit, query);
     } catch {
       // F200 kill-switch: rerank failure → continue with existing ranking
     }
@@ -1637,91 +1703,91 @@ export class SqliteEvidenceStore implements IEvidenceStore {
     const trimmed = query.trim();
     if (!trimmed) return [];
 
-    const ftsQuery = trimmed
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((w) => `"${w.replace(/"/g, '""')}"`)
-      .join(' ');
+    // HW-6: Progressive relaxation for passage search (same fix as doc search)
+    const passageFtsQueries = buildProgressiveFtsQueries(trimmed);
+    if (passageFtsQueries.length === 0) return [];
 
-    if (!ftsQuery) return [];
+    for (const ftsQuery of passageFtsQueries) {
+      try {
+        let sql = `SELECT p.doc_anchor, p.passage_id, p.content, p.speaker, p.position, p.created_at,
+                    bm25(passage_fts) AS rank
+             FROM passage_fts f
+             JOIN evidence_passages p ON p.rowid = f.rowid
+             WHERE passage_fts MATCH ?`;
+        const params: unknown[] = [ftsQuery];
 
-    try {
-      let sql = `SELECT p.doc_anchor, p.passage_id, p.content, p.speaker, p.position, p.created_at,
-                  bm25(passage_fts) AS rank
-           FROM passage_fts f
-           JOIN evidence_passages p ON p.rowid = f.rowid
-           WHERE passage_fts MATCH ?`;
-      const params: unknown[] = [ftsQuery];
-
-      if (timeFilter?.dateFrom) {
-        sql += ' AND p.created_at >= ?';
-        params.push(timeFilter.dateFrom);
-      }
-      if (timeFilter?.dateTo) {
-        // Add 'T23:59:59' to make dateTo inclusive for the full day
-        sql += ' AND p.created_at <= ?';
-        params.push(timeFilter.dateTo.length === 10 ? `${timeFilter.dateTo}T23:59:59` : timeFilter.dateTo);
-      }
-
-      sql += ' ORDER BY rank LIMIT ?';
-      params.push(limit);
-
-      const rows = this.db?.prepare(sql).all(...params) as Array<{
-        doc_anchor: string;
-        passage_id: string;
-        content: string;
-        speaker: string | null;
-        position: number | null;
-        created_at: string | null;
-        rank: number;
-      }>;
-
-      const results: PassageResult[] = (rows ?? []).map((r) => ({
-        docAnchor: r.doc_anchor,
-        passageId: r.passage_id,
-        content: r.content,
-        speaker: r.speaker ?? undefined,
-        position: r.position ?? undefined,
-        rank: r.rank,
-        createdAt: r.created_at ?? undefined,
-      }));
-
-      // AC-I8: fetch surrounding passages within the context window
-      const cw = options?.contextWindow;
-      if (cw && cw > 0 && this.db) {
-        const ctxStmt = this.db.prepare(
-          `SELECT doc_anchor, passage_id, content, speaker, position, created_at
-           FROM evidence_passages
-           WHERE doc_anchor = ? AND position BETWEEN ? AND ? AND passage_id != ?
-           ORDER BY position`,
-        );
-        for (const r of results) {
-          if (r.position != null) {
-            const ctxRows = ctxStmt.all(r.docAnchor, r.position - cw, r.position + cw, r.passageId) as Array<{
-              doc_anchor: string;
-              passage_id: string;
-              content: string;
-              speaker: string | null;
-              position: number | null;
-              created_at: string | null;
-            }>;
-            r.context = ctxRows.map((c) => ({
-              docAnchor: c.doc_anchor,
-              passageId: c.passage_id,
-              content: c.content,
-              speaker: c.speaker ?? undefined,
-              position: c.position ?? undefined,
-              createdAt: c.created_at ?? undefined,
-            }));
-          }
+        if (timeFilter?.dateFrom) {
+          sql += ' AND p.created_at >= ?';
+          params.push(timeFilter.dateFrom);
         }
-      }
+        if (timeFilter?.dateTo) {
+          sql += ' AND p.created_at <= ?';
+          params.push(timeFilter.dateTo.length === 10 ? `${timeFilter.dateTo}T23:59:59` : timeFilter.dateTo);
+        }
 
-      return results;
-    } catch {
-      // FTS5 syntax error — degrade gracefully
-      return [];
+        sql += ' ORDER BY rank LIMIT ?';
+        params.push(limit);
+
+        const rows = this.db?.prepare(sql).all(...params) as Array<{
+          doc_anchor: string;
+          passage_id: string;
+          content: string;
+          speaker: string | null;
+          position: number | null;
+          created_at: string | null;
+          rank: number;
+        }>;
+
+        // HW-6: if this relaxation level found results, process and return
+        if ((rows ?? []).length > 0) {
+          const results: PassageResult[] = (rows ?? []).map((r) => ({
+            docAnchor: r.doc_anchor,
+            passageId: r.passage_id,
+            content: r.content,
+            speaker: r.speaker ?? undefined,
+            position: r.position ?? undefined,
+            rank: r.rank,
+            createdAt: r.created_at ?? undefined,
+          }));
+
+          // AC-I8: fetch surrounding passages within the context window
+          const cw = options?.contextWindow;
+          if (cw && cw > 0 && this.db) {
+            const ctxStmt = this.db.prepare(
+              `SELECT doc_anchor, passage_id, content, speaker, position, created_at
+               FROM evidence_passages
+               WHERE doc_anchor = ? AND position BETWEEN ? AND ? AND passage_id != ?
+               ORDER BY position`,
+            );
+            for (const r of results) {
+              if (r.position != null) {
+                const ctxRows = ctxStmt.all(r.docAnchor, r.position - cw, r.position + cw, r.passageId) as Array<{
+                  doc_anchor: string;
+                  passage_id: string;
+                  content: string;
+                  speaker: string | null;
+                  position: number | null;
+                  created_at: string | null;
+                }>;
+                r.context = ctxRows.map((c) => ({
+                  docAnchor: c.doc_anchor,
+                  passageId: c.passage_id,
+                  content: c.content,
+                  speaker: c.speaker ?? undefined,
+                  position: c.position ?? undefined,
+                  createdAt: c.created_at ?? undefined,
+                }));
+              }
+            }
+          }
+
+          return results;
+        }
+        // 0 rows → try next relaxation level
+      } catch {}
     }
+    // All relaxation levels exhausted — return empty
+    return [];
   }
 
   close(): void {
@@ -1864,9 +1930,10 @@ const AUTHORITY_WEIGHTS: Record<F163Authority, number> = {
  * F163_AUTHORITY_BOOST is 'on'. In 'shadow' mode, the boost is computed
  * but the original order is preserved. In 'off' mode, this is a no-op.
  */
-function applyAuthorityBoost(results: EvidenceItem[]): void {
+function applyAuthorityBoost(results: EvidenceItem[], query = ''): void {
   const flags = freezeFlags();
   if (flags.authorityBoost === 'off' || results.length < 2) return;
+  if (findExactLexicalProtectedAnchors(results, query).size > 0) return;
 
   // RRF-style positional score: 1/(rank+k) keeps adjacent positions close
   // so the 1.0–1.3 authority weight can meaningfully reorder near-tied items.
@@ -1945,13 +2012,47 @@ export function lookupShadowRanking(candidateAnchors: string[]): Array<{ anchor:
   return ranking;
 }
 
-export function applyConsumptionRerank(results: EvidenceItem[], db: Database.Database, targetLimit?: number): void {
+export function applyConsumptionRerank(
+  results: EvidenceItem[],
+  db: Database.Database,
+  targetLimit?: number,
+  query = '',
+): void {
   const f200Flags = freezeF200Flags();
   if (f200Flags.consumptionRerank === 'off' || results.length < 2) return;
 
+  const exactProtectedAnchors = findExactLexicalProtectedAnchors(results, query);
+  const protectedResults = exactProtectedAnchors.size
+    ? results.filter((item) => exactProtectedAnchors.has(item.anchor))
+    : [];
+  const rerankPool = exactProtectedAnchors.size
+    ? results.filter((item) => !exactProtectedAnchors.has(item.anchor))
+    : results;
+  if (rerankPool.length < 2) {
+    if (f200Flags.consumptionRerank === 'on' && protectedResults.length > 0) {
+      for (let i = 0; i < protectedResults.length; i++) results[i] = protectedResults[i];
+      results.length = protectedResults.length;
+    }
+    storeShadowRanking(
+      results.map((r) => r.anchor),
+      results.map((item, i) => ({ anchor: item.anchor, shadowRank: i })),
+    );
+    return;
+  }
+
+  // HW-7: Snapshot pre-rerank BM25 order for shadow comparison.
+  // Previously shadow was stored from `final` (post-rerank), making shadow ≡ live
+  // by construction in 'on' mode — shadowConsumedMRR / liveOnShadowSubsetMRR ≈ 1 always.
+  // Cloud-P2: Must use original `results` array (before partition), not
+  // [protectedResults, rerankPool] which bakes in lexical protection bias.
+  const preRerankOrder: Array<{ anchor: string; shadowRank: number }> = results.map((item, i) => ({
+    anchor: item.anchor,
+    shadowRank: i,
+  }));
+
   const anchorMetrics = loadAnchorMetrics(
     db,
-    results.map((r) => r.anchor),
+    rerankPool.map((r) => r.anchor),
   );
   const globalMeanCtr = loadGlobalCtrBaseline(db);
 
@@ -1959,7 +2060,7 @@ export function applyConsumptionRerank(results: EvidenceItem[], db: Database.Dat
   const BETA = 0.15;
   const GAMMA = 0.1;
 
-  const scored = results.map((item, i) => {
+  const scored = rerankPool.map((item, i) => {
     const metrics = anchorMetrics.get(item.anchor);
     const prior = computeConsumptionPrior(
       {
@@ -1997,29 +2098,57 @@ export function applyConsumptionRerank(results: EvidenceItem[], db: Database.Dat
     movable = mmrResults.map((item, i) => ({ item, newScore: targetLimit - i }));
   }
 
-  const final: EvidenceItem[] = [];
+  const reranked: EvidenceItem[] = [];
   let mi = 0;
-  for (let i = 0; i < results.length; i++) {
+  for (let i = 0; i < rerankPool.length; i++) {
     if (pinned.has(i)) {
-      final.push(pinned.get(i)!);
+      reranked.push(pinned.get(i)!);
     } else if (mi < movable.length) {
-      final.push(movable[mi++].item);
+      reranked.push(movable[mi++].item);
     }
   }
 
-  const shadowOrder: Array<{ anchor: string; shadowRank: number }> = final.map((item, i) => ({
-    anchor: item.anchor,
-    shadowRank: i,
-  }));
+  const final = protectedResults.length > 0 ? [...protectedResults, ...reranked] : reranked;
   if (f200Flags.consumptionRerank === 'on') {
     for (let i = 0; i < final.length; i++) results[i] = final[i];
     results.length = final.length;
   }
+  // HW-7 + Cloud-P1-3: Shadow semantics differ by mode.
+  // 'on' mode:     live = reranked,  shadow = original BM25 → compare rerank vs BM25.
+  // 'shadow' mode:  live = BM25,      shadow = would-be reranked → compare BM25 vs rerank.
+  // Using the same order for both would make shadow ≡ live → zero signal.
+  const shadowOrder =
+    f200Flags.consumptionRerank === 'shadow'
+      ? final.map((item, i) => ({ anchor: item.anchor, shadowRank: i }))
+      : preRerankOrder;
   const keyAnchors =
     targetLimit != null && results.length > targetLimit
       ? results.slice(0, targetLimit).map((r) => r.anchor)
       : results.map((r) => r.anchor);
   storeShadowRanking(keyAnchors, shadowOrder);
+}
+
+function findExactLexicalProtectedAnchors(results: EvidenceItem[], query: string): Set<string> {
+  const trimmed = query.trim();
+  if (!trimmed) return new Set();
+  const words = splitLexicalBackfillWords(trimmed);
+  if (words.length === 0) return new Set();
+  if (words.length < 2 && !hasCJKCharacters(trimmed)) return new Set();
+
+  const protectedAnchors = new Set<string>();
+  for (const item of results) {
+    if (isExactLexicalMatch(item, words)) protectedAnchors.add(item.anchor);
+  }
+  return protectedAnchors;
+}
+
+function isExactLexicalMatch(item: EvidenceItem, words: string[]): boolean {
+  const title = item.title.toLowerCase();
+  const summary = (item.summary ?? '').toLowerCase();
+  const keywords = (item.keywords ?? []).join(' ').toLowerCase();
+  const haystack = `${title} ${summary} ${keywords}`;
+  if (!words.every((word) => haystack.includes(word))) return false;
+  return words.some((word) => title.includes(word) || keywords.includes(word));
 }
 
 function annotateMatchReasons(results: EvidenceItem[], query: string, explain?: boolean): void {

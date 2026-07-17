@@ -9,6 +9,7 @@ const domain = {
   evalCat: { catId: 'codex', handle: '@codex', model: 'gpt-5.5' },
   frequency: 'daily',
   sourceAdapter: 'f167-runtime-eval',
+  sourceRefsKind: 'a2a-snapshot-attribution',
   threadPolicy: {
     role: 'working-home',
     stateSot: 'registry',
@@ -121,7 +122,7 @@ describe('eval:a2a adapter', () => {
     assert.match(packet.ownerAsk.requestedAction, /Build/);
   });
 
-  it('maps sunset findings to delete_sunset verdicts with a CVO gate', () => {
+  it('maps sunset findings to delete_sunset verdicts with a operator gate', () => {
     const packet = buildA2aVerdictHandoff({
       domain,
       snapshot,

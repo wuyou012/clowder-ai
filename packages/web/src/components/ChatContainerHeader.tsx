@@ -1,11 +1,11 @@
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
-import { useChatStore } from '@/stores/chatStore';
+import { useEffect, useState } from 'react';
 import { apiFetch } from '@/utils/api-client';
 import { ChatVoiceFeatureControls } from './ChatVoiceFeatureControls';
 import { ExportButton } from './ExportButton';
 import { CatCafeLogo } from './icons/CatCafeLogo';
 import { ThreadCatPill } from './ThreadCatPill';
+import { ThreadIndicator } from './ThreadIndicator';
 
 interface ChatContainerHeaderProps {
   sidebarOpen: boolean;
@@ -91,8 +91,9 @@ export function ChatContainerHeader({
             />
           </svg>
         </button>
-        {/* F099: Unified right panel toggle (merged workspace + status panel) */}
-        <RightPanelToggle onToggleStatusPanel={onToggleStatusPanel} statusPanelOpen={statusPanelOpen} />
+        {/* F232 AC-A8: 单一 panel 开关（桌面 lg:block）；mode 切换从底部工具栏图标触发。
+            P2-2：右侧 panel desktop-only，小屏走 MobileStatusSheet。 */}
+        <PanelToggle onToggleStatusPanel={onToggleStatusPanel} statusPanelOpen={statusPanelOpen} />
       </div>
     </header>
   );
@@ -143,155 +144,31 @@ function DaemonActiveIndicator({ threadId }: { threadId: string }) {
   );
 }
 
-/** Tail-preserving truncation for project chip labels.
- * The suffix usually carries the distinguishing worktree or nested directory name. */
-export function tailTruncate(name: string, maxLen = 24): string {
-  if (name.length <= maxLen) return name;
-  return `…${name.slice(-(maxLen - 1))}`;
-}
-
-const PROJECT_PATH_COPY_KEYS = new Set(['Enter', ' ']);
-
-/** Thread indicator: shows which thread you're currently chatting in */
-export function ThreadIndicator({ threadId }: { threadId: string }) {
-  const threads = useChatStore((s) => s.threads);
-  const currentThread = threads.find((t) => t.id === threadId);
-  const [copied, setCopied] = useState(false);
-  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const title = currentThread?.title ?? '未命名对话';
-  const rawPath = currentThread?.projectPath ?? '';
-
-  useEffect(() => {
-    if (copyResetTimerRef.current) {
-      clearTimeout(copyResetTimerRef.current);
-      copyResetTimerRef.current = null;
-    }
-    setCopied(false);
-  }, [threadId, rawPath]);
-
-  useEffect(() => {
-    return () => {
-      if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
-    };
-  }, []);
-
-  if (threadId === 'default') {
-    return <p className="text-xs text-cafe-secondary">大厅 · Your AI team collaboration space</p>;
-  }
-
-  // 'default' is a sentinel for threads without a real projectPath — match exact value, not basename
-  const rawBasename = rawPath === 'default' ? '' : (rawPath.split(/[/\\]/).pop() ?? '');
-  // Map known internal repo basenames to brand name; preserve real project paths for multi-workspace
-  const INTERNAL_BASENAMES = ['cat-cafe', 'cat-cafe-runtime', 'clowder-ai'];
-  const brandName = process.env.NEXT_PUBLIC_BRAND_NAME ?? '';
-  const projectName = INTERNAL_BASENAMES.includes(rawBasename) && brandName ? brandName : rawBasename;
-  const displayName = tailTruncate(projectName);
-  const copyPath = rawPath === 'default' ? '' : rawPath;
-  const projectChipLabel = copied ? 'copied!' : displayName;
-
-  const handleCopyPath = () => {
-    if (!copyPath) return;
-    const cb = typeof navigator !== 'undefined' && navigator.clipboard ? navigator.clipboard : null;
-    if (!cb) return;
-    if (typeof cb.writeText !== 'function') return;
-    void Promise.resolve()
-      .then(() => cb.writeText(copyPath))
-      .then(
-        () => {
-          if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
-          setCopied(true);
-          copyResetTimerRef.current = setTimeout(() => {
-            setCopied(false);
-            copyResetTimerRef.current = null;
-          }, 1200);
-        },
-        () => {},
-      );
-  };
-
-  return (
-    <div className="flex min-w-0 items-baseline text-xs text-cafe-secondary">
-      <span className="truncate min-w-0 font-medium text-cafe-secondary" title={title}>
-        {title}
-      </span>
-      {projectName && (
-        <span
-          className="flex-shrink-0 max-w-[40%] sm:max-w-[200px] overflow-hidden whitespace-nowrap text-cafe-muted cursor-pointer hover:text-cafe-secondary transition-colors"
-          title={copied ? '已复制!' : `点击复制: ${copyPath}`}
-          aria-label={copied ? '已复制项目路径' : `点击复制项目路径: ${copyPath}`}
-          onClick={handleCopyPath}
-          onKeyDown={(e) => {
-            if (PROJECT_PATH_COPY_KEYS.has(e.key)) {
-              e.preventDefault();
-              handleCopyPath();
-            }
-          }}
-          role="button"
-          tabIndex={0}
-        >
-          {' '}
-          · {projectChipLabel}
-        </span>
-      )}
-    </div>
-  );
-}
+// ThreadIndicator extracted to ./ThreadIndicator.tsx (inline title editing).
+// Brand: INTERNAL_BASENAMES ('cat-cafe', 'cat-cafe-runtime') now live in ThreadIndicator.tsx.
+// Re-export for backward compat (tests, other consumers)
+export { ThreadIndicator, tailTruncate } from './ThreadIndicator';
 
 /**
- * F099: Pure state-transition logic for the right panel toggle.
- * Exported for testability — the component delegates to this function.
+ * F232 AC-A8: 单一 panel 开关。原 F099 RightPanelToggle + F232 ArtifactsToggle
+ * 收敛成一个 toggle——mode 切换从底部工具栏图标触发。桌面 lg:block，小屏走 MobileStatusSheet。
  */
-export function rightPanelToggleTransition(
-  statusPanelOpen: boolean,
-  rightPanelMode: 'status' | 'workspace' | 'transcript',
-  callbacks: {
-    onToggleStatusPanel: () => void;
-    setRightPanelMode: (mode: 'status' | 'workspace' | 'transcript') => void;
-  },
-) {
-  if (!statusPanelOpen) {
-    callbacks.onToggleStatusPanel();
-    callbacks.setRightPanelMode('status');
-  } else if (rightPanelMode === 'status') {
-    callbacks.setRightPanelMode('workspace');
-  } else {
-    callbacks.onToggleStatusPanel();
-    callbacks.setRightPanelMode('status');
-  }
-}
-
-function RightPanelToggle({
+function PanelToggle({
   onToggleStatusPanel,
   statusPanelOpen,
 }: {
   onToggleStatusPanel: () => void;
   statusPanelOpen: boolean;
 }) {
-  const rightPanelMode = useChatStore((s) => s.rightPanelMode);
-  const setRightPanelMode = useChatStore((s) => s.setRightPanelMode);
-
-  const handleClick = () => {
-    rightPanelToggleTransition(statusPanelOpen, rightPanelMode, {
-      onToggleStatusPanel,
-      setRightPanelMode,
-    });
-  };
-
-  const isWorkspace = rightPanelMode === 'workspace';
-  const label = !statusPanelOpen ? '打开面板' : isWorkspace ? '关闭面板' : '工作区';
-
   return (
     <button
-      onClick={handleClick}
+      type="button"
+      onClick={onToggleStatusPanel}
       className={`p-1 rounded-lg transition-colors ml-1 hidden lg:block ${
-        statusPanelOpen
-          ? isWorkspace
-            ? 'bg-[var(--cafe-accent)]/5 text-[var(--cafe-accent)]'
-            : 'text-cafe-accent'
-          : 'text-cafe-secondary hover:text-cafe-accent'
+        statusPanelOpen ? 'text-cafe-accent' : 'text-cafe-secondary hover:text-cafe-accent'
       }`}
-      aria-label={label}
-      title={label}
+      aria-label={statusPanelOpen ? '收起面板' : '打开面板'}
+      title={statusPanelOpen ? '收起面板' : '打开面板'}
     >
       <svg className="w-5 h-5" viewBox="0 0 20 20" fill="currentColor">
         <path

@@ -92,6 +92,17 @@ printf 'ok'
   assert.equal(output, 'ok');
 });
 
+test('start-dev auto-install clears inherited production install env', () => {
+  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
+  const scriptText = readFileSync(scriptPath, 'utf8');
+
+  assert.match(
+    scriptText,
+    /run_logged_step "pnpm install" 5\s+\\?\s*env -u NODE_ENV -u npm_config_production -u NPM_CONFIG_PRODUCTION\s+\\?\s*pnpm install --frozen-lockfile/,
+    'auto-install must clear production install env before invoking pnpm install',
+  );
+});
+
 test('probe_port_with_dev_tcp falls back when timeout is unavailable', async () => {
   const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
   const tempRoot = mkdtempSync(join(tmpdir(), 'cat-cafe-start-dev-no-timeout-'));
@@ -602,6 +613,56 @@ test('.env.local can activate respect-dotenv-ports mode (#603)', () => {
 
     assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.equal(result.stdout.trim(), '3013');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('global sidecar owner marker from wrapper env beats dotenv values', () => {
+  const tmp = createTempProject();
+  try {
+    writeFileSync(join(tmp, '.env.local'), 'CAT_CAFE_PROVISION_GLOBAL_SIDECAR=0\n');
+    const scriptPath = join(tmp, 'scripts', 'start-dev.sh');
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\nprintf '%s' "$CAT_CAFE_PROVISION_GLOBAL_SIDECAR"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv({ CAT_CAFE_PROVISION_GLOBAL_SIDECAR: '1' }),
+      },
+    );
+
+    assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), '1');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('dotenv cannot grant global sidecar ownership without wrapper env', () => {
+  const tmp = createTempProject();
+  try {
+    writeFileSync(join(tmp, '.env.local'), 'CAT_CAFE_PROVISION_GLOBAL_SIDECAR=1\n');
+    const scriptPath = join(tmp, 'scripts', 'start-dev.sh');
+
+    const result = spawnSync(
+      'bash',
+      [
+        '-lc',
+        `set -e\nsource "${scriptPath}" --source-only >/dev/null 2>&1\ntrap - EXIT INT TERM\nprintf '%s' "\${CAT_CAFE_PROVISION_GLOBAL_SIDECAR-unset}"`,
+      ],
+      {
+        encoding: 'utf8',
+        env: baseShellEnv(),
+      },
+    );
+
+    assert.equal(result.status, 0, `snippet failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), 'unset');
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -1133,6 +1194,34 @@ printf '%s' "$(api_launch_command)"
   assert.equal(output, 'cd packages/api && exec env NODE_ENV=production pnpm run start');
 });
 
+test('api_launch_command defaults to no-watch in production web mode', () => {
+  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
+  const output = runSourceOnlySnippet(
+    scriptPath,
+    `
+unset CAT_CAFE_DIRECT_NO_WATCH
+PROD_WEB=true
+printf '%s' "$(api_launch_command)"
+`,
+  );
+
+  assert.equal(output, 'cd packages/api && exec env NODE_ENV=production pnpm run start');
+});
+
+test('api_launch_command keeps the dev watcher in non-production web mode', () => {
+  const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
+  const output = runSourceOnlySnippet(
+    scriptPath,
+    `
+unset CAT_CAFE_DIRECT_NO_WATCH
+PROD_WEB=false
+printf '%s' "$(api_launch_command)"
+`,
+  );
+
+  assert.equal(output, 'cd packages/api && exec env NODE_ENV=development pnpm run dev');
+});
+
 test('api_launch_command routes multiple env assignments through env before pnpm', () => {
   const scriptPath = resolve(process.cwd(), '../../scripts/start-dev.sh');
   const output = runSourceOnlySnippet(
@@ -1172,7 +1261,9 @@ test('api_launch_command output is actually executable: pnpm gets invoked with N
     const result = spawnSync(
       'bash',
       [
-        '-lc',
+        '--noprofile',
+        '--norc',
+        '-c',
         `set -e
 source "${scriptPath}" --source-only >/dev/null 2>&1
 trap - EXIT INT TERM
@@ -1255,7 +1346,9 @@ test('frontend_launch_command dev mode overrides inherited production NODE_ENV',
     const result = spawnSync(
       'bash',
       [
-        '-lc',
+        '--noprofile',
+        '--norc',
+        '-c',
         `set -e
 source "${scriptPath}" --source-only >/dev/null 2>&1
 trap - EXIT INT TERM

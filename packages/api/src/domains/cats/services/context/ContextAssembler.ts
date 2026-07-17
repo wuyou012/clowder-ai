@@ -34,14 +34,28 @@ export interface AssembledContext {
 const DEFAULT_MAX_MESSAGES = 20;
 const DEFAULT_MAX_CONTENT_LENGTH = 1500;
 const DEFAULT_MAX_TOTAL_TOKENS = 2000;
+/** #699: Max chars for inline reply-to preview (saves agents a get_message tool call) */
+const REPLY_PREVIEW_LENGTH = 60;
+
+/**
+ * Build a lookup map from message array for O(1) replyTo resolution.
+ * Used by formatMessage to inline reply-to previews.
+ */
+export function buildMessageMap(messages: readonly StoredMessage[]): ReadonlyMap<string, StoredMessage> {
+  const map = new Map<string, StoredMessage>();
+  for (const m of messages) {
+    map.set(m.id, m);
+  }
+  return map;
+}
 
 /**
  * Get display name for a message sender.
- * catId === null → user ("铲屎官"), otherwise look up catRegistry.
+ * catId === null → user ("co-creator"), otherwise look up catRegistry.
  * For variant cats (e.g. sonnet, opus-45), includes variantLabel to distinguish same-family members.
  */
 export function getSenderName(catId: string | null): string {
-  if (catId === null) return '铲屎官';
+  if (catId === null) return 'co-creator';
   const entry = catRegistry.tryGet(catId);
   const config = entry?.config;
   if (!config) return catId;
@@ -51,6 +65,39 @@ export function getSenderName(catId: string | null): string {
     return config.displayName;
   }
   return `${config.displayName}(${variantLabel})`;
+}
+
+/**
+ * Sanitize an external display name for safe embedding in prompt history
+ * headers. Strips characters that could break the `[HH:MM sender] content`
+ * format or spoof other speakers:
+ *  - Line breaks (`\n`, `\r`, U+2028, U+2029) → space
+ *  - Brackets (`[`, `]`) → removed
+ *  - C0/C1 control chars (U+0000–U+001F except \t, U+007F–U+009F) → removed
+ */
+function sanitizeDisplaySegment(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw
+    .replace(/[\n\r\u2028\u2029]/g, ' ')
+    .replace(/[[\]]/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '')
+    .trim();
+}
+
+/**
+ * Get display name for a connector source, including individual sender
+ * for group chat messages. Without sender info (p2p / system), falls
+ * back to source.label as before.
+ *
+ * Format: `SenderName via Label` (group) | `Label` (p2p/system)
+ */
+function getSourceDisplayName(source: { label: string; sender?: { id: string; name?: string } }): string {
+  const safeLabel = sanitizeDisplaySegment(source.label);
+  if (source.sender) {
+    const name = sanitizeDisplaySegment(source.sender.name || source.sender.id);
+    return `${name} via ${safeLabel}`;
+  }
+  return safeLabel;
 }
 
 /**
@@ -76,23 +123,45 @@ function truncateHeadTail(content: string, limit: number): string {
  */
 export function formatMessage(
   msg: StoredMessage,
-  options?: { truncate?: number; formatTime?: (epochMs: number) => string },
+  options?: {
+    truncate?: number;
+    formatTime?: (epochMs: number) => string;
+    /** #699: Message lookup map for inline reply-to preview */
+    messageMap?: ReadonlyMap<string, StoredMessage>;
+    /** #699 P2: Sanitizer for parent content before inlining preview (prevents injection via quoted text) */
+    sanitizeContent?: (content: string) => string;
+  },
 ): string {
   // Default formatter: UTC (formatPromptTime) for prompt injection — cats need
   // to align with external UTC sources. Non-prompt consumers (e.g. user-facing
   // export route) pass their own formatter to avoid leaking UTC into documents
   // whose header/footer use host-local time.
   const time = (options?.formatTime ?? formatPromptTime)(msg.timestamp);
-  const sender = msg.source ? msg.source.label : getSenderName(msg.catId);
+  const sender = msg.source ? getSourceDisplayName(msg.source) : getSenderName(msg.catId);
   // F52: Annotate cross-thread messages with source thread
   const crossPostTag = msg.extra?.crossPost?.sourceThreadId
     ? ` ← from thread:${msg.extra.crossPost.sourceThreadId.slice(0, 8)}`
     : '';
+
+  // #699: Inline reply-to preview — saves agents a get_message tool call.
+  // Only resolves when messageMap is provided and the parent is in scope.
+  let replyPrefix = '';
+  if (msg.replyTo && options?.messageMap) {
+    const parent = options.messageMap.get(msg.replyTo);
+    if (parent) {
+      const parentSender = parent.source ? getSourceDisplayName(parent.source) : getSenderName(parent.catId);
+      const sanitized = options?.sanitizeContent ? options.sanitizeContent(parent.content) : parent.content;
+      const raw = sanitized.replaceAll('\n', ' ');
+      const preview = raw.length > REPLY_PREVIEW_LENGTH ? `${raw.slice(0, REPLY_PREVIEW_LENGTH)}…` : raw;
+      replyPrefix = `[↩ ${parentSender}: ${preview}] `;
+    }
+  }
+
   let content = msg.content;
   if (options?.truncate && content.length > options.truncate) {
     content = truncateHeadTail(content, options.truncate);
   }
-  return `[${time} ${sender}${crossPostTag}] ${content}`;
+  return `[${time} ${sender}${crossPostTag}] ${replyPrefix}${content}`;
 }
 
 /**
@@ -107,14 +176,21 @@ export function assembleContext(messages: StoredMessage[], options?: ContextAsse
 
   // F117: exclude undelivered messages (queued/canceled) from prompt context
   // Also exclude system-generated messages (userId='system') — these are display-only
-  // (e.g. persisted error badges) and must not re-enter the prompt as "铲屎官" messages.
+  // (e.g. persisted error badges) and must not re-enter the prompt as "co-creator" messages.
+  // #699: exclude briefing messages (origin='briefing') — non-routing internal artifacts
+  // that must not appear in prompt context or reply preview maps (consistent with
+  // isEligibleReplyParent and incremental context paths which already exclude them).
   // Defense: also exclude legacy error messages that were incorrectly persisted with
   // userId=user by route-parallel.ts (context poisoning bug, fixed in PR #992).
   // Only filter cat messages (catId !== null) starting with [错误] — user messages are legit.
   // All 6 known contaminated records start with [错误] (no partial-text-before-error exists
   // in practice, since stream_idle_stall means zero text was produced before the error).
   const deliveredMessages = messages.filter(
-    (m) => isDelivered(m) && m.userId !== 'system' && !(m.catId && m.content?.startsWith('[错误]')),
+    (m) =>
+      isDelivered(m) &&
+      m.userId !== 'system' &&
+      m.origin !== 'briefing' &&
+      !(m.catId && m.content?.startsWith('[错误]')),
   );
 
   if (deliveredMessages.length === 0) {
@@ -124,8 +200,13 @@ export function assembleContext(messages: StoredMessage[], options?: ContextAsse
   // Take the most recent N messages (messages are already chronological from store)
   const recent = deliveredMessages.length > maxMessages ? deliveredMessages.slice(-maxMessages) : deliveredMessages;
 
+  // #699: Build message map for inline reply-to preview resolution.
+  // Use deliveredMessages (not raw input) so system/undelivered/error parents
+  // can't leak into prompt via formatMessage's inline preview.
+  const messageMap = buildMessageMap(deliveredMessages);
+
   // Format all messages, then apply token budget from most-recent backward
-  const formatted = recent.map((m) => formatMessage(m, { truncate: maxContentLength }));
+  const formatted = recent.map((m) => formatMessage(m, { truncate: maxContentLength, messageMap }));
 
   // Estimate overhead for header + separator
   const overheadTokens = estimateTokens('[对话历史 - 最近 99 条]\n[/对话历史]');

@@ -12,6 +12,7 @@ const domain = {
   evalCat: { catId: 'codex', handle: '@codex', model: 'gpt-5.5' },
   frequency: 'daily',
   sourceAdapter: 'f167-runtime-eval',
+  sourceRefsKind: 'a2a-snapshot-attribution',
   threadPolicy: {
     role: 'working-home',
     stateSot: 'registry',
@@ -149,6 +150,43 @@ describe('eval:a2a live verdict generator', () => {
     assert.match(markdown, new RegExp(`snapshot:bundle/${verdictId}/snapshot`));
   });
 
+  it('preserves counter_window through YAML → bundle JSON round-trip (F167 sibling-PR P1)', () => {
+    // Without parser + bundle support for counter_window, the silent false
+    // positive fix dies at the artifact boundary: formatter writes it, reader
+    // strips it, eval cats see only window (trace) and underreport rates.
+    const { root, snapshotPath: baseSnapshotPath, attributionPath } = createRawArtifacts();
+    const harnessFeedbackRoot = join(root, 'docs/harness-feedback');
+    // Append counter_window to the snapshot YAML (after window block).
+    // mkdirSync handled in createRawArtifacts; we patch the existing file.
+    const original = readFileSync(baseSnapshotPath, 'utf8');
+    const withCounterWindow = original.replace(
+      /( {2}duration_hours: 24\n)/,
+      '$1\ncounter_window:\n  start_ms: 1779512800000\n  end_ms: 1779516400000\n  duration_hours: 1\n',
+    );
+    writeFileSync(baseSnapshotPath, withCounterWindow);
+
+    const verdictId = '2026-05-22-eval-a2a-live-verdict-cwin';
+    generateA2aLiveVerdict({
+      verdictId,
+      rawSnapshotPath: baseSnapshotPath,
+      rawAttributionPath: attributionPath,
+      harnessFeedbackRoot,
+      domain,
+      generatedAt: '2026-05-22T18:02:00.000Z',
+      generatorCommit: 'test-commit',
+    });
+
+    const bundleSnapshot = JSON.parse(
+      readFileSync(join(harnessFeedbackRoot, 'bundles', verdictId, 'snapshot.json'), 'utf8'),
+    );
+    assert.ok(bundleSnapshot.counterWindow, 'bundle snapshot must carry counterWindow forward');
+    assert.equal(bundleSnapshot.counterWindow.startMs, 1779512800000);
+    assert.equal(bundleSnapshot.counterWindow.endMs, 1779516400000);
+    assert.equal(bundleSnapshot.counterWindow.durationHours, 1);
+    // Trace window stays distinct (silent FP fix invariant)
+    assert.equal(bundleSnapshot.window.durationHours, 24);
+  });
+
   it('normalizes provenance raw input paths to repo-relative portable paths', () => {
     const { root, snapshotPath, attributionPath } = createRawArtifacts();
     const harnessFeedbackRoot = join(root, 'docs/harness-feedback');
@@ -265,6 +303,88 @@ describe('eval:a2a live verdict generator', () => {
           generatorCommit: 'test-commit',
         }),
       /raw artifact eval snapshot mismatch/,
+    );
+  });
+
+  // 砚砚 R8 P1 + cloud R8 P1: submittedPacket honored — cat owns verdict, tool
+  // does NOT silently regenerate from evidence. Critical for Phase H cat-mediated
+  // publish (cat_cafe_publish_verdict MCP) where cat sends keep_observe but
+  // generator's strongestFinding heuristic would derive fix.
+  it('honors submittedPacket — verdict.md reflects cat verdict, not regenerated', () => {
+    const { root, snapshotPath, attributionPath } = createRawArtifacts();
+    const harnessFeedbackRoot = join(root, 'docs/harness-feedback');
+    const submitted = {
+      id: '2026-05-22-cat-mediated-test',
+      domainId: 'eval:a2a',
+      createdAt: '2026-05-22T18:00:00.000Z',
+      phenomenon: 'Cat says: confounding factor present, prefer observe',
+      harnessUnderEval: { featureId: 'F167', componentId: 'cat-judged-component', name: 'cat-named' },
+      evidencePacket: {
+        snapshotRefs: ['placeholder:will-be-overridden'],
+        attributionRefs: ['placeholder:will-be-overridden'],
+        metricRefs: ['metric:cat.signal'],
+        sampleTraceRefs: ['trace:cat-001'],
+      },
+      dailyTrend: { window: '24h', current: { a: 1 }, baseline: { a: 1 }, threshold: { a: 5 }, direction: 'flat' },
+      rootCauseHypothesis: { summary: 'noise', confidence: 'medium', alternatives: ['alt'] },
+      verdict: 'keep_observe',
+      ownerAsk: { targetFeatureId: 'F167', targetOwnerCatId: 'opus-47', requestedAction: 'observe' },
+      acceptanceReevalPlan: { nextEvalAt: '2026-05-29T18:00:00.000Z', closureCondition: 'stable for 1 week' },
+      counterarguments: ['evidence strongestFinding may suggest fix; cat sees confounder'],
+    };
+
+    const artifact = generateA2aLiveVerdict({
+      verdictId: submitted.id,
+      rawSnapshotPath: snapshotPath,
+      rawAttributionPath: attributionPath,
+      harnessFeedbackRoot,
+      domain,
+      submittedPacket: submitted,
+    });
+
+    // Verdict.md must contain CAT's verdict + phenomenon, not regenerated
+    assert.match(artifact.markdown, /Verdict: `keep_observe`/);
+    assert.match(artifact.markdown, /Cat says: confounding factor present, prefer observe/);
+    assert.match(artifact.markdown, /Owner ask: observe/);
+    // 砚砚 R14 P2 + cloud R14 P2: metric ref must NOT be double-prefixed.
+    // submittedPacket here uses pre-prefixed 'metric:cat.signal' — renderer must
+    // produce '- metric:cat.signal' (not '- metric:metric:cat.signal').
+    assert.match(artifact.markdown, /^- metric:cat\.signal$/m, 'metric ref must have exactly one metric: prefix');
+    assert.doesNotMatch(artifact.markdown, /metric:metric:/, 'no double prefix allowed');
+    // evidencePacket refs must be authoritatively overridden to bundle refs
+    assert.notEqual(artifact.packet.evidencePacket.snapshotRefs[0], 'placeholder:will-be-overridden');
+    assert.match(artifact.packet.evidencePacket.snapshotRefs[0], /bundle/);
+  });
+
+  it('rejects submittedPacket when featureId disagrees with snapshot evidence', () => {
+    const { root, snapshotPath, attributionPath } = createRawArtifacts();
+    const harnessFeedbackRoot = join(root, 'docs/harness-feedback');
+    const wrongFeature = {
+      id: '2026-05-22-wrong-feature',
+      domainId: 'eval:a2a',
+      createdAt: '2026-05-22T18:00:00.000Z',
+      phenomenon: 'submitted with mismatched featureId',
+      harnessUnderEval: { featureId: 'F999', componentId: 'x', name: 'y' }, // snapshot is F167
+      evidencePacket: { snapshotRefs: ['a'], attributionRefs: ['a'], metricRefs: [], sampleTraceRefs: [] },
+      dailyTrend: { window: '24h', current: { a: 1 }, baseline: { a: 1 }, threshold: { a: 5 }, direction: 'flat' },
+      rootCauseHypothesis: { summary: 'x', confidence: 'low', alternatives: ['x'] },
+      verdict: 'keep_observe',
+      ownerAsk: { targetFeatureId: 'F999', targetOwnerCatId: 'opus-47', requestedAction: 'observe' },
+      acceptanceReevalPlan: { nextEvalAt: '2026-05-29T18:00:00.000Z', closureCondition: 'x' },
+      counterarguments: ['x'],
+    };
+
+    assert.throws(
+      () =>
+        generateA2aLiveVerdict({
+          verdictId: wrongFeature.id,
+          rawSnapshotPath: snapshotPath,
+          rawAttributionPath: attributionPath,
+          harnessFeedbackRoot,
+          domain,
+          submittedPacket: wrongFeature,
+        }),
+      /submitted_packet_evidence_mismatch/,
     );
   });
 });

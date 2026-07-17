@@ -81,8 +81,9 @@ your-projects/
 | `pnpm stop` | Stop background daemon |
 | `pnpm start:status` | Check if daemon is running |
 | `pnpm runtime:init` | Only create the runtime worktree (no start) |
-| `pnpm runtime:sync` | Only sync worktree to origin/main (no start) |
 | `pnpm runtime:status` | Show worktree path, branch, HEAD, ahead/behind |
+
+> Runtime contract (ADR-039 passive frozen): `pnpm start` is the single entry; sync+build+restart are folded into one command. There is no standalone sync — that was removed to prevent stale-dist crashes (see ADR-039).
 
 First run creates `../cat-cafe-runtime` automatically. Subsequent runs do a fast-forward sync then start.
 
@@ -313,8 +314,9 @@ These services are disabled by default. Set the corresponding `*_ENABLED=1` flag
 ./scripts/tts-server.sh                    # default: Qwen3-TTS (三猫声线)
 TTS_PROVIDER=edge-tts ./scripts/tts-server.sh  # edge-tts fallback (no GPU needed)
 
-# ASR (Speech-to-Text) — requires Python 3 + ffmpeg
-./scripts/qwen3-asr-server.sh             # Qwen3-ASR server
+# ASR (Speech-to-Text) — requires Python 3 + ffmpeg, unified whisper-stt service
+WHISPER_MODEL=mlx-community/Qwen3-ASR-1.7B-8bit ./scripts/services/whisper-server.sh  # Qwen3-ASR
+WHISPER_MODEL=mlx-community/whisper-large-v3-turbo ./scripts/services/whisper-server.sh # Whisper
 ```
 
 > **System dependency**: `ffmpeg` is required for audio processing. Install with `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Linux).
@@ -498,10 +500,9 @@ pnpm stop               # Stop background daemon
 pnpm start:status       # Check if daemon is running
                         # View logs: tail -f cat-cafe-daemon.log
 
-# === Runtime Worktree ===
+# === Runtime Worktree (ADR-039 passive frozen) ===
 pnpm runtime:init       # Create runtime worktree (first time only)
-pnpm runtime:sync       # Sync worktree to origin/main
-pnpm runtime:start      # Sync + start from worktree
+pnpm runtime:start      # Single entry: sync + build + start (no standalone sync)
 pnpm runtime:status     # Show worktree status
 
 # === Build & Test ===

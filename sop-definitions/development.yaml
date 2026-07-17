@@ -1,7 +1,7 @@
 id: development
 domain: engineering
 label: Development SOP
-description: Cat Cafe coding feature lifecycle. This is the runtime SOP definition used by WorkflowSop.
+description: Clowder AI coding feature lifecycle. This is the runtime SOP definition used by WorkflowSop.
 stages:
   - id: kickoff
     label: 立项
@@ -12,14 +12,14 @@ stages:
         severity: blocker
         predicate:
           type: manual_only
-          reason: Feature spec completeness is reviewed from docs and CVO context; no stable machine artifact yet.
+          reason: Feature spec completeness is reviewed from docs and operator context; no stable machine artifact yet.
     pitfalls:
       - id: kickoff-no-unconfirmed-implementation
-        text: 没有铲屎官确认就直接开始实现
+        text: 没有co-creator确认就直接开始实现
         severity: warn
         predicate:
           type: manual_only
-          reason: CVO confirmation is conversational intent, not yet represented as a structured event.
+          reason: operator confirmation is conversational intent, not yet represented as a structured event.
 
   - id: impl
     label: 实现
@@ -42,13 +42,21 @@ stages:
           key: REDIS_URL
           must_include: ":6398"
           must_not_include: ":6399"
-    pitfalls:
       - id: impl-design-gate-before-code
-        text: 跳过 Design Gate 直接写代码
-        severity: warn
+        text: 跳过 Design Gate（含 User Journey 落盘）直接写代码
+        severity: blocker
         predicate:
           type: manual_only
-          reason: Design Gate evidence is feature-specific and not yet represented by a structured artifact.
+          reason: Design Gate evidence and User Journey section are feature-doc fields; upgrade to feature_doc_readiness_check when checker script is available.
+          future_candidate: feature_doc_readiness_check
+      - id: impl-user-journey-missing
+        text: 用户可感知 Feature 缺 User Journey 段（或 user_journey_exempt）
+        severity: blocker
+        predicate:
+          type: command_pattern
+          must_match: pnpm check:features|node scripts/check-feature-truth
+          reason: "check-feature-truth.mjs now checks changed feature docs for ## User Journey presence. F252 root cause — session vs thread scope mismatch went undetected because journey was never written down."
+    pitfalls:
       - id: impl-post-compact-recall-loss
         text: 压缩后忘了当前在做什么
         severity: warn
@@ -56,6 +64,13 @@ stages:
           type: manual_only
           reason: Current runtime has no stable post-compact recall-failure telemetry.
           future_candidate: trace_pattern_post_compact_recall
+      - id: impl-convention-graph-before-convention-edit
+        text: 改 MCP tool / skill manifest / route / callback 等约定面前，先用 convention graph 查影响面；stale=true 先 reindex
+        severity: warn
+        predicate:
+          type: manual_only
+          reason: Convention graph CLI usage is not yet emitted as structured telemetry.
+          future_candidate: convention_graph_usage_event
 
   - id: quality_gate
     label: 自检
@@ -75,6 +90,19 @@ stages:
         predicate:
           type: command_pattern
           must_match: pnpm gate|pnpm test|pnpm --filter .* test|node --test
+
+  - id: fresh_context
+    label: Fresh-Context Pre-Review
+    suggested_skill: fresh-context-review
+    optional: true
+    hard_rules: []
+    pitfalls:
+      - id: fresh-context-not-approval
+        text: Fresh-context 是 finding generator，不是 approval authority——不产出 verdict，不记入 Review Provenance Matrix
+        severity: warn
+        predicate:
+          type: manual_only
+          reason: Fresh-context output is free-form finding list, not a structured verdict event.
 
   - id: review
     label: Review
@@ -122,6 +150,13 @@ stages:
         predicate:
           type: sha_dedup
           scope: cloud_review
+      - id: merge-feature-doc-truth
+        text: merge 前核对 feature doc 是否说真话（Status/AC/Phase vs 代码现实），merge 后记录已合入状态
+        severity: blocker
+        predicate:
+          type: manual_only
+          reason: Claimed-done vs code-real reconciliation is semantic; check-feature-truth mechanically guards only obvious status/timeline drift. Detailed pre/post steps live in merge-gate SKILL Step 7.5.
+          future_candidate: feature_doc_truth_check
     pitfalls:
       - id: merge-local-squash-close
         text: 本地 squash + push + gh pr close（PR 显示 closed 不是 merged）

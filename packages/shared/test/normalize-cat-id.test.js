@@ -34,6 +34,34 @@ const TEST_CAT_FIXTURES = {
     roleDescription: 'Code reviewer',
     personality: 'meticulous',
   },
+  gemini25: {
+    id: createCatId('gemini25'),
+    name: '暹罗猫',
+    displayName: '暹罗猫',
+    nickname: '烁烁',
+    avatar: '/avatars/gemini25.png',
+    color: { primary: '#42A5F5', secondary: '#BBDEFB' },
+    mentionPatterns: ['@gemini25', '@gemini-25', '@暹罗gemini25'],
+    clientId: 'google',
+    defaultModel: 'gemini-3.5-flash',
+    mcpSupport: true,
+    roleDescription: 'Creative visual designer',
+    personality: 'energetic',
+  },
+  gemini35: {
+    id: createCatId('gemini35'),
+    name: '暹罗猫',
+    displayName: '暹罗猫 Gemini 3.5',
+    nickname: '烁烁',
+    avatar: '/avatars/gemini35.png',
+    color: { primary: '#42A5F5', secondary: '#BBDEFB' },
+    mentionPatterns: ['@gemini35', '@gemini-35', '@gemini3.5', '@flash', '@暹罗flash', '@暹罗gemini35'],
+    clientId: 'google',
+    defaultModel: 'Gemini 3.5 Flash (High)',
+    mcpSupport: true,
+    roleDescription: 'Creative visual designer',
+    personality: 'energetic',
+  },
 };
 
 /** Build a CatConfig from test fixtures + overrides */
@@ -56,6 +84,8 @@ describe('normalizeCatId (F154 AC-A3, AC-A7)', () => {
       }),
     );
     catRegistry.register('codex', makeCatConfig('codex'));
+    catRegistry.register('gemini25', makeCatConfig('gemini25'));
+    catRegistry.register('gemini35', makeCatConfig('gemini35'));
   });
   after(() => catRegistry.reset());
 
@@ -90,6 +120,26 @@ describe('normalizeCatId (F154 AC-A3, AC-A7)', () => {
     const r = normalizeCatId('@Codex');
     assert.equal(r.ok, true);
     assert.equal(r.catId, 'codex');
+  });
+
+  // --- Gemini 3.5 alias tests ---
+  it('gemini35 alias resolves to standalone gemini35 breed (not gemini25)', () => {
+    const r1 = normalizeCatId('@gemini35');
+    assert.equal(r1.ok, true);
+    assert.equal(r1.catId, 'gemini35');
+
+    const r2 = normalizeCatId('gemini-35');
+    assert.equal(r2.ok, true);
+    assert.equal(r2.catId, 'gemini35');
+
+    // Legacy alias preserved: @暹罗gemini35 was on gemini25, now belongs to gemini35
+    const r3 = normalizeCatId('@暹罗gemini35');
+    assert.equal(r3.ok, true);
+    assert.equal(r3.catId, 'gemini35');
+
+    const r4 = normalizeCatId('@gemini25');
+    assert.equal(r4.ok, true);
+    assert.equal(r4.catId, 'gemini25');
   });
 
   // --- Not found ---

@@ -1,14 +1,14 @@
 /**
  * Plugin Framework Types — F202 声明式插件注册与资源编排
+ *
+ * F240 KD-15: PluginConfigField replaced by shared ValueConfigField.
+ * Alias kept for import compatibility during transition; plugins only use value fields.
  */
 
-/** Plugin config field declaration (from plugin.yaml) */
-export interface PluginConfigField {
-  envName: string;
-  label: string;
-  sensitive: boolean;
-  required: boolean;
-}
+import type { ValueConfigField } from './config-field.js';
+
+/** @deprecated Use ValueConfigField from config-field.ts directly. */
+export type PluginConfigField = ValueConfigField;
 
 /** Plugin health check declaration */
 export interface PluginHealthCheck {
@@ -19,6 +19,10 @@ export interface PluginHealthCheck {
 /** Plugin resource declaration */
 export interface PluginResourceDef {
   type: 'skill' | 'mcp' | 'limb' | 'schedule';
+  /** F202 Phase 2: Factory ID for schedule resources (white-list reference, no arbitrary scripts) */
+  factoryId?: string;
+  /** F202 Phase 2 follow-up: optional resources don't count toward 'partial' status when deps are missing */
+  optional?: boolean;
   path?: string;
   name?: string;
   command?: string;
@@ -67,7 +71,8 @@ export interface PluginInfo {
   setupSteps?: string[];
   status: PluginStatus;
   configured: boolean;
-  config: (PluginConfigField & { currentValue: string | null })[];
+  /** Config fields with current values. `sensitive` is computed from field type. */
+  config: (ValueConfigField & { currentValue: string | null; sensitive: boolean })[];
   healthCheck?: PluginHealthCheck;
   resources: PluginResourceStatus[];
   hasHealthCheck: boolean;

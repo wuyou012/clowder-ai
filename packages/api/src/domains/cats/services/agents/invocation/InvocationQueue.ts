@@ -39,7 +39,7 @@ export interface QueueEntry {
   /** F175: queue-internal priority — urgent entries sort before normal in dequeue */
   priority: 'urgent' | 'normal';
   /** F175: origin category for visual grouping */
-  sourceCategory?: 'ci' | 'review' | 'conflict' | 'scheduled' | 'a2a' | 'continuation';
+  sourceCategory?: 'ci' | 'review' | 'conflict' | 'scheduled' | 'a2a' | 'continuation' | 'issue' | 'freshness';
   /** Queue-internal dedup key for agent control-flow work. */
   continuationKey?: string;
   /** F175: user drag-reorder position — explicit values override priority in dequeue */
@@ -455,6 +455,22 @@ export class InvocationQueue {
     return null;
   }
 
+  /**
+   * Find the in-flight (processing) entry occupying a cat's per-cat slot in a thread, across all
+   * users. 2026-06-02 (Steer 无法抢占): steer-immediate uses this to locate the entry whose
+   * executeEntry holds the slot, so it can tombstone it (removeProcessedAcrossUsers) instead of
+   * force-releasing the slot — the tombstone makes executeEntry self-abort at its post-startAll
+   * guard, which is race-safe through the pre-start (create-await) window. Returns null if none.
+   */
+  findProcessingByCat(threadId: string, catId: string): QueueEntry | null {
+    for (const q of this.queues.values()) {
+      if (!this.queueMatchesThread(q, threadId)) continue;
+      const entry = q.find((e) => e.status === 'processing' && (e.targetCats[0] ?? 'unknown') === catId);
+      if (entry) return entry;
+    }
+    return null;
+  }
+
   /** Get unique userIds that have entries (any status) for this thread. */
   listUsersForThread(threadId: string): string[] {
     const users: string[] = [];
@@ -854,6 +870,49 @@ export class InvocationQueue {
       if (q.some((e) => e.status === 'queued' && e.source === 'user')) return true;
     }
     return false;
+  }
+
+  /**
+   * #815: Find queued A2A trigger entries whose target cats are all active.
+   * Scoped to a single userId — prompt context assembly is per-user, so
+   * consuming another user's A2A entry would silently lose their trigger.
+   * Returns candidates without removing them — caller performs async
+   * delivery-status filtering, then calls `consumeEntriesById` to remove.
+   */
+  findSubsumedA2ACandidates(threadId: string, userId: string, activeCatSet: Set<string>): QueueEntry[] {
+    const q = this.queues.get(this.scopeKey(threadId, userId));
+    if (!q) return [];
+    const candidates: QueueEntry[] = [];
+    for (const e of q) {
+      if (e.status !== 'queued') continue;
+      if (e.sourceCategory !== 'a2a') continue;
+      if (!e.targetCats.every((cat) => activeCatSet.has(cat))) continue;
+      candidates.push(e);
+    }
+    return candidates;
+  }
+
+  /**
+   * #815: Remove specific entries by ID. Returns removed entries.
+   * Used after async filtering of A2A candidates by delivery status.
+   */
+  consumeEntriesById(entryIds: Set<string>): QueueEntry[] {
+    const consumed: QueueEntry[] = [];
+    for (const q of this.queues.values()) {
+      for (let i = q.length - 1; i >= 0; i--) {
+        if (entryIds.has(q[i]!.id)) {
+          this.originalContents.delete(q[i]!.id);
+          consumed.push(q.splice(i, 1)[0]!);
+        }
+      }
+    }
+    if (consumed.length > 0) {
+      this.log.info(
+        { count: consumed.length, entryIds: consumed.map((e) => e.id) },
+        '#815: consumed A2A entries by ID',
+      );
+    }
+    return consumed;
   }
 
   // ── Internal helpers ──

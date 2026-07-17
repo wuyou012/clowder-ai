@@ -1,7 +1,7 @@
 name: Build Windows Desktop
 
 # Reusable workflow: builds Windows installer (.exe) and portable zip for
-# Cat Cafe. Produces both CatCafe-Setup-*.exe and CatCafe-*.zip.
+# Clowder AI. Produces both CatCafe-Setup-*.exe and CatCafe-*.zip.
 #
 # Called by: release-desktop.yml (orchestrator)
 # Standalone: workflow_dispatch for dry-run verification
@@ -58,7 +58,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
 
       - name: Install Inno Setup

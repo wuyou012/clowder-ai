@@ -47,6 +47,19 @@ describe('TaskStore', () => {
       const task = store.create(makeInput({ ownerCatId: 'codex' }));
       assert.equal(task.ownerCatId, 'codex');
     });
+
+    it('preserves F233 probe + resolveMode metadata', () => {
+      const task = store.create(
+        makeInput({
+          resolveMode: 'completes',
+          probe: { kind: 'redis_exists', key: 'cat-cafe:probe:ready' },
+        }),
+      );
+
+      assert.equal(task.resolveMode, 'completes');
+      assert.deepEqual(task.probe, { kind: 'redis_exists', key: 'cat-cafe:probe:ready' });
+      assert.deepEqual(store.get(task.id).probe, task.probe);
+    });
   });
 
   describe('update', () => {
@@ -87,6 +100,21 @@ describe('TaskStore', () => {
       const updated = store.update(task.id, { status: 'doing' });
       assert.equal(updated.ownerCatId, 'opus');
       assert.equal(updated.title, '重构 AgentRouter');
+    });
+
+    it('updates F233 probe + resolveMode metadata', () => {
+      const task = store.create(makeInput());
+      const updated = store.update(task.id, {
+        resolveMode: 'bounces_back',
+        probe: { kind: 'http_get', url: 'http://127.0.0.1:3102/ready', expectStatus: 200 },
+      });
+
+      assert.equal(updated.resolveMode, 'bounces_back');
+      assert.deepEqual(updated.probe, {
+        kind: 'http_get',
+        url: 'http://127.0.0.1:3102/ready',
+        expectStatus: 200,
+      });
     });
   });
 
@@ -138,6 +166,39 @@ describe('TaskStore', () => {
       assert.equal(reopened.id, original.id);
       assert.equal(reopened.threadId, 'thread-2');
       assert.equal(reopened.status, 'todo');
+    });
+
+    it('rejects cross-thread claims of legacy subject tasks when caller has a userId', () => {
+      const original = store.create(
+        makeInput({
+          kind: 'pr_tracking',
+          subjectKey: 'pr:owner/repo#43',
+          threadId: 'thread-owner',
+          title: 'Legacy PR tracking',
+          ownerCatId: 'opus',
+        }),
+      );
+
+      assert.throws(
+        () =>
+          store.upsertBySubject(
+            makeInput({
+              kind: 'pr_tracking',
+              subjectKey: 'pr:owner/repo#43',
+              threadId: 'thread-attacker',
+              title: 'Hijacked PR tracking',
+              ownerCatId: 'codex',
+              userId: 'user-attacker',
+            }),
+          ),
+        /already owned by another user/,
+      );
+
+      const entry = store.getBySubject('pr:owner/repo#43');
+      assert.equal(entry.id, original.id);
+      assert.equal(entry.threadId, 'thread-owner');
+      assert.equal(entry.ownerCatId, 'opus');
+      assert.equal(entry.userId, undefined);
     });
   });
 
@@ -232,6 +293,104 @@ describe('TaskStore', () => {
       store.create(makeInput({ title: 'new-task' }));
       assert.equal(store.size, 5);
       assert.equal(store.get(tasks[0].id), null);
+    });
+  });
+
+  // --- F193 Phase E: dispatch gate ---
+
+  describe('dispatch gate (F193-E1)', () => {
+    it('persists relatedFeatureId when provided', () => {
+      const task = store.create(makeInput({ relatedFeatureId: 'F193' }));
+      assert.equal(task.relatedFeatureId, 'F193');
+      const retrieved = store.get(task.id);
+      assert.equal(retrieved.relatedFeatureId, 'F193');
+    });
+
+    it('persists detectedFeatureIds when provided', () => {
+      const task = store.create(makeInput({ detectedFeatureIds: ['F128', 'F193'] }));
+      assert.deepStrictEqual(task.detectedFeatureIds, ['F128', 'F193']);
+    });
+
+    it('persists dispatchGate with status missing', () => {
+      const gate = {
+        status: 'missing',
+        suggestedAction: {
+          type: 'cross_post',
+          featureId: 'F193',
+          reason: 'Task references F193',
+          source: 'dispatch_gate',
+        },
+      };
+      const task = store.create(makeInput({ dispatchGate: gate }));
+      assert.equal(task.dispatchGate.status, 'missing');
+      assert.equal(task.dispatchGate.suggestedAction.featureId, 'F193');
+      assert.equal(task.dispatchGate.suggestedAction.source, 'dispatch_gate');
+    });
+
+    it('persists dispatchGate with status dispatched', () => {
+      const gate = {
+        status: 'dispatched',
+        dispatchedThreadId: 'thread_f193',
+        dispatchedMessageId: 'msg-123',
+        decidedAt: Date.now(),
+      };
+      const task = store.create(makeInput({ dispatchGate: gate }));
+      assert.equal(task.dispatchGate.status, 'dispatched');
+      assert.equal(task.dispatchGate.dispatchedThreadId, 'thread_f193');
+    });
+
+    it('persists dispatchGate with status not_dispatched + reason', () => {
+      const gate = {
+        status: 'not_dispatched',
+        reason: 'Will fix in this thread as part of current scope',
+        decidedAt: Date.now(),
+      };
+      const task = store.create(makeInput({ dispatchGate: gate }));
+      assert.equal(task.dispatchGate.status, 'not_dispatched');
+      assert.equal(task.dispatchGate.reason, 'Will fix in this thread as part of current scope');
+    });
+
+    it('omits dispatch gate fields when not provided', () => {
+      const task = store.create(makeInput());
+      assert.equal(task.relatedFeatureId, undefined);
+      assert.equal(task.detectedFeatureIds, undefined);
+      assert.equal(task.dispatchGate, undefined);
+    });
+  });
+
+  describe('patchAutomationState: issue cursor anti-regression (Cloud R19 P2)', () => {
+    it('re-patching with stale cursor seeds does NOT lower existing issue lastCommentCursor or lastDeliveredCursor', () => {
+      // Simulate: task seeded with high cursors (normal operation, 100 comments processed)
+      const task = store.create(
+        makeInput({
+          kind: 'issue_tracking',
+          subjectKey: 'issue:owner/repo#10',
+          title: 'Track owner/repo#10',
+        }),
+      );
+      // First patch: set cursors to high values (as if 100 comments processed)
+      store.patchAutomationState(task.id, {
+        issue: { lastCommentCursor: 100, lastDeliveredCursor: 90 },
+      });
+
+      // Second patch: re-route with stale seed (lastCommentCursor=0, lastDeliveredCursor=0)
+      // This simulates duplicate case routing in dev/test with no-Redis fallback
+      store.patchAutomationState(task.id, {
+        issue: { lastCommentCursor: 0, lastDeliveredCursor: 0 },
+      });
+
+      const updated = store.get(task.id);
+      // Cursors must NOT be lowered — shallow spread `{ ...existing, ...patch }` would lower them to 0
+      assert.equal(
+        updated.automationState?.issue?.lastCommentCursor,
+        100,
+        'lastCommentCursor must not be lowered by stale re-patch',
+      );
+      assert.equal(
+        updated.automationState?.issue?.lastDeliveredCursor,
+        90,
+        'lastDeliveredCursor must not be lowered by stale re-patch',
+      );
     });
   });
 });

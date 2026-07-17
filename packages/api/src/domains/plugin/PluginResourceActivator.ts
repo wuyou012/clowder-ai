@@ -1,18 +1,30 @@
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, realpath, rm, stat, symlink } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
-import type {
-  CapabilitiesConfig,
-  CapabilityEntry,
-  ILimbNode,
-  PluginManifest,
-  PluginResourceDef,
+import {
+  type CapabilitiesConfig,
+  type CapabilityEntry,
+  type ILimbNode,
+  type MountRules,
+  type PluginManifest,
+  type PluginResourceDef,
+  STANDARD_MOUNT_POINT_IDS,
 } from '@cat-cafe/shared';
+import {
+  installMcpCapability,
+  type McpConfigIO,
+  removeMcpCapability,
+} from '../../config/capabilities/capability-mcp-service.js';
+import { readMountRules } from '../../config/mount/mount-rules-store.js';
+import type { TaskSpec_P1 } from '../../infrastructure/scheduler/types.js';
+import { addSkill, cascadeToProjects, removeSkill } from '../../skills/skill-manage.js';
+import { classifyMountPath } from '../../skills/skill-sync-engine.js';
+import { buildSkillMountTargets } from '../../utils/skill-mount.js';
 import type { LimbRegistry } from '../limb/LimbRegistry.js';
 import { normalizeCapId, resolvePluginResourcePath, resourceCapId, resourcePathBasename } from './PluginRegistry.js';
 import { resolvePluginEnv } from './plugin-config-store.js';
-
-const PROVIDER_DIRS = ['.claude/skills', '.codex/skills', '.gemini/skills', '.kimi/skills'];
+import type { ScheduleFactoryDeps, ScheduleFactoryRegistry } from './ScheduleFactoryRegistry.js';
 
 export interface ActivationResult {
   type: string;
@@ -27,16 +39,43 @@ export interface ActivatePluginResult {
   resources: ActivationResult[];
 }
 
-export type LimbAdapterFactory = (pluginId: string, limbYamlPath: string) => Promise<ILimbNode>;
+export type LimbAdapterFactory = (
+  pluginId: string,
+  limbYamlPath: string,
+  pluginConfig: Record<string, string>,
+) => Promise<ILimbNode>;
+
+/** Minimal TaskRunner interface for schedule resource activation (F202 Phase 2) */
+export interface ScheduleTaskRunner {
+  /** Register a builtin task that may arrive after start() — does NOT mark as dynamic */
+  registerPostStart(task: TaskSpec_P1): void;
+  unregister(taskId: string): boolean;
+}
+
+interface PendingLimbNodeSwap {
+  oldNodeId?: string;
+  oldNode?: ILimbNode;
+  refreshedNode: ILimbNode;
+  capabilityChanged: boolean;
+}
 
 export interface PluginResourceActivatorDeps {
   resolveProjectRoot: () => string;
+  resolveMainProjectRoot?: () => string;
   pluginsDir: string;
   limbRegistry: LimbRegistry;
   readCapabilities: () => Promise<CapabilitiesConfig | null>;
   writeCapabilities: (config: CapabilitiesConfig) => Promise<void>;
   withCapabilityLock: <T>(fn: () => Promise<T>) => Promise<T>;
   limbAdapterFactory?: LimbAdapterFactory;
+  /** F202 Phase 2: Schedule factory registry (required for schedule resources) */
+  scheduleFactoryRegistry?: ScheduleFactoryRegistry;
+  /** F202 Phase 2: TaskRunner for registering/unregistering schedule tasks */
+  taskRunner?: ScheduleTaskRunner;
+  /** F202 Phase 2: Dependencies injected into schedule factory createTaskSpec */
+  scheduleFactoryDeps?: ScheduleFactoryDeps;
+  /** F228: cat-cafe-skills source dir for cascading skill changes to external projects. */
+  skillsSourceDir?: string;
 }
 
 export function withPersistedLimbNodeId<T extends ILimbNode>(node: T, persistedNodeId?: string): T {
@@ -66,13 +105,63 @@ export async function assertPluginResourceInsideRoot(
   }
 }
 
+async function countExistingManagedSkillMounts(
+  projectRoot: string,
+  skillName: string,
+  skillsSource: string,
+  mountRules: MountRules,
+): Promise<number> {
+  const mountDirs = [
+    ...STANDARD_MOUNT_POINT_IDS.filter((id) => mountRules.mountPoints[id].enabled).map((id) =>
+      join(projectRoot, mountRules.mountPoints[id].path),
+    ),
+    ...buildSkillMountTargets(projectRoot, homedir(), mountRules)
+      .filter((target) => target.kind === 'custom')
+      .flatMap((target) => target.candidates),
+  ];
+
+  const managedStatuses = await Promise.all(
+    mountDirs.map(
+      async (mountDir) => (await classifyMountPath(join(mountDir, skillName), skillsSource, skillName)) === 'managed',
+    ),
+  );
+  return managedStatuses.filter(Boolean).length;
+}
+
+function fallbackScheduleTaskId(manifestId: string, resourceName?: string): string | undefined {
+  return resourceName ? `schedule:${manifestId}:${resourceName}` : undefined;
+}
+
+function scheduleNameFromCapabilityId(manifestId: string, capId: string): string | undefined {
+  const normalizedId = normalizeCapId(capId);
+  const prefix = `plugin:${manifestId}:`;
+  if (!normalizedId.startsWith(prefix)) return undefined;
+  const resourceName = normalizedId.slice(prefix.length);
+  return resourceName || undefined;
+}
+
+function scheduleTaskIdForCapability(manifestId: string, cap: CapabilityEntry): string | undefined {
+  return cap.scheduleTaskId ?? fallbackScheduleTaskId(manifestId, scheduleNameFromCapabilityId(manifestId, cap.id));
+}
+
 export interface PluginLimbRehydrationDeps {
   capabilities: CapabilitiesConfig | null;
   pluginRegistry: Pick<import('./PluginRegistry.js').PluginRegistry, 'getManifest'>;
   pluginsDir: string;
-  limbAdapterRegistry: Map<string, (yamlPath: string) => Promise<ILimbNode>>;
+  limbAdapterRegistry: Map<string, (yamlPath: string, pluginConfig: Record<string, string>) => Promise<ILimbNode>>;
   limbRegistry: Pick<LimbRegistry, 'register'>;
   log?: Pick<Console, 'info' | 'warn'>;
+}
+
+function resolveRuntimePluginConfig(manifest: PluginManifest): Record<string, string> {
+  if (manifest.config.length === 0) return {};
+  const resolved = resolvePluginEnv([manifest]);
+  const env: Record<string, string> = {};
+  for (const field of manifest.config) {
+    const val = resolved[field.envName];
+    if (val) env[field.envName] = val;
+  }
+  return env;
 }
 
 export async function rehydrateEnabledPluginLimbs(deps: PluginLimbRehydrationDeps): Promise<void> {
@@ -95,7 +184,8 @@ export async function rehydrateEnabledPluginLimbs(deps: PluginLimbRehydrationDep
     try {
       const yamlPath = resolvePluginResourcePath(deps.pluginsDir, manifest.id, limbResource.path);
       await assertPluginResourceInsideRoot(deps.pluginsDir, manifest, yamlPath, 'Limb resource');
-      const node = withPersistedLimbNodeId(await factory(yamlPath), cap.limbNodeId);
+      const pluginConfig = resolveRuntimePluginConfig(manifest);
+      const node = withPersistedLimbNodeId(await factory(yamlPath, pluginConfig), cap.limbNodeId);
       await deps.limbRegistry.register(node);
       deps.log?.info(`[api] F202: Rehydrated limb for plugin '${manifest.id}'`);
     } catch (err) {
@@ -129,10 +219,11 @@ export class PluginResourceActivator {
       }
     }
 
-    const allOk = results.every((r) => r.ok);
+    // F202 Phase 2 follow-up: optional resources that fail don't block 'success' status
+    const allRequiredOk = results.every((r, i) => r.ok || !!manifest.resources[i]?.optional);
     const someOk = results.some((r) => r.ok);
     return {
-      status: allOk ? 'success' : someOk ? 'partial' : 'failed',
+      status: allRequiredOk ? 'success' : someOk ? 'partial' : 'failed',
       resources: results,
     };
   }
@@ -181,6 +272,9 @@ export class PluginResourceActivator {
       case 'mcp':
         await this.activateMcp(manifest, resource);
         break;
+      case 'schedule':
+        await this.activateSchedule(manifest, resource);
+        break;
       default:
         throw new Error(`Unsupported resource type: ${resource.type}`);
     }
@@ -196,6 +290,9 @@ export class PluginResourceActivator {
         break;
       case 'mcp':
         await this.deactivateMcp(manifest, resource);
+        break;
+      case 'schedule':
+        await this.deactivateSchedule(manifest, resource);
         break;
       default:
         throw new Error(`Unsupported resource type: ${resource.type}`);
@@ -214,42 +311,87 @@ export class PluginResourceActivator {
     if (!skillStat.isDirectory()) {
       throw new Error(`Skill resource must be a directory: ${skillSourceDir}`);
     }
-    const skillMdPath = join(skillSourceDir, 'SKILL.md');
-    if (!existsSync(skillMdPath)) {
+    if (!existsSync(join(skillSourceDir, 'SKILL.md'))) {
       throw new Error(`Skill resource directory must contain SKILL.md: ${skillSourceDir}`);
     }
-    const skillName = resourcePathBasename(resource.path);
 
-    const createdLinks: string[] = [];
-    try {
-      for (const providerDir of PROVIDER_DIRS) {
-        const skillsDir = join(this.deps.resolveProjectRoot(), providerDir);
-        if (await this.shouldSkipDirectoryLevelSkillsSymlink(skillsDir, dirname(skillSourceDir))) continue;
-        await mkdir(skillsDir, { recursive: true });
-        const linkPath = join(skillsDir, skillName);
-        if (await this.ensureSymlink(linkPath, skillSourceDir)) createdLinks.push(linkPath);
+    const skillName = resourcePathBasename(resource.path);
+    const projectRoot = this.deps.resolveProjectRoot();
+    const skillsSource = dirname(skillSourceDir);
+    const relativeSkillsSource = relative(projectRoot, skillsSource);
+
+    const mainProjectRoot = this.deps.resolveMainProjectRoot?.() ?? projectRoot;
+    const mountRules = await readMountRules(projectRoot, mainProjectRoot);
+    const capId = resourceCapId(manifest.id, resource);
+    // Don't pass cascade to addSkill — cascade only after conflict validation
+    // passes.  If all mount points conflict the activator rolls back the config;
+    // cascading before that would propagate a doomed entry to external projects
+    // (Codex R4 P2).
+    await this.deps.withCapabilityLock(async () => {
+      const previousConfig = await this.deps.readCapabilities();
+      const rollbackConfig = () =>
+        this.deps.writeCapabilities(structuredClone(previousConfig ?? { version: 1, capabilities: [] }));
+      let result: Awaited<ReturnType<typeof addSkill>>;
+      try {
+        result = await addSkill(projectRoot, skillName, skillsSource, {
+          mountRules,
+          pluginId: manifest.id,
+          capabilityId: capId,
+          skillsSource: relativeSkillsSource,
+          builtInSkillsSource: this.deps.skillsSourceDir,
+          configStore: {
+            readCapabilities: this.deps.readCapabilities,
+            writeCapabilities: this.deps.writeCapabilities,
+          },
+        });
+      } catch (err) {
+        // addSkill writes config before mounting — roll back on mount throw
+        await rollbackConfig();
+        throw err;
       }
-      await this.upsertCapabilityEntry(manifest, resource, true);
-    } catch (err) {
-      for (const linkPath of createdLinks) {
-        await this.removeOwnedSymlink(linkPath, skillSourceDir);
+      const existingManagedCount =
+        result.mounted.length === 0 && result.conflicts.length > 0
+          ? await countExistingManagedSkillMounts(projectRoot, skillName, skillsSource, mountRules)
+          : 0;
+      if (result.mounted.length === 0 && existingManagedCount === 0 && result.conflicts.length > 0) {
+        await rollbackConfig();
+        const conflictPaths = result.conflicts.map((conflict) => conflict.path).join(', ');
+        throw new Error(`All skill mount points conflict for plugin skill '${capId}': ${conflictPaths}`);
       }
-      throw err;
+    });
+    // Cascade after validation — config is confirmed, safe to propagate
+    if (this.deps.skillsSourceDir) {
+      await cascadeToProjects(projectRoot, this.deps.skillsSourceDir);
     }
   }
 
   private async deactivateSkill(manifest: PluginManifest, resource: PluginResourceDef): Promise<void> {
     if (!resource.path) return;
 
-    const skillSourceDir = resolvePluginResourcePath(this.deps.pluginsDir, manifest.id, resource.path);
     const skillName = resourcePathBasename(resource.path);
+    const projectRoot = this.deps.resolveProjectRoot();
+    const mainProjectRoot = this.deps.resolveMainProjectRoot?.() ?? projectRoot;
+    const mountRules = await readMountRules(projectRoot, mainProjectRoot);
+    const capId = resourceCapId(manifest.id, resource);
 
-    for (const providerDir of PROVIDER_DIRS) {
-      const linkPath = join(this.deps.resolveProjectRoot(), providerDir, skillName);
-      await this.removeOwnedSymlink(linkPath, skillSourceDir);
-    }
+    // Derive skillsSource from resource path so removeSkill can unmount even
+    // for legacy entries that don't have skillsSource persisted (Codex R4 P2).
+    const skillSourceDir = resolvePluginResourcePath(this.deps.pluginsDir, manifest.id, resource.path);
+    const skillsSource = dirname(skillSourceDir);
 
-    await this.upsertCapabilityEntry(manifest, resource, false);
+    await this.deps.withCapabilityLock(() =>
+      removeSkill(projectRoot, skillName, {
+        mountRules,
+        pluginId: manifest.id,
+        capabilityId: capId,
+        skillsSource,
+        configStore: {
+          readCapabilities: this.deps.readCapabilities,
+          writeCapabilities: this.deps.writeCapabilities,
+        },
+        ...(this.deps.skillsSourceDir ? { cascade: { catCafeSkillsSource: this.deps.skillsSourceDir } } : {}),
+      }),
+    );
   }
 
   private async activateLimb(manifest: PluginManifest, resource: PluginResourceDef): Promise<void> {
@@ -260,7 +402,8 @@ export class PluginResourceActivator {
 
     const yamlPath = resolvePluginResourcePath(this.deps.pluginsDir, manifest.id, resource.path);
     await assertPluginResourceInsideRoot(this.deps.pluginsDir, manifest, yamlPath, 'Limb resource');
-    const node = await this.deps.limbAdapterFactory(manifest.id, yamlPath);
+    const pluginConfig = resolveRuntimePluginConfig(manifest);
+    const node = await this.deps.limbAdapterFactory(manifest.id, yamlPath, pluginConfig);
     const previous = await this.upsertCapabilityEntry(manifest, resource, true, node.nodeId);
     const capId = resourceCapId(manifest.id, resource);
     const previousEntry = previous?.capabilities.find(
@@ -301,15 +444,125 @@ export class PluginResourceActivator {
     if (resource.transport !== 'streamableHttp' && !resource.command) {
       throw new Error('MCP resource must declare a command');
     }
-    await this.upsertCapabilityEntry(manifest, resource, true);
+
+    // #712: Use shared MCP service (heal → write → generateCli → audit)
+    // instead of generic upsertCapabilityEntry which bypassed topology heal
+    // and audit logging.
+    const projectRoot = this.deps.resolveProjectRoot();
+    const capId = resourceCapId(manifest.id, resource);
+    const entry: CapabilityEntry = {
+      id: capId,
+      type: 'mcp',
+      enabled: true,
+      source: 'cat-cafe',
+      pluginId: manifest.id,
+      mcpServer: this.buildMcpServer(manifest, resource),
+    };
+
+    const { before } = await installMcpCapability(projectRoot, entry, this.mcpConfigIO(), {
+      userId: `plugin:${manifest.id}`,
+    });
+
+    // Type transition cleanup: if the old entry was a different type,
+    // clean up its runtime resources (schedule task, limb node).
+    if (before && before.type !== 'mcp' && before.enabled) {
+      if (before.type === 'schedule' && this.deps.taskRunner) {
+        const taskId = scheduleTaskIdForCapability(manifest.id, before);
+        if (taskId) {
+          try {
+            this.deps.taskRunner.unregister(taskId);
+          } catch {
+            /* best-effort */
+          }
+        }
+      } else if (before.type === 'limb' && before.limbNodeId) {
+        try {
+          this.deps.limbRegistry.deregister(before.limbNodeId);
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
   }
 
   private async deactivateMcp(manifest: PluginManifest, resource: PluginResourceDef): Promise<void> {
-    // First disable: triggers CLI config regeneration which tells writers to delete the entry.
-    // If we only removeCapabilityEntry, the row vanishes before generateCliConfigs runs,
-    // so the CLI writer never sees the disabled server and leaves stale config behind.
-    await this.upsertCapabilityEntry(manifest, resource, false);
-    await this.removeCapabilityEntry(manifest, resource);
+    // #712: Use shared MCP service with hard-remove.
+    // removeMcpCapability(hard=true) handles the two-phase dance internally:
+    //   1. Disable → write → CLI regen  (so CLI writers see disabled state and clean up)
+    //   2. Splice → write → CLI regen   (entry removed from capabilities.json)
+    const projectRoot = this.deps.resolveProjectRoot();
+    const capId = resourceCapId(manifest.id, resource);
+
+    await removeMcpCapability(projectRoot, capId, this.mcpConfigIO(), {
+      hard: true,
+      pluginId: manifest.id,
+      userId: `plugin:${manifest.id}`,
+    });
+  }
+
+  private async activateSchedule(manifest: PluginManifest, resource: PluginResourceDef): Promise<void> {
+    if (!resource.factoryId) throw new Error('Schedule resource must have a factoryId');
+    if (!resource.name) throw new Error('Schedule resource must have a name');
+    if (!this.deps.scheduleFactoryRegistry) throw new Error('ScheduleFactoryRegistry not configured');
+    if (!this.deps.taskRunner) throw new Error('TaskRunner not configured');
+
+    const factory = this.deps.scheduleFactoryRegistry.getForPlugin(resource.factoryId, manifest.id);
+    if (!factory) {
+      const existing = this.deps.scheduleFactoryRegistry.get(resource.factoryId);
+      if (existing) {
+        throw new Error(
+          `Schedule factory '${resource.factoryId}' is owned by plugin '${existing.pluginId}', not owned by plugin '${manifest.id}'`,
+        );
+      }
+      throw new Error(`Unknown schedule factory '${resource.factoryId}'`);
+    }
+
+    const taskId = `schedule:${manifest.id}:${resource.name}`;
+    const taskSpec = factory.createTaskSpec(taskId, this.deps.scheduleFactoryDeps ?? { log: console });
+
+    // Defensive: factory must return a spec with the ID we requested
+    if (taskSpec.id !== taskId) {
+      throw new Error(
+        `Schedule factory '${resource.factoryId}' returned mismatched task ID: expected '${taskId}', got '${taskSpec.id}'`,
+      );
+    }
+
+    // Idempotent re-enable: try to register; if already exists (duplicate),
+    // the existing task keeps running — no window of inconsistency.
+    // Only rollback on write failure if WE added the registration.
+    let newRegistration = false;
+    try {
+      this.deps.taskRunner.registerPostStart(taskSpec);
+      newRegistration = true;
+    } catch {
+      // Task already registered with same ID — idempotent, keep existing task running
+    }
+
+    try {
+      await this.upsertCapabilityEntry(manifest, resource, true, undefined, taskId);
+    } catch (err) {
+      // Rollback: only unregister if we were the ones who registered
+      if (newRegistration) {
+        this.deps.taskRunner.unregister(taskId);
+      }
+      throw err;
+    }
+  }
+
+  private async deactivateSchedule(manifest: PluginManifest, resource: PluginResourceDef): Promise<void> {
+    if (!resource.name) return;
+
+    // Persist removal first — runtime cleanup only after successful write.
+    // Invariant: runtime state ↔ persisted state must stay in sync;
+    // if persist fails, runtime task must keep running (mirrors deactivateLimb).
+    const removedEntries = await this.removeCapabilityEntry(manifest, resource);
+    const ownedEntry = removedEntries.find((c) => c.type === 'schedule' && c.pluginId === manifest.id && c.enabled);
+    const taskId = ownedEntry
+      ? (ownedEntry.scheduleTaskId ?? fallbackScheduleTaskId(manifest.id, resource.name))
+      : undefined;
+    if (taskId && this.deps.taskRunner) {
+      this.deps.taskRunner.unregister(taskId);
+    }
   }
 
   private async upsertCapabilityEntry(
@@ -317,6 +570,8 @@ export class PluginResourceActivator {
     resource: PluginResourceDef,
     enabled: boolean,
     limbNodeId?: string,
+    scheduleTaskId?: string,
+    skillsSource?: string,
   ): Promise<CapabilitiesConfig | null> {
     return this.deps.withCapabilityLock(async () => {
       const config = await this.deps.readCapabilities();
@@ -325,6 +580,7 @@ export class PluginResourceActivator {
       const capId = resourceCapId(manifest.id, resource);
 
       let staleLimbNodeIdToClean: string | undefined;
+      let staleScheduleTaskIdToClean: string | undefined;
       const existing = cap.capabilities.find((c) => normalizeCapId(c.id) === capId);
       if (existing) {
         if (existing.pluginId !== undefined && existing.pluginId !== manifest.id) {
@@ -345,30 +601,45 @@ export class PluginResourceActivator {
         const staleLimbNodeId =
           existing.type === 'limb' && resource.type !== 'limb' && existing.enabled ? existing.limbNodeId : undefined;
 
-        existing.type = resource.type as 'mcp' | 'skill' | 'limb';
+        // F202 Phase 2: capture stale schedule taskId before type transition (mirrors limb pattern)
+        staleScheduleTaskIdToClean =
+          existing.type === 'schedule' && resource.type !== 'schedule' && existing.enabled
+            ? scheduleTaskIdForCapability(manifest.id, existing)
+            : undefined;
+
+        existing.type = resource.type as CapabilityEntry['type'];
         existing.enabled = enabled;
         existing.pluginId = manifest.id;
         if (resource.type === 'mcp') {
           delete existing.limbNodeId;
+          delete existing.scheduleTaskId;
           existing.mcpServer = this.buildMcpServer(manifest, resource);
+        } else if (resource.type === 'schedule') {
+          delete existing.mcpServer;
+          delete existing.limbNodeId;
+          if (scheduleTaskId) existing.scheduleTaskId = scheduleTaskId;
         } else {
           delete existing.mcpServer;
+          delete existing.scheduleTaskId;
           if (resource.type === 'limb' && limbNodeId !== undefined) {
             existing.limbNodeId = limbNodeId;
           } else {
             delete existing.limbNodeId;
           }
         }
+        if (skillsSource) existing.skillsSource = skillsSource;
         // staleLimbNodeId is deregistered after the write below
         staleLimbNodeIdToClean = staleLimbNodeId;
       } else {
         const entry: CapabilityEntry = {
           id: capId,
-          type: resource.type as 'mcp' | 'skill' | 'limb',
+          type: resource.type as CapabilityEntry['type'],
           enabled,
           source: 'cat-cafe',
           pluginId: manifest.id,
           ...(limbNodeId ? { limbNodeId } : {}),
+          ...(scheduleTaskId ? { scheduleTaskId } : {}),
+          ...(skillsSource ? { skillsSource } : {}),
         };
 
         if (resource.type === 'mcp') {
@@ -386,6 +657,14 @@ export class PluginResourceActivator {
           this.deps.limbRegistry.deregister(staleLimbNodeIdToClean);
         } catch {
           /* best-effort: node may already be gone */
+        }
+      }
+      // F202 Phase 2: unregister stale schedule task only after config write succeeds
+      if (staleScheduleTaskIdToClean && this.deps.taskRunner) {
+        try {
+          this.deps.taskRunner.unregister(staleScheduleTaskIdToClean);
+        } catch {
+          /* best-effort: task may already be gone */
         }
       }
       return previous;
@@ -415,7 +694,27 @@ export class PluginResourceActivator {
   }
 
   private async removeOrphanedPluginEntries(manifest: PluginManifest, declaredIds: Set<string>): Promise<void> {
+    // #712 P2: Route orphaned MCP entries through the shared service
+    // (removeMcpCapability handles disable→remove + heal + audit).
+    // Done BEFORE the main lock since removeMcpCapability manages its own locking.
+    const preConfig = await this.deps.readCapabilities();
+    if (preConfig) {
+      const mcpOrphanIds = preConfig.capabilities
+        .filter((c) => c.pluginId === manifest.id && c.type === 'mcp' && !declaredIds.has(normalizeCapId(c.id)))
+        .map((c) => c.id);
+      const projectRoot = this.deps.resolveProjectRoot();
+      for (const capId of mcpOrphanIds) {
+        await removeMcpCapability(projectRoot, capId, this.mcpConfigIO(), {
+          hard: true,
+          pluginId: manifest.id,
+          userId: `plugin:${manifest.id}`,
+        });
+      }
+    }
+
+    // Remaining (non-MCP) orphans: limb + schedule — batch in one lock.
     const limbNodeIds: string[] = [];
+    const scheduleTaskIds: string[] = [];
     await this.deps.withCapabilityLock(async () => {
       const config = await this.deps.readCapabilities();
       if (!config) return;
@@ -423,38 +722,28 @@ export class PluginResourceActivator {
       const orphaned = config.capabilities.filter(isOrphan);
       if (orphaned.length === 0) return;
 
-      // Phase 1: disable orphaned MCP entries so CLI config writers see the disabled
-      // descriptor and can delete the stale generated server entries.
-      const hasMcpOrphans = orphaned.some((c) => c.type === 'mcp' && c.enabled);
-      if (hasMcpOrphans) {
-        const disableSnap = structuredClone(config);
-        const disableNext = structuredClone(config);
-        for (const cap of disableNext.capabilities) {
-          if (isOrphan(cap) && cap.type === 'mcp' && cap.enabled) {
-            cap.enabled = false;
-          }
+      for (const cap of orphaned) {
+        if (cap.type === 'limb' && cap.enabled && cap.limbNodeId) {
+          limbNodeIds.push(cap.limbNodeId);
         }
-        await this.writeCapabilitiesWithRollback(disableSnap, disableNext);
-      }
-
-      // Phase 2: remove all orphaned entries.
-      const freshConfig = await this.deps.readCapabilities();
-      if (!freshConfig) return;
-      const previous = structuredClone(freshConfig);
-      const next = structuredClone(freshConfig);
-      for (const cap of next.capabilities) {
-        if (isOrphan(cap)) {
-          if (cap.type === 'limb' && cap.enabled && cap.limbNodeId) {
-            limbNodeIds.push(cap.limbNodeId);
-          }
+        // F202 Phase 2: collect orphaned schedule tasks for post-lock unregistration
+        if (cap.type === 'schedule' && cap.enabled) {
+          const taskId = scheduleTaskIdForCapability(manifest.id, cap);
+          if (taskId) scheduleTaskIds.push(taskId);
         }
       }
+      const previous = structuredClone(config);
+      const next = structuredClone(config);
       next.capabilities = next.capabilities.filter((c) => !isOrphan(c));
       await this.writeCapabilitiesWithRollback(previous, next);
     });
 
     for (const nodeId of limbNodeIds) {
       this.deps.limbRegistry.deregister(nodeId);
+    }
+    // F202 Phase 2: unregister orphaned schedule tasks (outside the lock — same pattern as limb)
+    for (const taskId of scheduleTaskIds) {
+      this.deps.taskRunner?.unregister(taskId);
     }
   }
 
@@ -466,14 +755,43 @@ export class PluginResourceActivator {
       const next = structuredClone(config);
 
       const mcpEnv = this.buildMcpEnv(manifest);
+      const pluginConfig = resolveRuntimePluginConfig(manifest);
       let changed = false;
+      const pendingLimbSwaps: PendingLimbNodeSwap[] = [];
       for (const cap of next.capabilities) {
-        if (cap.pluginId !== manifest.id || cap.type !== 'mcp' || !cap.mcpServer) continue;
-        cap.mcpServer.env = mcpEnv.env;
-        changed = true;
+        if (cap.pluginId !== manifest.id) continue;
+        if (this.syncMcpCapabilityEnv(cap, mcpEnv)) changed = true;
+        const limbSwap = await this.prepareLimbCapabilityRefresh(manifest, cap, pluginConfig);
+        if (limbSwap) {
+          pendingLimbSwaps.push(limbSwap);
+          if (limbSwap.capabilityChanged) changed = true;
+        }
       }
-      if (changed) await this.writeCapabilitiesWithRollback(previous, next);
+      if (changed) {
+        await this.writeCapabilitiesWithRollback(previous, next);
+        try {
+          await this.applyPendingLimbSwaps(pendingLimbSwaps);
+        } catch (err) {
+          try {
+            await this.writeCapabilitiesWithRollback(next, previous);
+          } catch {
+            /* Preserve the registry swap failure; config rollback is best-effort here. */
+          }
+          throw err;
+        }
+      } else {
+        await this.applyPendingLimbSwaps(pendingLimbSwaps);
+      }
     });
+  }
+
+  /** Adapt DI deps to the shared McpConfigIO interface (#712). */
+  private mcpConfigIO(): McpConfigIO {
+    return {
+      readConfig: () => this.deps.readCapabilities(),
+      writeAndRegenCli: (config) => this.deps.writeCapabilities(config),
+      withLock: (fn) => this.deps.withCapabilityLock(fn),
+    };
   }
 
   private buildMcpServer(
@@ -498,14 +816,87 @@ export class PluginResourceActivator {
     };
   }
 
-  private buildMcpEnv(manifest: PluginManifest): { env?: Record<string, string> } {
-    if (manifest.config.length === 0) return {};
-    const resolved = resolvePluginEnv([manifest]);
-    const env: Record<string, string> = {};
-    for (const field of manifest.config) {
-      const val = resolved[field.envName];
-      if (val) env[field.envName] = val;
+  private syncMcpCapabilityEnv(cap: CapabilityEntry, mcpEnv: { env?: Record<string, string> }): boolean {
+    if (cap.type !== 'mcp' || !cap.mcpServer) return false;
+    cap.mcpServer.env = mcpEnv.env;
+    return true;
+  }
+
+  private async prepareLimbCapabilityRefresh(
+    manifest: PluginManifest,
+    cap: CapabilityEntry,
+    pluginConfig: Record<string, string>,
+  ): Promise<PendingLimbNodeSwap | null> {
+    if (cap.type !== 'limb' || !cap.enabled) return null;
+
+    const normalizedCapId = normalizeCapId(cap.id);
+    const resource = manifest.resources.find((r) => resourceCapId(manifest.id, r) === normalizedCapId);
+    if (!resource?.path) return null;
+    if (!this.deps.limbAdapterFactory) {
+      throw new Error('No limb adapter factory configured');
     }
+
+    const yamlPath = resolvePluginResourcePath(this.deps.pluginsDir, manifest.id, resource.path);
+    await assertPluginResourceInsideRoot(this.deps.pluginsDir, manifest, yamlPath, 'Limb resource');
+    const refreshedNode = await this.deps.limbAdapterFactory(manifest.id, yamlPath, pluginConfig);
+    const oldNodeId = cap.limbNodeId;
+    const oldNode = oldNodeId ? this.deps.limbRegistry.getNodeHandle(oldNodeId) : undefined;
+    const capabilityChanged = oldNodeId !== refreshedNode.nodeId;
+    if (!capabilityChanged) {
+      return { oldNodeId, oldNode, refreshedNode, capabilityChanged };
+    }
+    cap.limbNodeId = refreshedNode.nodeId;
+    return { oldNodeId, oldNode, refreshedNode, capabilityChanged };
+  }
+
+  private async applyPendingLimbSwaps(swaps: PendingLimbNodeSwap[]): Promise<void> {
+    const applied: PendingLimbNodeSwap[] = [];
+    try {
+      for (const swap of swaps) {
+        await this.replaceRegisteredLimbNode(swap.oldNodeId, swap.refreshedNode);
+        applied.push(swap);
+      }
+    } catch (err) {
+      for (const swap of applied.reverse()) {
+        await this.restoreRegisteredLimbNode(swap);
+      }
+      throw err;
+    }
+  }
+
+  private async replaceRegisteredLimbNode(oldNodeId: string | undefined, refreshedNode: ILimbNode): Promise<void> {
+    const oldNode = oldNodeId ? this.deps.limbRegistry.getNodeHandle(oldNodeId) : undefined;
+    if (oldNodeId) this.deps.limbRegistry.deregister(oldNodeId);
+    try {
+      await this.deps.limbRegistry.register(refreshedNode);
+    } catch (err) {
+      if (oldNode) {
+        try {
+          await this.deps.limbRegistry.register(oldNode);
+        } catch {
+          /* best-effort rollback */
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async restoreRegisteredLimbNode(swap: PendingLimbNodeSwap): Promise<void> {
+    try {
+      this.deps.limbRegistry.deregister(swap.refreshedNode.nodeId);
+    } catch {
+      /* best-effort registry rollback */
+    }
+    if (!swap.oldNode) return;
+    try {
+      await this.deps.limbRegistry.register(swap.oldNode);
+    } catch {
+      /* best-effort registry rollback */
+    }
+  }
+
+  private buildMcpEnv(manifest: PluginManifest): { env?: Record<string, string> } {
+    const env = resolveRuntimePluginConfig(manifest);
     return Object.keys(env).length > 0 ? { env } : {};
   }
 
@@ -552,67 +943,68 @@ export class PluginResourceActivator {
       /* Preserve the original activation error; best-effort rollback already attempted. */
     }
   }
+}
 
-  private async shouldSkipDirectoryLevelSkillsSymlink(skillsDir: string, expectedRoot: string): Promise<boolean> {
-    try {
-      const stat = await lstat(skillsDir);
-      if (!stat.isSymbolicLink()) return false;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw err;
+// ─── F202 Phase 2: Schedule resource rehydration (startup recovery) ──────────
+
+export interface PluginScheduleRehydrationDeps {
+  capabilities: CapabilitiesConfig | null;
+  pluginRegistry: Pick<import('./PluginRegistry.js').PluginRegistry, 'getManifest'>;
+  scheduleFactoryRegistry: ScheduleFactoryRegistry;
+  taskRunner: { register(task: TaskSpec_P1): void };
+  scheduleFactoryDeps: ScheduleFactoryDeps;
+  log?: Pick<Console, 'info' | 'warn'>;
+}
+
+/**
+ * Rehydrate enabled schedule resources at startup.
+ * Reads capabilities.json for type=schedule + enabled=true entries,
+ * looks up the factory in ScheduleFactoryRegistry, and registers
+ * the TaskSpec in TaskRunnerV2 (via register, not registerDynamic —
+ * TaskRunnerV2.start() hasn't been called yet at rehydration time).
+ */
+export async function rehydrateEnabledPluginSchedules(deps: PluginScheduleRehydrationDeps): Promise<void> {
+  if (!deps.capabilities) return;
+
+  const scheduleEntries = deps.capabilities.capabilities.filter(
+    (c) => c.type === 'schedule' && c.enabled && c.pluginId,
+  );
+
+  for (const cap of scheduleEntries) {
+    const manifest = deps.pluginRegistry.getManifest(cap.pluginId!);
+    if (!manifest) continue;
+
+    const normalizedId = normalizeCapId(cap.id);
+    const scheduleResource = manifest.resources.find(
+      (r) => r.type === 'schedule' && resourceCapId(manifest.id, r) === normalizedId,
+    );
+    if (!scheduleResource?.factoryId) continue;
+
+    const factory = deps.scheduleFactoryRegistry.getForPlugin(scheduleResource.factoryId, manifest.id);
+    if (!factory) {
+      const existing = deps.scheduleFactoryRegistry.get(scheduleResource.factoryId);
+      const reason = existing
+        ? `owned by plugin '${existing.pluginId}', not owned by plugin '${manifest.id}'`
+        : 'not registered';
+      deps.log?.warn(`[F202-2] Skip rehydration for factory '${scheduleResource.factoryId}' (${reason})`);
+      continue;
     }
 
-    let mountedRoot: string;
-    let expectedRealRoot: string;
+    const taskId = cap.scheduleTaskId ?? fallbackScheduleTaskId(manifest.id, scheduleResource.name);
+    if (!taskId) continue;
     try {
-      mountedRoot = await realpath(skillsDir);
-      expectedRealRoot = await realpath(expectedRoot);
-    } catch (err) {
-      throw new Error(
-        `Invalid directory-level plugin skill mount at ${skillsDir}: symlink must resolve to ${expectedRoot}. ${
-          (err as Error).message
-        }`,
-      );
-    }
-
-    if (mountedRoot !== expectedRealRoot) {
-      throw new Error(
-        `Refusing to mount plugin skill into directory-level skills symlink at ${skillsDir}: resolves to ${mountedRoot}, expected ${expectedRealRoot}`,
-      );
-    }
-
-    return true;
-  }
-
-  private async ensureSymlink(linkPath: string, target: string): Promise<boolean> {
-    try {
-      const s = await lstat(linkPath);
-      if (s.isSymbolicLink()) {
-        const { readlink } = await import('node:fs/promises');
-        const existing = await readlink(linkPath);
-        if (existing === target) return false;
-        throw new Error(`Refusing to overwrite existing symlink at ${linkPath} (current target: ${existing})`);
-      } else {
-        throw new Error(`Refusing to overwrite non-symlink at ${linkPath}`);
+      const taskSpec = factory.createTaskSpec(taskId, deps.scheduleFactoryDeps);
+      // Defensive: factory must return a spec with the expected ID (mirrors activation path)
+      if (taskSpec.id !== taskId) {
+        deps.log?.warn(
+          `[F202-2] Factory '${scheduleResource.factoryId}' returned mismatched task ID on rehydration: expected '${taskId}', got '${taskSpec.id}' — skipping`,
+        );
+        continue;
       }
+      deps.taskRunner.register(taskSpec);
+      deps.log?.info(`[F202-2] Rehydrated schedule '${scheduleResource.name}' for plugin '${manifest.id}'`);
     } catch (err) {
-      if (err instanceof Error && err.message.startsWith('Refusing')) throw err;
-    }
-    await symlink(target, linkPath);
-    return true;
-  }
-
-  private async removeOwnedSymlink(linkPath: string, expectedTarget: string): Promise<void> {
-    try {
-      const s = await lstat(linkPath);
-      if (!s.isSymbolicLink()) return;
-      const { readlink } = await import('node:fs/promises');
-      const actual = await readlink(linkPath);
-      if (actual !== expectedTarget) return;
-      await rm(linkPath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw err;
+      deps.log?.warn(`[F202-2] Failed to rehydrate schedule for '${manifest.id}': ${(err as Error).message}`);
     }
   }
 }

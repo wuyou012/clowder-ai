@@ -29,6 +29,51 @@ export function compareQueueEntries(
   return a.createdAt - b.createdAt;
 }
 
+/** Format an elapsed duration (ms) as a compact label: `45s` / `12m` / `1h03m`. */
+export function formatElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  return `${h}h${String(totalMin % 60).padStart(2, '0')}m`;
+}
+
+/**
+ * A2A queue visibility (2026-06-02): derive what the queue is waiting behind from the live
+ * activeInvocations map. Returns null when nothing is active (queue is draining, not blocked).
+ *
+ * Per-cat slot semantics (QueueProcessor uses a `threadId:catId` slot mutex): a queued entry
+ * waits on ITS target cat's slot, NOT just any active turn. So we PREFER the oldest active
+ * invocation whose catId a visible queued entry actually targets — this avoids the 砚砚-P1 bug
+ * where a longer-running non-target cat (e.g. codex) would be shown as the blocker when the
+ * visible queued entry is really waiting on a different cat (e.g. opus). Only when NO target
+ * cat is active do we fall back to the oldest active turn (thread-level block, e.g. a
+ * broadcast entry queued because the thread is busy) — that fallback can never misattribute a
+ * target-cat blocker, since by definition no target cat is active in that branch.
+ *
+ * Pure: `now` injected for testing.
+ */
+export function computeQueueWaitInfo(
+  activeInvocations: Record<string, { catId: string; mode?: string; startedAt?: number }> | undefined,
+  queuedTargetCatIds: Iterable<string> = [],
+  now: number = Date.now(),
+): { catId: string; elapsedLabel: string | null } | null {
+  const slots = Object.values(activeInvocations ?? {});
+  if (slots.length === 0) return null;
+  const targets = new Set(queuedTargetCatIds);
+  const targeted = targets.size > 0 ? slots.filter((s) => targets.has(s.catId)) : [];
+  const candidates = targeted.length > 0 ? targeted : slots;
+  let oldest = candidates[0];
+  for (const s of candidates) {
+    if ((s.startedAt ?? Number.POSITIVE_INFINITY) < (oldest.startedAt ?? Number.POSITIVE_INFINITY)) oldest = s;
+  }
+  return {
+    catId: oldest.catId,
+    elapsedLabel: oldest.startedAt ? formatElapsed(Math.max(0, now - oldest.startedAt)) : null,
+  };
+}
+
 interface QueuePanelProps {
   threadId: string;
 }
@@ -39,8 +84,9 @@ export function QueuePanel({ threadId }: QueuePanelProps) {
   const queue = useMemo(() => rawQueue ?? [], [rawQueue]);
   const queuePaused = useChatStore((s) => s.queuePaused) ?? false;
   const queuePauseReason = useChatStore((s) => s.queuePauseReason);
-  const messages = useChatStore((s) => s.messages);
   const setQueue = useChatStore((s) => s.setQueue);
+  const activeInvocations = useChatStore((s) => s.activeInvocations);
+  const setPendingChatInsert = useChatStore((s) => s.setPendingChatInsert);
   const addToast = useToastStore((s) => s.addToast);
 
   const [steerEntryId, setSteerEntryId] = useState<string | null>(null);
@@ -59,6 +105,20 @@ export function QueuePanel({ threadId }: QueuePanelProps) {
     [queue],
   );
 
+  // A2A queue visibility: explain WHY entries are queued (waiting behind the active turn) so the
+  // user can tell "waiting for the current turn" apart from "stuck". Passes the visible queued
+  // entries' target cats so the wait reason attributes the RIGHT cat (per-cat slot), not just the
+  // oldest active turn. Recomputed when activeInvocations/visibleEntries change; elapsed reflects
+  // the last store update (acceptable for v1 — no per-second tick).
+  const waitInfo = useMemo(
+    () =>
+      computeQueueWaitInfo(
+        activeInvocations,
+        visibleEntries.flatMap((e) => e.targetCats),
+      ),
+    [activeInvocations, visibleEntries],
+  );
+
   const handleRemove = useCallback(
     async (entryId: string) => {
       const prevQueue = queue;
@@ -73,20 +133,80 @@ export function QueuePanel({ threadId }: QueuePanelProps) {
           setQueue(threadId, prevQueue);
           addToast({
             type: 'error',
-            title: '撤回失败',
-            message: data?.error ?? '撤回失败，请重试',
+            title: '删除失败',
+            message: data?.error ?? '删除失败，请重试',
             threadId,
             duration: 5000,
           });
           return;
         }
-        addToast({ type: 'success', title: '已取消', message: '已从队列撤回', threadId, duration: 2500 });
+        addToast({ type: 'success', title: '已删除', message: '已从队列删除', threadId, duration: 2500 });
       } catch {
         setQueue(threadId, prevQueue);
-        addToast({ type: 'error', title: '撤回失败', message: '撤回失败，请重试', threadId, duration: 5000 });
+        addToast({ type: 'error', title: '删除失败', message: '删除失败，请重试', threadId, duration: 5000 });
       }
     },
     [addToast, queue, setQueue, threadId],
+  );
+
+  const handleRecallEdit = useCallback(
+    async (entryId: string) => {
+      const entry = queue.find((e) => e.id === entryId);
+      if (!entry) return;
+
+      // #706: Extract image URLs from server-enriched messagePreview (already in queue data).
+      // No need to read from DELETE response — the data is available before the request.
+      const imageUrls = (entry.messagePreview?.contentBlocks ?? [])
+        .filter((b) => b.type === 'image' && b.url)
+        .map((b) => b.url!);
+
+      const prevQueue = queue;
+      setQueue(
+        threadId,
+        prevQueue.filter((e) => e.id !== entryId),
+      );
+
+      try {
+        const res = await apiFetch(`/api/threads/${threadId}/queue/${entryId}`, { method: 'DELETE' });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          setQueue(threadId, prevQueue);
+          addToast({
+            type: 'error',
+            title: '撤回编辑失败',
+            message: data?.error ?? '撤回编辑失败，请重试',
+            threadId,
+            duration: 5000,
+          });
+          return;
+        }
+
+        // #706 + #833 cross-PR: preserve replyToId so recall-edit restores quote state
+        const replyToId = entry.messagePreview?.replyTo;
+        setPendingChatInsert({
+          threadId,
+          text: entry.content,
+          ...(imageUrls.length > 0 ? { imageUrls } : {}),
+          ...(replyToId ? { replyToId } : {}),
+        });
+        const hasImages = imageUrls.length > 0;
+        const hasQuote = !!replyToId;
+        const parts = ['已回填文字'];
+        if (hasImages) parts.push('图片');
+        if (hasQuote) parts.push('引用');
+        addToast({
+          type: 'success',
+          title: '已撤回编辑',
+          message: `${parts.join('、')}到输入框`,
+          threadId,
+          duration: 2500,
+        });
+      } catch {
+        setQueue(threadId, prevQueue);
+        addToast({ type: 'error', title: '撤回编辑失败', message: '撤回编辑失败，请重试', threadId, duration: 5000 });
+      }
+    },
+    [addToast, queue, setPendingChatInsert, setQueue, threadId],
   );
 
   const handleContinue = useCallback(async () => {
@@ -241,16 +361,23 @@ export function QueuePanel({ threadId }: QueuePanelProps) {
         <div className="px-3 py-1.5 text-xs text-conn-amber-text border-b border-conn-amber-ring/60">{pauseLabel}</div>
       )}
 
+      {!queuePaused && waitInfo && visibleEntries.length > 0 && (
+        <div
+          className="px-3 py-1.5 text-xs text-cafe-muted border-b"
+          style={{ borderColor: 'color-mix(in oklch, var(--color-cocreator-primary) 10%, transparent)' }}
+        >
+          等待 <span className="font-medium text-cafe-secondary">{waitInfo.catId}</span> 当前回合
+          {waitInfo.elapsedLabel ? `（已运行 ${waitInfo.elapsedLabel}）` : ''}
+        </div>
+      )}
+
       {!isCollapsed && (
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
           <SortableContext items={entryIds} strategy={verticalListSortingStrategy}>
             <div className="max-h-40 overflow-y-auto flex flex-col gap-0.5 p-1">
               {visibleEntries.map((entry, idx) => {
-                const allMsgIds = [entry.messageId, ...(entry.mergedMessageIds ?? [])].filter(Boolean) as string[];
-                const imageCount = allMsgIds.reduce((count, msgId) => {
-                  const msg = messages.find((m) => m.id === msgId);
-                  return count + (msg?.contentBlocks?.filter((b) => b.type === 'image').length ?? 0);
-                }, 0);
+                // #706: Compute image count from server-enriched messagePreview
+                const imageCount = entry.messagePreview?.contentBlocks?.filter((b) => b.type === 'image').length ?? 0;
                 return (
                   <SortableQueueEntryRow
                     key={entry.id}
@@ -260,6 +387,7 @@ export function QueuePanel({ threadId }: QueuePanelProps) {
                     imageCount={imageCount}
                     ownerName={coCreator.name}
                     onRemove={handleRemove}
+                    onRecallEdit={handleRecallEdit}
                     onSteer={handleSteerOpen}
                   />
                 );

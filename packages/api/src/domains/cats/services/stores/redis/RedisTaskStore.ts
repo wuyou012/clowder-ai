@@ -10,19 +10,29 @@
  *   cat-cafe:tasks:kind:{kind}          → Sorted Set (按类型索引, score=createdAt)
  *   cat-cafe:tasks:subject:{subjectKey} → String (subject→taskId 唯一映射)
  *
- * TTL: 30 days default. pr_tracking tasks with status!=done have no TTL.
+ * TTL: 30 days default. Tracking tasks (pr_tracking/issue_tracking) with status!=done have no TTL.
  */
 
-import type { AutomationState, CatId, CreateTaskInput, TaskItem, TaskKind, UpdateTaskInput } from '@cat-cafe/shared';
+import type {
+  AutomationState,
+  CatId,
+  CreateTaskInput,
+  IssueAutomationState,
+  TaskItem,
+  TaskKind,
+  UpdateTaskInput,
+} from '@cat-cafe/shared';
+import { isTrackingKind } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import { generateSortableId } from '../ports/MessageStore.js';
-import { createSubjectOwnershipConflict, type ITaskStore } from '../ports/TaskStore.js';
+import { assertSubjectUpdateOwnership, type ITaskStore } from '../ports/TaskStore.js';
 import { TaskKeys } from '../redis-keys/task-keys.js';
 
 const DEFAULT_TTL = 0; // persistent — set >0 via env to enable expiry
 const MAX_SUBJECT_LOOKUP_NULL_RETRIES = 3;
 const MAX_MISSING_TASK_RETRIES = 3;
 const MAX_AUTOMATION_STATE_PATCH_RETRIES = 5;
+const MAX_CONDITIONAL_TASK_UPDATE_RETRIES = 5;
 
 /**
  * Lua script: atomically verify subject ownership then write task artifacts.
@@ -76,6 +86,12 @@ export class RedisTaskStore implements ITaskStore {
       updatedAt: now,
       automationState: input.automationState,
       userId: input.userId,
+      probe: input.probe,
+      resolveMode: input.resolveMode,
+      // F193 Phase E (dispatch gate)
+      ...(input.relatedFeatureId ? { relatedFeatureId: input.relatedFeatureId } : {}),
+      ...(input.detectedFeatureIds?.length ? { detectedFeatureIds: input.detectedFeatureIds } : {}),
+      ...(input.dispatchGate ? { dispatchGate: input.dispatchGate } : {}),
     };
 
     await this.writeTask(task);
@@ -131,6 +147,8 @@ export class RedisTaskStore implements ITaskStore {
         updatedAt: now,
         automationState: input.automationState,
         userId: input.userId,
+        probe: input.probe,
+        resolveMode: input.resolveMode,
       };
       const written = await this.writeTask(task, { syncSubject: false, requireSubjectOwner: true });
       if (!written) {
@@ -184,6 +202,8 @@ export class RedisTaskStore implements ITaskStore {
         updatedAt: now,
         automationState: input.automationState,
         userId: input.userId,
+        probe: input.probe,
+        resolveMode: input.resolveMode,
       };
       const written = await this.writeTask(task, { syncSubject: false, requireSubjectOwner: true });
       if (!written) {
@@ -192,19 +212,21 @@ export class RedisTaskStore implements ITaskStore {
       return task;
     }
 
-    if (existing.userId && input.userId && existing.userId !== input.userId) {
-      throw createSubjectOwnershipConflict(sk, existing.userId, input.userId);
-    }
+    assertSubjectUpdateOwnership(sk, existing, input);
 
     const updated: TaskItem = {
       ...existing,
       threadId: input.threadId,
       title: input.title,
       ownerCatId: input.ownerCatId ?? existing.ownerCatId,
-      status: existing.kind === 'pr_tracking' && existing.status === 'done' ? 'todo' : existing.status,
+      status: isTrackingKind(existing.kind) && existing.status === 'done' ? 'todo' : existing.status,
       why: input.why,
       userId: input.userId ?? existing.userId,
-      automationState: input.automationState ?? existing.automationState,
+      probe: input.probe !== undefined ? input.probe : existing.probe,
+      resolveMode: input.resolveMode !== undefined ? input.resolveMode : existing.resolveMode,
+      automationState: input.automationState
+        ? this.mergeAutomationState(existing.automationState, input.automationState)
+        : existing.automationState,
       updatedAt: now,
     };
 
@@ -256,20 +278,56 @@ export class RedisTaskStore implements ITaskStore {
     const existing = await this.get(taskId);
     if (!existing) return null;
 
-    const updated: TaskItem = {
-      ...existing,
-      ...(input.title !== undefined ? { title: input.title } : {}),
-      ...(input.ownerCatId !== undefined ? { ownerCatId: input.ownerCatId } : {}),
-      ...(input.status !== undefined ? { status: input.status } : {}),
-      ...(input.why !== undefined ? { why: input.why } : {}),
-      ...(input.automationState !== undefined ? { automationState: input.automationState } : {}),
-      updatedAt: Date.now(),
-    };
+    const updated = this.applyTaskUpdate(existing, input);
 
     await this.redis.hset(TaskKeys.detail(taskId), this.serializeTask(updated));
+
+    // If threadId changed, update the thread index (remove from old, add to new).
+    if (input.threadId !== undefined && input.threadId !== existing.threadId) {
+      const pipeline = this.redis.multi();
+      pipeline.zrem(TaskKeys.thread(existing.threadId), taskId);
+      pipeline.zadd(TaskKeys.thread(input.threadId), updated.updatedAt, taskId);
+      await pipeline.exec();
+    }
+
     // Update TTL based on new status
     await this.applyTtl(updated);
     return updated;
+  }
+
+  async updateIfThreadId(taskId: string, expectedThreadId: string, input: UpdateTaskInput): Promise<TaskItem | null> {
+    const key = TaskKeys.detail(taskId);
+    for (let attempt = 0; attempt < MAX_CONDITIONAL_TASK_UPDATE_RETRIES; attempt += 1) {
+      await this.redis.watch(key);
+      const data = await this.redis.hgetall(key);
+      if (!data || !data.id) {
+        await this.redis.unwatch();
+        return null;
+      }
+
+      const existing = this.hydrateTask(data);
+      if (existing.threadId !== expectedThreadId) {
+        await this.redis.unwatch();
+        return null;
+      }
+
+      const updated = this.applyTaskUpdate(existing, input);
+      const pipeline = this.redis.multi();
+      pipeline.hset(key, this.serializeTask(updated));
+      if (input.threadId !== undefined && input.threadId !== existing.threadId) {
+        pipeline.zrem(TaskKeys.thread(existing.threadId), taskId);
+        pipeline.zadd(TaskKeys.thread(input.threadId), updated.updatedAt, taskId);
+      }
+
+      const result = await pipeline.exec();
+      if (result) {
+        await this.applyTtl(updated);
+        return updated;
+      }
+      await this.waitForInFlightTaskWrite();
+    }
+
+    throw new Error(`RedisTaskStore updateIfThreadId: failed to apply conditional update for ${taskId}`);
   }
 
   async listByThread(threadId: string): Promise<TaskItem[]> {
@@ -295,6 +353,24 @@ export class RedisTaskStore implements ITaskStore {
       await this.applyThreadTtl(task.threadId);
     }
     return true;
+  }
+
+  private applyTaskUpdate(existing: TaskItem, input: UpdateTaskInput): TaskItem {
+    return {
+      ...existing,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.ownerCatId !== undefined ? { ownerCatId: input.ownerCatId } : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.why !== undefined ? { why: input.why } : {}),
+      ...(input.automationState !== undefined ? { automationState: input.automationState } : {}),
+      ...(input.probe !== undefined ? { probe: input.probe } : {}),
+      ...(input.resolveMode !== undefined ? { resolveMode: input.resolveMode } : {}),
+      // Generic task move support: callers that change threadId own the UX contract.
+      ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      // F193-E1 P1-4: allow patching dispatchGate
+      ...(input.dispatchGate !== undefined ? { dispatchGate: input.dispatchGate } : {}),
+      updatedAt: Date.now(),
+    };
   }
 
   async deleteByThread(threadId: string): Promise<number> {
@@ -369,13 +445,13 @@ export class RedisTaskStore implements ITaskStore {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  /** pr_tracking tasks with status!=done never expire; others get default TTL. */
+  /** Tracking tasks (pr_tracking/issue_tracking) with status!=done never expire; others get default TTL. */
   private async applyTtl(task: TaskItem): Promise<void> {
     if (this.ttlSeconds === null) return;
     const key = TaskKeys.detail(task.id);
 
-    if (task.kind === 'pr_tracking' && task.status !== 'done') {
-      // Active PR tracking tasks don't expire
+    if (isTrackingKind(task.kind) && task.status !== 'done') {
+      // Active tracking tasks don't expire
       await this.redis.persist(key);
     } else {
       await this.redis.expire(key, this.ttlSeconds);
@@ -388,10 +464,10 @@ export class RedisTaskStore implements ITaskStore {
     if (this.ttlSeconds === null) return;
     const threadKey = TaskKeys.thread(threadId);
 
-    // A thread index shared with any active PR-tracking task must remain durable.
+    // A thread index shared with any active tracking task must remain durable.
     const threadTasks = await this.listByThread(threadId);
-    const hasActivePrTracking = threadTasks.some((item) => item.kind === 'pr_tracking' && item.status !== 'done');
-    if (hasActivePrTracking) {
+    const hasActiveTracking = threadTasks.some((item) => isTrackingKind(item.kind) && item.status !== 'done');
+    if (hasActiveTracking) {
       await this.redis.persist(threadKey);
     } else {
       await this.redis.expire(threadKey, this.ttlSeconds);
@@ -407,15 +483,6 @@ export class RedisTaskStore implements ITaskStore {
     );
   }
 
-  private async removeTaskArtifacts(task: TaskItem): Promise<void> {
-    const cleanup = this.redis.multi();
-    cleanup.del(TaskKeys.detail(task.id));
-    cleanup.zrem(TaskKeys.thread(task.threadId), task.id);
-    cleanup.zrem(TaskKeys.kind(task.kind), task.id);
-    await cleanup.exec();
-    await this.applyThreadTtl(task.threadId);
-  }
-
   private mergeAutomationState(
     existing: AutomationState | undefined,
     patch: Partial<AutomationState>,
@@ -427,6 +494,34 @@ export class RedisTaskStore implements ITaskStore {
       ci: patch.ci ? { ...existing?.ci, ...patch.ci } : existing?.ci,
       conflict: patch.conflict ? { ...existing?.conflict, ...patch.conflict } : existing?.conflict,
       review: patch.review ? { ...existing?.review, ...patch.review } : existing?.review,
+      issue: patch.issue ? this.mergeIssueAutomationState(existing?.issue, patch.issue) : existing?.issue,
+    };
+  }
+
+  /**
+   * Merge issue automation state with cursor anti-regression (I5).
+   *
+   * Cursors (lastCommentCursor, lastDeliveredCursor) must never decrease — a re-routing event
+   * with a stale fetchCommentCursor seed must not overwrite already-advanced cursor values.
+   * All other fields (issueState, lastNotifiedAt, etc.) use the standard last-write-wins spread.
+   */
+  private mergeIssueAutomationState(
+    existing: IssueAutomationState | undefined,
+    patch: IssueAutomationState,
+  ): IssueAutomationState {
+    const merged: IssueAutomationState = { ...existing, ...patch };
+    return {
+      ...merged,
+      // I5: cursors use Math.max — only apply when both sides are defined to avoid
+      // overwriting a genuinely new seed (undefined → value) with a null/0 floor.
+      lastCommentCursor:
+        existing?.lastCommentCursor !== undefined && patch.lastCommentCursor !== undefined
+          ? Math.max(existing.lastCommentCursor, patch.lastCommentCursor)
+          : merged.lastCommentCursor,
+      lastDeliveredCursor:
+        existing?.lastDeliveredCursor !== undefined && patch.lastDeliveredCursor !== undefined
+          ? Math.max(existing.lastDeliveredCursor, patch.lastDeliveredCursor)
+          : merged.lastDeliveredCursor,
     };
   }
 
@@ -476,10 +571,16 @@ export class RedisTaskStore implements ITaskStore {
       createdAt: String(task.createdAt),
       updatedAt: String(task.updatedAt),
       userId: task.userId ?? '',
+      probe: task.probe ? JSON.stringify(task.probe) : '',
+      resolveMode: task.resolveMode ?? '',
     };
     if (task.automationState) {
       out.automationState = JSON.stringify(task.automationState);
     }
+    // F193 Phase E (dispatch gate)
+    if (task.relatedFeatureId) out.relatedFeatureId = task.relatedFeatureId;
+    if (task.detectedFeatureIds?.length) out.detectedFeatureIds = JSON.stringify(task.detectedFeatureIds);
+    if (task.dispatchGate) out.dispatchGate = JSON.stringify(task.dispatchGate);
     return out;
   }
 
@@ -497,14 +598,40 @@ export class RedisTaskStore implements ITaskStore {
       createdAt: parseInt(data.createdAt ?? '0', 10),
       updatedAt: parseInt(data.updatedAt ?? '0', 10),
       userId: data.userId || undefined,
+      resolveMode: data.resolveMode ? (data.resolveMode as TaskItem['resolveMode']) : undefined,
     };
+    // Hydrate JSON-serialized nested objects
+    let hydrated = base;
     if (data.automationState) {
       try {
-        return { ...base, automationState: JSON.parse(data.automationState) };
+        hydrated = { ...hydrated, automationState: JSON.parse(data.automationState) };
       } catch {
-        return base;
+        /* ignore */
       }
     }
-    return base;
+    if (data.probe) {
+      try {
+        hydrated = { ...hydrated, probe: JSON.parse(data.probe) };
+      } catch {
+        /* ignore */
+      }
+    }
+    // F193 Phase E (dispatch gate)
+    if (data.relatedFeatureId) hydrated = { ...hydrated, relatedFeatureId: data.relatedFeatureId };
+    if (data.detectedFeatureIds) {
+      try {
+        hydrated = { ...hydrated, detectedFeatureIds: JSON.parse(data.detectedFeatureIds) };
+      } catch {
+        /* ignore */
+      }
+    }
+    if (data.dispatchGate) {
+      try {
+        hydrated = { ...hydrated, dispatchGate: JSON.parse(data.dispatchGate) };
+      } catch {
+        /* ignore */
+      }
+    }
+    return hydrated;
   }
 }

@@ -6,6 +6,7 @@
 
 import type { CatId } from '@cat-cafe/shared';
 import type { AgentMessage, TokenUsage } from '../../types.js';
+import { extractClaudeMcpStatusSnapshot } from './claude-mcp-status.js';
 
 /**
  * Transform a raw Claude CLI NDJSON event into AgentMessage(s).
@@ -151,12 +152,30 @@ export function transformClaudeEvent(
   if (e.type === 'system' && e.subtype === 'init') {
     const sessionId = e.session_id;
     if (typeof sessionId === 'string') {
-      return {
+      const sessionInit = {
         type: 'session_init',
         catId,
         sessionId,
         timestamp: Date.now(),
-      };
+      } satisfies AgentMessage;
+      const mcpStatus = extractClaudeMcpStatusSnapshot(e.mcp_servers);
+      if (!mcpStatus) return sessionInit;
+      return [
+        sessionInit,
+        {
+          type: 'system_info',
+          catId,
+          content: JSON.stringify({
+            type: 'mcp_server_status',
+            provider: 'claude',
+            catId,
+            sessionId,
+            pendingMeaning: 'deferred_tool_loading',
+            ...mcpStatus,
+          }),
+          timestamp: Date.now(),
+        },
+      ];
     }
     return null;
   }
@@ -194,13 +213,15 @@ export function transformClaudeEvent(
           timestamp: Date.now(),
         });
       } else if (b.type === 'tool_use' && typeof b.name === 'string') {
-        messages.push({
+        const msg: AgentMessage = {
           type: 'tool_use',
           catId,
           toolName: b.name,
           toolInput: (b.input as Record<string, unknown>) ?? {},
           timestamp: Date.now(),
-        });
+        };
+        if (typeof b.id === 'string') msg.toolUseId = b.id;
+        messages.push(msg);
       }
     }
     if (messageId && skipFinalText) {
@@ -242,22 +263,24 @@ export function transformClaudeEvent(
 
   // result/error → error message (F045: include errorSubtype)
   // Issue #24: Use subtype as fallback when errors array is empty
-  if (e.type === 'result' && e.subtype !== 'success') {
+  if (isResultErrorEvent(e)) {
     const rawErrors = Array.isArray(e.errors) ? e.errors : [];
     const errors = rawErrors.filter((item): item is string => typeof item === 'string').join('; ');
+    const resultText = typeof e.result === 'string' ? e.result : '';
     const subtype = typeof e.subtype === 'string' ? e.subtype : undefined;
     const subtypeLabels: Record<string, string> = {
       error_max_turns: 'Max turns exceeded',
       error_max_budget_usd: 'Budget limit reached',
       error_during_execution: 'Execution error',
       error_max_structured_output_retries: 'Structured output retries exceeded',
+      success: 'Claude result error',
     };
     const fallbackError = subtype ? (subtypeLabels[subtype] ?? `Agent error (${subtype})`) : 'Unknown error';
     return {
       type: 'error',
       catId,
-      error: errors || fallbackError,
-      content: JSON.stringify({ errorSubtype: subtype }),
+      error: errors || resultText || fallbackError,
+      content: JSON.stringify({ errorSubtype: subtype, isError: e.is_error === true }),
       timestamp: Date.now(),
     };
   }
@@ -269,7 +292,7 @@ export function transformClaudeEvent(
 export function isResultErrorEvent(event: unknown): boolean {
   if (typeof event !== 'object' || event === null) return false;
   const e = event as Record<string, unknown>;
-  return e.type === 'result' && e.subtype !== 'success';
+  return e.type === 'result' && (e.is_error === true || e.subtype !== 'success');
 }
 
 /** F8: Extract token usage from Claude result/success event.

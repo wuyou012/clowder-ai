@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/services/tts-server.sh
-# Start local TTS server for Cat Cafe voice output.
+# Start local TTS server for Clowder AI voice output.
 #
 # Usage:
 #   ./scripts/services/tts-server.sh                                  # default: qwen3-clone + Qwen3-TTS Base
@@ -43,11 +43,21 @@ if [ -z "${TTS_PROVIDER:-}" ]; then
     sapi)                         PROVIDER="sapi" ;;
     piper|zh_CN-*|en_US-*|en_GB-*) PROVIDER="piper" ;;
     mlx-community/Kokoro-*)       PROVIDER="mlx-audio" ;;
+    qwen3-clone)                  PROVIDER="qwen3-clone" ;;
     *)                            PROVIDER="qwen3-clone" ;;
   esac
 else
   PROVIDER="$TTS_PROVIDER"
 fi
+
+# When MODEL equals a provider name (e.g. TTS_MODEL=qwen3-clone), it's not
+# a valid HF model path.  Log a diagnostic -- the Python create_adapter()
+# handles this by falling back to the adapter's built-in DEFAULT_MODEL.
+case "$MODEL" in
+  qwen3-clone|mlx-audio|edge-tts|sapi|piper)
+    echo "[start] MODEL='$MODEL' is a provider name, not an HF model -- adapter will use built-in default"
+    ;;
+esac
 
 if [ ! -d "$VENV_DIR" ]; then
   echo "[start] venv not found: $VENV_DIR -- auto-installing..." >&2

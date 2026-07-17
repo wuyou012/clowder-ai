@@ -157,7 +157,7 @@ describe('ChatContainerHeader thread indicator', () => {
       {
         ...TEST_THREADS[0],
         title: 'A'.repeat(120),
-        projectPath: '/home/user/clowder-ai',
+        projectPath: '/home/user/workspace/AI/clowder-ai',
       },
     ];
     const html = renderToStaticMarkup(React.createElement(ThreadIndicator, { threadId: 'thread_xyz' }));
@@ -174,7 +174,7 @@ describe('ChatContainerHeader thread indicator', () => {
       {
         ...TEST_THREADS[0],
         title: 't',
-        projectPath: `/home/user/${longBasename}`,
+        projectPath: `/home/user/workspace/AI/${longBasename}`,
       },
     ];
     const html = renderToStaticMarkup(React.createElement(ThreadIndicator, { threadId: 'thread_xyz' }));
@@ -185,11 +185,11 @@ describe('ChatContainerHeader thread indicator', () => {
     expect(html).toContain('whitespace-nowrap');
     expect(html).toContain(longBasename.slice(-10));
     expect(html).toMatch(/·\s+…/);
-    expect(html).toContain(`/home/user/${longBasename}`);
+    expect(html).toContain(`/home/user/workspace/AI/${longBasename}`);
   });
 
   it('does not throw when navigator.clipboard is unavailable or writeText rejects', async () => {
-    mockStore.threads = [{ ...TEST_THREADS[0], projectPath: '/home/user/clowder-ai' }];
+    mockStore.threads = [{ ...TEST_THREADS[0], projectPath: '/home/user/workspace/AI/clowder-ai' }];
     root = createRoot(container);
 
     Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
@@ -230,7 +230,9 @@ describe('ChatContainerHeader thread indicator', () => {
         root?.render(React.createElement(ThreadIndicator, { threadId: 'thread_xyz' }));
       });
 
-      const projectChip = container.querySelector('[role="button"]') as HTMLElement | null;
+      // The title span also has role="button" now (double-click to edit),
+      // so grab the project chip specifically via aria-label
+      const projectChip = container.querySelector('[role="button"][aria-label*="项目路径"]') as HTMLElement | null;
       expect(projectChip?.getAttribute('title')).toBe('点击复制: /projects/cat-cafe');
 
       await act(async () => {
@@ -273,7 +275,7 @@ describe('ChatContainerHeader thread indicator', () => {
         root?.render(React.createElement(ThreadIndicator, { threadId: 'thread_xyz' }));
       });
 
-      const projectChip = container.querySelector('[role="button"]') as HTMLElement | null;
+      const projectChip = container.querySelector('[role="button"][aria-label*="项目路径"]') as HTMLElement | null;
       await act(async () => {
         projectChip?.click();
         await Promise.resolve();
@@ -285,7 +287,7 @@ describe('ChatContainerHeader thread indicator', () => {
         root?.render(React.createElement(ThreadIndicator, { threadId: 'thread_next' }));
       });
 
-      const nextProjectChip = container.querySelector('[role="button"]') as HTMLElement | null;
+      const nextProjectChip = container.querySelector('[role="button"][aria-label*="项目路径"]') as HTMLElement | null;
       expect(nextProjectChip?.textContent).toContain('next-app');
       expect(nextProjectChip?.textContent).not.toContain('copied!');
       expect(nextProjectChip?.getAttribute('title')).toBe('点击复制: /projects/next-app');

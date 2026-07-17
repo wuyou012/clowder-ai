@@ -28,6 +28,7 @@ import {
   type EventAuditLog,
   getEventAuditLog,
 } from '../domains/cats/services/orchestration/EventAuditLog.js';
+import { guessMime, readWorkspaceFilePreview } from '../domains/workspace/workspace-file-read.js';
 import {
   addLinkedRoot,
   getLinkedRootsAsync,
@@ -37,6 +38,7 @@ import {
   registerWorktrees,
   removeLinkedRoot,
   resolveWorkspacePath,
+  resolveWorktreeIdByPath,
   WorkspaceSecurityError,
 } from '../domains/workspace/workspace-security.js';
 
@@ -46,6 +48,57 @@ const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10 MB image preview
 const MAX_SEARCH_RESULTS = 100;
 const MAX_TREE_DEPTH = 5;
 const MAX_CONTENT_SEARCH_FILE_SIZE = 10 * 1024 * 1024; // 10 MB per searchable text file
+
+export type ResolveWorktreeIdByPathForNavigate = (root: string) => Promise<string>;
+
+export interface WorktreeCanonicalizationFallbackProbe {
+  reason: 'resolve_failed';
+  requestedWorktreeId: string;
+  errorName: string;
+  errorMessage: string;
+  errorCode?: string;
+}
+
+export interface WorktreeCanonicalizationProbe {
+  worktreeId: string;
+  canonicalized: boolean;
+  fallback?: WorktreeCanonicalizationFallbackProbe;
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error) return undefined;
+  if (typeof error !== 'object') return undefined;
+  if (!('code' in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+export async function canonicalizeNavigateWorktreeId(
+  requestedWorktreeId: string,
+  root: string,
+  resolver: ResolveWorktreeIdByPathForNavigate = resolveWorktreeIdByPath,
+): Promise<WorktreeCanonicalizationProbe> {
+  try {
+    const resolvedWorktreeId = await resolver(root);
+    return {
+      worktreeId: resolvedWorktreeId,
+      canonicalized: resolvedWorktreeId !== requestedWorktreeId,
+    };
+  } catch (error) {
+    const errorCode = getErrorCode(error);
+    return {
+      worktreeId: requestedWorktreeId,
+      canonicalized: false,
+      fallback: {
+        reason: 'resolve_failed',
+        requestedWorktreeId,
+        errorName: error instanceof Error ? error.name : 'Error',
+        errorMessage: error instanceof Error ? error.message : String(error),
+        ...(errorCode ? { errorCode } : {}),
+      },
+    };
+  }
+}
 
 const CONTENT_SEARCH_EXTENSIONS = new Set([
   '.ts',
@@ -64,47 +117,6 @@ const CONTENT_SEARCH_EXTENSIONS = new Set([
   '.sh',
   '.py',
 ]);
-
-const MIME_MAP: Record<string, string> = {
-  '.ts': 'text/typescript',
-  '.tsx': 'text/tsx',
-  '.js': 'text/javascript',
-  '.jsx': 'text/jsx',
-  '.json': 'application/json',
-  '.md': 'text/markdown',
-  '.css': 'text/css',
-  '.html': 'text/html',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.yaml': 'text/yaml',
-  '.yml': 'text/yaml',
-  '.toml': 'text/toml',
-  '.sh': 'text/x-shellscript',
-  '.py': 'text/x-python',
-  // Audio
-  '.mp3': 'audio/mpeg',
-  '.wav': 'audio/wav',
-  '.m4a': 'audio/mp4',
-  '.ogg': 'audio/ogg',
-  '.flac': 'audio/flac',
-  // Video
-  '.mp4': 'video/mp4',
-  '.webm': 'video/webm',
-  '.mov': 'video/quicktime',
-};
-
-function guessMime(filepath: string): string {
-  return MIME_MAP[extname(filepath)] ?? 'text/plain';
-}
-
-function sha256(content: string): string {
-  return createHash('sha256').update(content).digest('hex');
-}
 
 interface TreeNode {
   name: string;
@@ -280,6 +292,7 @@ async function buildTree(root: string, dirPath: string, depth: number, maxDepth:
 interface WorkspaceRouteOpts {
   socketEmit?: (event: string, data: unknown, room: string) => void;
   auditLog?: EventAuditLog;
+  resolveWorktreeIdByPathForNavigate?: ResolveWorktreeIdByPathForNavigate;
 }
 
 export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (app, opts) => {
@@ -304,7 +317,11 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (ap
     // Prefix foreign repo worktree IDs with a short hash to prevent cross-repo collision
     if (repoRoot) {
       const prefix = createHash('sha256').update(repoRoot).digest('hex').slice(0, 6);
-      for (const e of entries) e.id = `${prefix}_${e.id}`;
+      for (const e of entries) {
+        const canonicalId = e.id;
+        e.id = `${prefix}_${canonicalId}`;
+        e.canonicalId = canonicalId;
+      }
     }
     const linked = await getLinkedRootsAsync();
     const all = [...entries, ...linked];
@@ -359,32 +376,20 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (ap
         return { error: 'Path is a directory' };
       }
 
-      const mime = guessMime(resolved);
-      const isBinary = mime.startsWith('image/') || mime.startsWith('audio/') || mime.startsWith('video/');
-
-      if (isBinary) {
-        return {
-          path: filePath,
-          content: '',
-          sha256: '',
-          size: fileStat.size,
-          mime,
-          truncated: false,
-          binary: true,
-        };
-      }
-
-      const truncated = fileStat.size > MAX_FILE_SIZE;
-      const content = await readFile(resolved, 'utf-8');
-      const displayContent = truncated ? content.slice(0, MAX_FILE_SIZE) : content;
+      // Memory-bounded read: never pulls more than MAX_FILE_SIZE into a string.
+      // Binary detection (known media MIME + NUL-byte content sniff) and the
+      // hashing policy live in the shared helper, so this route and the
+      // file-watcher classify files identically (F063 OOM fix).
+      const preview = await readWorkspaceFilePreview(resolved, { maxBytes: MAX_FILE_SIZE });
 
       return {
         path: filePath,
-        content: displayContent,
-        sha256: sha256(content),
-        size: fileStat.size,
-        mime,
-        truncated,
+        content: preview.content,
+        sha256: preview.sha256,
+        size: preview.size,
+        mime: preview.mime,
+        truncated: preview.truncated,
+        binary: preview.binary,
       };
     } catch (e) {
       if (e instanceof WorkspaceSecurityError) {
@@ -792,8 +797,29 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (ap
       return { error: 'worktreeId and path required' };
     }
 
+    let canonicalWorktreeId = worktreeId;
+    let canonicalizationProbe: WorktreeCanonicalizationProbe = {
+      worktreeId,
+      canonicalized: false,
+    };
     try {
       const root = await getWorktreeRoot(worktreeId);
+      canonicalizationProbe = await canonicalizeNavigateWorktreeId(
+        worktreeId,
+        root,
+        opts.resolveWorktreeIdByPathForNavigate,
+      );
+      canonicalWorktreeId = canonicalizationProbe.worktreeId;
+      if (canonicalizationProbe.fallback) {
+        request.log.warn(
+          {
+            worktreeId,
+            canonicalWorktreeId,
+            canonicalizeFallback: canonicalizationProbe.fallback,
+          },
+          'workspace navigate worktreeId canonicalization fallback',
+        );
+      }
       const resolved = await resolveWorkspacePath(root, filePath);
       await stat(resolved);
     } catch (e) {
@@ -809,9 +835,16 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (ap
       return { error: 'Internal error' };
     }
 
-    const eventData = { path: filePath, worktreeId, action, line, threadId, eventId: randomUUID() };
-    if (worktreeId) {
-      opts.socketEmit?.('workspace:navigate', eventData, `worktree:${worktreeId}`);
+    const eventData = {
+      path: filePath,
+      worktreeId: canonicalWorktreeId,
+      action,
+      line,
+      threadId,
+      eventId: randomUUID(),
+    };
+    if (canonicalWorktreeId) {
+      opts.socketEmit?.('workspace:navigate', eventData, `worktree:${canonicalWorktreeId}`);
       opts.socketEmit?.('workspace:navigate', eventData, 'workspace:global');
     } else {
       opts.socketEmit?.('workspace:navigate', eventData, 'workspace:global');
@@ -822,7 +855,10 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (ap
         type: AuditEventTypes.WORKSPACE_NAVIGATE,
         threadId,
         data: {
-          worktreeId,
+          worktreeId: canonicalWorktreeId,
+          requestedWorktreeId: worktreeId,
+          worktreeIdCanonicalized: canonicalizationProbe.canonicalized,
+          ...(canonicalizationProbe.fallback ? { canonicalizeFallback: canonicalizationProbe.fallback } : {}),
           path: filePath,
           action,
           line,
@@ -831,6 +867,13 @@ export const workspaceRoutes: FastifyPluginAsync<WorkspaceRouteOpts> = async (ap
       })
       .catch(() => {});
 
-    return { ok: true, path: filePath, action };
+    return {
+      ok: true,
+      path: filePath,
+      action,
+      worktreeId: canonicalWorktreeId,
+      worktreeIdCanonicalized: canonicalizationProbe.canonicalized,
+      ...(canonicalizationProbe.fallback ? { canonicalizeFallback: true } : {}),
+    };
   });
 };

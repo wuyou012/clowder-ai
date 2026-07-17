@@ -21,10 +21,11 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
-import { type AgyProfileConfig, type CatId, createCatId } from '@cat-cafe/shared';
+import { basename, join, resolve } from 'node:path';
+import { type AgyProfileConfig, type CatId, type CliDiagnostics, createCatId } from '@cat-cafe/shared';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
+import { buildCliDiagnostics, buildSilentCompletionDiagnostic } from '../../../../../utils/cli-diagnostics.js';
 import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import {
@@ -38,11 +39,23 @@ import {
 import { resolveCliTimeoutMs } from '../../../../../utils/cli-timeout.js';
 import type { SpawnFn } from '../../../../../utils/cli-types.js';
 import { readJsonlTail } from '../../../../../utils/jsonl-tail-reader.js';
+import { sanitizeCliStderr } from '../../../../../utils/sanitize-cli-stderr.js';
 import type { AgentMessage, AgentService, AgentServiceOptions, MessageMetadata, TokenUsage } from '../../types.js';
 import { appendLocalImagePathHints, collectImageAccessDirectories } from '../providers/image-cli-bridge.js';
 import { extractImagePaths } from '../providers/image-paths.js';
-import { type AgyProfile, preflightAgyProfile, resolveAgyProfile } from './agy-profile-manager.js';
-import { invokeAgyPty } from './agy-pty-adapter.js';
+import { type AgyProfile, preflightAgyProfile, resolveAgyProfile, resolveAgySpawnCwd } from './agy-profile-manager.js';
+import { extractAgyFinalTextFromSteps, parseAgyStepTools, readAgyTrajectorySteps } from './agy-trajectory-extractor.js';
+import {
+  type AgyProgressEvent,
+  createAgyResumeBaselineCursorResolver,
+  listAgyConversationDbs,
+  locateAgyTrajectoryDb,
+  observeAgyProgress,
+  readAgyDbFileIdentity,
+  readAgyMaxStepIdx,
+  readAgyStepsPrefixFingerprint,
+  resolveAgyAppDataDir,
+} from './agy-trajectory-observer.js';
 import {
   classifyAntigravityCliPlainText,
   extractAntigravityCliConversationId,
@@ -54,6 +67,10 @@ const log = createModuleLogger('gemini-agent');
 
 type GeminiAdapter = 'gemini-cli' | 'antigravity-cli' | 'antigravity' | 'agy-pty';
 const DEFAULT_GEMINI_ADAPTER: GeminiAdapter = 'agy-pty';
+
+function resolveDiagnosticInvocationId(options: AgentServiceOptions | undefined): string | undefined {
+  return options?.invocationId ?? options?.auditContext?.invocationId;
+}
 
 interface GeminiStoredThought {
   readonly subject?: string;
@@ -313,18 +330,49 @@ function formatAgyPrintTimeout(timeoutMs: number): string | null {
   return `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`;
 }
 
-function removeValuedCliFlags(args: readonly string[], flags: ReadonlySet<string>): string[] {
+const AGY_GEMINI_MODEL_BY_LEGACY_MODEL_ID = new Map([
+  ['gemini-2.5-pro', 'Gemini 3.1 Pro (High)'],
+  ['gemini-2.5-pro-preview', 'Gemini 3.1 Pro (High)'],
+  ['gemini-2.5-pro-exp', 'Gemini 3.1 Pro (High)'],
+  ['gemini-2.5-flash', 'Gemini 3.5 Flash (High)'],
+  ['gemini-2.5-flash-preview', 'Gemini 3.5 Flash (High)'],
+  ['gemini-3.1-pro', 'Gemini 3.1 Pro (High)'],
+  ['gemini-3.1-pro-preview', 'Gemini 3.1 Pro (High)'],
+  ['gemini-3.5-flash', 'Gemini 3.5 Flash (High)'],
+]);
+
+function normalizeAgyModelSelector(model: string): string {
+  const trimmed = model.trim();
+  return AGY_GEMINI_MODEL_BY_LEGACY_MODEL_ID.get(trimmed) ?? trimmed;
+}
+
+function removeValuedCliFlags(
+  args: readonly string[],
+  flags: ReadonlySet<string>,
+  options: { readonly consumeValueTokens?: 'single' | 'untilNextFlag' } = {},
+): string[] {
   const result: string[] = [];
+  const consumeUntilNextFlag = options.consumeValueTokens === 'untilNextFlag';
+  const skipValueTokens = (startIndex: number): number => {
+    let nextIndex = startIndex;
+    while (nextIndex < args.length) {
+      const nextArg = args[nextIndex];
+      if (nextArg == null || nextArg.startsWith('-')) break;
+      if (!consumeUntilNextFlag) return nextIndex + 1;
+      nextIndex++;
+    }
+    return nextIndex;
+  };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg == null) continue;
     const equalsIndex = arg.indexOf('=');
     if (equalsIndex > 0 && flags.has(arg.slice(0, equalsIndex))) {
+      if (consumeUntilNextFlag) i = skipValueTokens(i + 1) - 1;
       continue;
     }
     if (flags.has(arg)) {
-      const nextArg = args[i + 1];
-      if (nextArg != null && !nextArg.startsWith('-')) i++;
+      i = skipValueTokens(i + 1) - 1;
       continue;
     }
     result.push(arg);
@@ -332,7 +380,7 @@ function removeValuedCliFlags(args: readonly string[], flags: ReadonlySet<string
   return result;
 }
 
-const ANTIGRAVITY_USER_BLOCKED_FLAGS = new Set(['--dangerously-skip-permissions']);
+const ANTIGRAVITY_USER_BLOCKED_FLAGS = new Set(['--dangerously-skip-permissions', '--model']);
 
 function insertArgsBeforeFlag(args: string[], flag: string, insertion: readonly string[]): void {
   const index = args.indexOf(flag);
@@ -357,6 +405,62 @@ function removeAntigravityLogFile(logPath: string): void {
   } catch {
     // Best-effort cleanup only; provider result delivery should not fail on temp-file deletion.
   }
+}
+
+function resolveAgyDebugHomeMode(
+  agyProfile: AgyProfile | null,
+  childEnv: NodeJS.ProcessEnv | undefined,
+): NonNullable<CliDiagnostics['debugRef']['homeMode']> {
+  if (agyProfile) return 'agy_profile_home';
+  return typeof childEnv?.HOME === 'string' && childEnv.HOME.trim().length > 0 ? 'child_env_home' : 'process_home';
+}
+
+function buildAgyDebugRef(input: {
+  readonly agyProfile: AgyProfile | null;
+  readonly childEnv: NodeJS.ProcessEnv | undefined;
+  readonly spawnCwd: string;
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | string | null;
+  readonly invocationId?: string;
+}): CliDiagnostics['debugRef'] {
+  const spawnCwdBasename = basename(input.spawnCwd);
+  const spawnCwdKey = /^[a-f0-9]{16}$/.test(spawnCwdBasename) ? spawnCwdBasename : undefined;
+  return {
+    command: 'agy',
+    exitCode: input.exitCode,
+    signal: input.signal,
+    ...(input.invocationId ? { invocationId: input.invocationId } : {}),
+    homeMode: resolveAgyDebugHomeMode(input.agyProfile, input.childEnv),
+    spawnCwdMode: input.agyProfile ? 'agy_profile_cwd' : 'cat_cafe_agy_cwd',
+    ...(spawnCwdKey ? { spawnCwdKey } : {}),
+    ...(input.agyProfile ? { profileId: input.agyProfile.profileId } : {}),
+  };
+}
+
+function pickAgyDebugRefExtras(
+  debugRef: CliDiagnostics['debugRef'],
+): Pick<CliDiagnostics['debugRef'], 'homeMode' | 'spawnCwdMode' | 'spawnCwdKey' | 'profileId'> {
+  return {
+    ...(debugRef.homeMode ? { homeMode: debugRef.homeMode } : {}),
+    ...(debugRef.spawnCwdMode ? { spawnCwdMode: debugRef.spawnCwdMode } : {}),
+    ...(debugRef.spawnCwdKey ? { spawnCwdKey: debugRef.spawnCwdKey } : {}),
+    ...(debugRef.profileId ? { profileId: debugRef.profileId } : {}),
+  };
+}
+
+function withAgyDebugRefExtras(
+  diagnostics: CliDiagnostics | undefined,
+  extras: Pick<CliDiagnostics['debugRef'], 'homeMode' | 'spawnCwdMode' | 'spawnCwdKey' | 'profileId'>,
+): CliDiagnostics | undefined {
+  return diagnostics
+    ? {
+        ...diagnostics,
+        debugRef: {
+          ...diagnostics.debugRef,
+          ...extras,
+        },
+      }
+    : undefined;
 }
 
 /**
@@ -642,17 +746,33 @@ export class GeminiAgentService implements AgentService {
   }
 
   private async *invokeAntigravityCLI(prompt: string, options?: AgentServiceOptions): AsyncIterable<AgentMessage> {
-    const requestedModelOverride = options?.callbackEnv?.CAT_CAFE_GEMINI_MODEL_OVERRIDE;
-    const workingDirectory = options?.workingDirectory ?? process.cwd();
+    const yieldedToolCallIds = new Set<string>();
+    const yieldedToolResults = new Set<string>();
+    const requestedModelOverrideRaw = options?.callbackEnv?.CAT_CAFE_GEMINI_MODEL_OVERRIDE?.trim();
+    const requestedModelOverride =
+      requestedModelOverrideRaw !== undefined && requestedModelOverrideRaw.length > 0
+        ? normalizeAgyModelSelector(requestedModelOverrideRaw)
+        : undefined;
+    const configuredAgyModel = normalizeAgyModelSelector(this.model);
+    let agyModel = configuredAgyModel;
+    if (requestedModelOverride !== undefined) {
+      agyModel = requestedModelOverride;
+    }
+    // F210 cache-leak fix (cloud P2)：normalize 成绝对路径。spawn cwd 现在是独立 sandbox（与
+    // workingDirectory 解耦），若 workingDirectory 是相对路径（AgentServiceOptions 不强制绝对，
+    // 直连 caller/测试可传 `.`），`--add-dir workingDirectory` 会相对 sandbox cwd 解析 → AGY 授权
+    // 错目录、tool use 落到 workspace 外。resolve() 让 --add-dir + profile trust 都拿绝对路径
+    // （`.` → process.cwd()，与改动前 cwd=workingDirectory 的语义一致）。
+    const workingDirectory = resolve(options?.workingDirectory ?? process.cwd());
     let metadata: MessageMetadata = {
       provider: 'google',
-      model: 'account-selected (antigravity-cli)',
+      model: agyModel ? `${agyModel} (antigravity-cli --model)` : 'account-selected (antigravity-cli)',
       modelVerified: false,
       diagnostics: {
         antigravityCli: {
-          modelSelection: 'account-side selected model',
+          modelSelection: agyModel ? 'cli --model flag' : 'account-side selected model',
           configuredCatModel: this.model,
-          ...(requestedModelOverride ? { unsupportedModelOverride: requestedModelOverride } : {}),
+          ...(requestedModelOverride ? { requestedModelOverride } : {}),
         },
       },
     };
@@ -660,7 +780,7 @@ export class GeminiAgentService implements AgentService {
     try {
       agyProfile = resolveAgyProfile({
         catId: this.catId as string,
-        expectedModel: this.model,
+        expectedModel: configuredAgyModel,
         workingDirectory,
         config: this.agyProfileConfig,
       });
@@ -676,13 +796,17 @@ export class GeminiAgentService implements AgentService {
       return;
     }
     if (agyProfile) {
+      agyModel = agyProfile.expectedModel;
+      if (requestedModelOverride !== undefined) {
+        agyModel = requestedModelOverride;
+      }
       metadata = {
         provider: 'google',
-        model: `${agyProfile.expectedModel} (antigravity-cli profile)`,
+        model: agyModel ? `${agyModel} (antigravity-cli profile)` : 'account-selected (antigravity-cli profile)',
         modelVerified: false,
         diagnostics: {
           antigravityCli: {
-            modelSelection: 'isolated profile settings',
+            modelSelection: agyModel ? 'isolated profile settings + cli --model flag' : 'isolated profile settings',
             configuredCatModel: this.model,
             profile: {
               profileId: agyProfile.profileId,
@@ -691,7 +815,7 @@ export class GeminiAgentService implements AgentService {
               trustedWorkspaces: agyProfile.trustedWorkspaces,
               autoApprove: agyProfile.autoApprove,
             },
-            ...(requestedModelOverride ? { unsupportedModelOverride: requestedModelOverride } : {}),
+            ...(requestedModelOverride ? { requestedModelOverride } : {}),
           },
         },
       };
@@ -704,7 +828,7 @@ export class GeminiAgentService implements AgentService {
 
     const timeoutMs = resolveCliTimeoutMs(undefined);
     const printTimeout = formatAgyPrintTimeout(timeoutMs);
-    const agyLogPath = join(tmpdir(), `cat-cafe-agy-${randomUUID()}.log`);
+    const agyLogPath = options?.agyLogPathOverride ?? join(tmpdir(), `cat-cafe-agy-${randomUUID()}.log`);
     const args: string[] = ['--add-dir', workingDirectory];
     if (agyProfile?.autoApprove) {
       args.push('--dangerously-skip-permissions');
@@ -714,6 +838,9 @@ export class GeminiAgentService implements AgentService {
     }
     if (printTimeout) {
       args.push('--print-timeout', printTimeout);
+    }
+    if (agyModel) {
+      args.push('--model', agyModel);
     }
     const requestedSessionId = options?.sessionId;
     let emittedSessionInit = false;
@@ -728,28 +855,15 @@ export class GeminiAgentService implements AgentService {
         timestamp: Date.now(),
       };
     }
-    if (requestedModelOverride) {
-      yield {
-        type: 'system_info',
-        catId: this.catId,
-        content: JSON.stringify({
-          type: 'antigravity_cli_model_override_unsupported',
-          requestedModel: requestedModelOverride,
-          reason: agyProfile
-            ? 'AGY CLI profile model selection is configured through isolated settings; no verified per-call --model/env override exists.'
-            : 'AGY CLI uses the account-side selected model; no verified per-call --model/env override exists.',
-        }),
-        metadata,
-        timestamp: Date.now(),
-      };
-    }
     args.push('--print', effectivePrompt);
 
     const userParts: string[] = [];
     for (const arg of options?.cliConfigArgs ?? []) {
       userParts.push(...arg.trim().split(/\s+/));
     }
-    const filteredUserParts = removeValuedCliFlags(userParts, ANTIGRAVITY_USER_BLOCKED_FLAGS);
+    const filteredUserParts = removeValuedCliFlags(userParts, ANTIGRAVITY_USER_BLOCKED_FLAGS, {
+      consumeValueTokens: 'untilNextFlag',
+    });
     if (filteredUserParts.length > 0) {
       const accumulativeFlags = new Set(['--add-dir']);
       const userFlags = new Set(filteredUserParts.filter((p) => p.startsWith('-')));
@@ -877,11 +991,67 @@ export class GeminiAgentService implements AgentService {
         }
       }
 
+      // F210 H2a (B spike §8.3): capture invocation start BEFORE spawn so a resume-turn cascade db
+      // (created after spawn) is newer than this watermark; appDataDir derived from the SAME effective
+      // child HOME passed to AGY (childEnv.HOME — merges agyProfile/accountEnv/callbackEnv), because
+      // resume-turn log is empty (agy doesn't write --log-file on resume) and the scan fallback in
+      // locateAgyTrajectoryDb needs appDataDir independently of the log. 云端 codex P2: 不能用进程
+      // homedir()，否则 accountEnv 提供 HOME 时会扫错目录、resume 永久零 progress。
+      const agyInvocationStartMs = Date.now();
+      const agyAppDataDir = resolveAgyAppDataDir(childEnv);
+      const resumeTrajectoryDbName = requestedSessionId ? `${requestedSessionId}.db` : null;
+      const resumeTrajectoryDbPath =
+        resumeTrajectoryDbName && basename(resumeTrajectoryDbName) === resumeTrajectoryDbName
+          ? join(agyAppDataDir, 'conversations', resumeTrajectoryDbName)
+          : null;
+      const resumeTrajectoryBaselineCursor =
+        resumeTrajectoryDbPath !== null ? readAgyMaxStepIdx(resumeTrajectoryDbPath) : null;
+      const resumeTrajectoryDbIdentity =
+        resumeTrajectoryDbPath !== null && resumeTrajectoryBaselineCursor !== null
+          ? readAgyDbFileIdentity(resumeTrajectoryDbPath)
+          : null;
+      const resumeTrajectoryBaselinePrefixFingerprintResult =
+        resumeTrajectoryDbPath !== null && resumeTrajectoryBaselineCursor !== null
+          ? readAgyStepsPrefixFingerprint(resumeTrajectoryDbPath, resumeTrajectoryBaselineCursor)
+          : null;
+      const resumeTrajectoryBaselinePrefixFingerprint =
+        resumeTrajectoryBaselinePrefixFingerprintResult?.status === 'ok'
+          ? resumeTrajectoryBaselinePrefixFingerprintResult.fingerprint
+          : null;
+      const initialCursorForDb =
+        resumeTrajectoryDbPath !== null &&
+        resumeTrajectoryBaselineCursor !== null &&
+        resumeTrajectoryDbIdentity !== null &&
+        resumeTrajectoryBaselinePrefixFingerprint !== null
+          ? createAgyResumeBaselineCursorResolver({
+              resumeDbPath: resumeTrajectoryDbPath,
+              baselineCursor: resumeTrajectoryBaselineCursor,
+              baselineIdentity: resumeTrajectoryDbIdentity,
+              baselinePrefixFingerprint: resumeTrajectoryBaselinePrefixFingerprint,
+            })
+          : undefined;
+      // F210 cache-leak fix (砚砚 cwd sandbox 方向)：spawn cwd 与 workingDirectory 解耦。AGY 写
+      // cwd-relative cache（`cache/projects.json`）到 spawn cwd——cwd=repo root 时泄漏到 worktree
+      // （实证 2026-06-03）。agyProfile 时 spawn cwd 指向 profile cwd sandbox（cwd-relative cache 落
+      // profile 不 repo）；workspace 仍由上方 `args = ['--add-dir', workingDirectory]` 显式授权。
+      const agySpawnCwd = resolveAgySpawnCwd(agyProfile, this.catId, workingDirectory);
+      // F210 cache-leak diagnostics (砚砚 可选项)：把隔离后的 spawn cwd 写进 metadata，
+      // runtime 日志 / 重启验证可直接确认 cwd 已 sandbox、不落 repo root。
+      metadata = {
+        ...metadata,
+        diagnostics: {
+          ...(metadata.diagnostics ?? {}),
+          antigravityCli: {
+            ...((metadata.diagnostics?.antigravityCli as Record<string, unknown> | undefined) ?? {}),
+            spawnCwd: agySpawnCwd,
+          },
+        },
+      };
       const cliOpts = {
         command: agyCommand,
         args,
         outputMode: 'plainText' as const,
-        cwd: workingDirectory,
+        cwd: agySpawnCwd,
         timeoutMs,
         ...(childEnv ? { env: childEnv } : {}),
         ...(options?.signal ? { signal: options.signal } : {}),
@@ -894,44 +1064,152 @@ export class GeminiAgentService implements AgentService {
         ? options.spawnCliOverride(cliOpts)
         : spawnCli(cliOpts, this.spawnFn ? { spawnFn: this.spawnFn } : undefined);
 
-      try {
-        for await (const event of events) {
-          if (isCliPlainTextResult(event)) {
-            stdout = event.stdout;
-            stderr = event.stderr;
-            exitCode = event.exitCode;
-            exitSignal = event.signal;
-            continue;
+      // F210-H1b: agy `--print` (plainText) blocks until the process ends, so consume the spawn
+      // stream in a background task while a side-channel progress observer polls the trajectory
+      // SQLite. The final reply is still decided by the stdout handling below — progress is a pure
+      // side-channel (system_info), and observeAgyProgress is fail-open (SQLite unavailable → zero
+      // output), so this never changes final-answer semantics.
+      let agyFinished = false;
+      // F210-H1b (cloud P1): capture a consumer rejection immediately so the background task never
+      // rejects without a handler during the merge-loop wait. Re-thrown after the buffer drains so
+      // the existing top-level catch yields a normal error+done.
+      let consumerError: unknown = null;
+      const sideChannelBuffer: AgentMessage[] = [];
+      const agyConsumeTask = (async () => {
+        try {
+          for await (const event of events) {
+            if (isCliPlainTextResult(event)) {
+              stdout = event.stdout;
+              stderr = event.stderr;
+              exitCode = event.exitCode;
+              exitSignal = event.signal;
+              continue;
+            }
+            if (isCliTimeout(event)) {
+              timeoutEvent = event;
+              continue;
+            }
+            if (isCliError(event)) {
+              cliErrorEvent = event;
+              continue;
+            }
+            if (isLivenessWarning(event)) {
+              sideChannelBuffer.push({
+                type: 'system_info' as const,
+                catId: this.catId,
+                content: JSON.stringify({ type: 'liveness_warning', ...event }),
+                timestamp: Date.now(),
+              });
+            }
           }
-          if (isCliTimeout(event)) {
-            timeoutEvent = event;
-            continue;
+        } catch (err) {
+          consumerError = err;
+        } finally {
+          if (options?.signal) {
+            options.signal.removeEventListener('abort', abortHandler);
           }
-          if (isCliError(event)) {
-            cliErrorEvent = event;
-            continue;
-          }
-          if (isLivenessWarning(event)) {
+          agyFinished = true;
+        }
+      })();
+
+      const progressGen = observeAgyProgress({
+        readLog: () => readAntigravityLogText(agyLogPath),
+        isAgyDone: () => agyFinished,
+        sleep: (ms) =>
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, ms);
+          }),
+        // F210 H2a (B spike §8.3): resume turn 的 log 为空，靠扫 conversations/*.db 定位本轮
+        // 新建 cascade db（只认 invocationStart 后的单一候选；0/多 → fail-open）。
+        appDataDir: agyAppDataDir,
+        invocationStartMs: agyInvocationStartMs,
+        listConversationDbs: listAgyConversationDbs,
+        ...(initialCursorForDb ? { initialCursorForDb } : {}),
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      // Merge loop: drain the side-channel buffer (liveness) on a timer so it stays real-time even
+      // when progress yields nothing (fail-open / no new step). Buffering liveness until AGY
+      // completion would be worse than the pre-H1b real-time behavior (砚砚 P1-2). race(progress,
+      // timer) keeps both side channels live without one starving the other.
+      const SIDE_CHANNEL_DRAIN_MS = 200;
+      const progressIter = progressGen[Symbol.asyncIterator]();
+      let progressNext: Promise<IteratorResult<AgyProgressEvent>> | null = progressIter.next();
+      while (progressNext !== null || sideChannelBuffer.length > 0) {
+        while (sideChannelBuffer.length > 0) {
+          yield sideChannelBuffer.shift()!;
+        }
+        if (progressNext === null) break;
+        const settled = await Promise.race([
+          progressNext.then((res) => ({ kind: 'progress' as const, res })),
+          new Promise<{ kind: 'timer' }>((resolve) => {
+            setTimeout(() => resolve({ kind: 'timer' }), SIDE_CHANNEL_DRAIN_MS);
+          }),
+        ]);
+        if (settled.kind === 'progress') {
+          if (settled.res.done) {
+            progressNext = null;
+          } else {
+            const progress = settled.res.value;
             yield {
               type: 'system_info' as const,
               catId: this.catId,
-              content: JSON.stringify({ type: 'liveness_warning', ...event }),
+              content: JSON.stringify({
+                type: 'agy_trajectory_progress',
+                idx: progress.idx,
+                stepType: progress.stepType,
+                status: progress.status,
+                label: progress.label,
+              }),
               timestamp: Date.now(),
             };
+            if (progress.payload) {
+              const toolInfo = parseAgyStepTools(progress.payload, progress.idx);
+              if (toolInfo && toolInfo.toolName && toolInfo.toolCallId) {
+                const { toolName, toolCallId, toolInput, toolResultOutput } = toolInfo;
+                if (!yieldedToolCallIds.has(toolCallId)) {
+                  yieldedToolCallIds.add(toolCallId);
+                  yield {
+                    type: 'tool_use',
+                    catId: this.catId,
+                    toolName,
+                    toolInput,
+                    toolUseId: toolCallId,
+                    metadata,
+                    timestamp: Date.now(),
+                  };
+                }
+                if (progress.status === 3 && !yieldedToolResults.has(toolCallId)) {
+                  yieldedToolResults.add(toolCallId);
+                  yield {
+                    type: 'tool_result',
+                    catId: this.catId,
+                    toolName,
+                    content: toolResultOutput ?? '',
+                    toolUseId: toolCallId,
+                    toolResultStatus: 'ok',
+                    metadata,
+                    timestamp: Date.now(),
+                  };
+                }
+              }
+            }
+            progressNext = progressIter.next();
           }
         }
-      } finally {
-        if (options?.signal) {
-          options.signal.removeEventListener('abort', abortHandler);
-        }
+        // timer winner → loop back to drain the buffer; progressNext promise stays pending (reused).
+      }
+      await agyConsumeTask;
+      while (sideChannelBuffer.length > 0) {
+        yield sideChannelBuffer.shift()!;
+      }
+      if (consumerError) {
+        throw consumerError instanceof Error ? consumerError : new Error(String(consumerError));
       }
 
       const agyLogText = readAntigravityLogText(agyLogPath);
       const observedProfileModel = agyProfile ? extractAntigravityCliSelectedModelLabel(agyLogText) : null;
       const profileModelMissing = Boolean(agyProfile && !observedProfileModel);
-      const profileModelMismatch = Boolean(
-        agyProfile && observedProfileModel && observedProfileModel !== agyProfile.expectedModel,
-      );
+      const profileModelMismatch = Boolean(agyProfile && observedProfileModel && observedProfileModel !== agyModel);
       if (agyProfile && observedProfileModel) {
         metadata = {
           ...metadata,
@@ -946,12 +1224,112 @@ export class GeminiAgentService implements AgentService {
           },
         };
       }
+      // F210 H2b: resumed turn 从 trajectory 提取本轮 final answer 替换 stdout 重放（根治
+      // `agy --print --conversation` 累加重放）。agy resume log 为空 → locator 走扫描定位 resume
+      // 新 cascade db；任何环节失败（无 db / 无 final）→ resumedFinalText=null，classify fail-open
+      // 保留现有 stdout。
+      let resumedFinalText: string | null = null;
+      if (options?.sessionId) {
+        const dbPath = locateAgyTrajectoryDb({
+          logText: agyLogText,
+          appDataDir: agyAppDataDir,
+          invocationStartMs: agyInvocationStartMs,
+          listConversationDbs: listAgyConversationDbs,
+        });
+        if (dbPath) {
+          resumedFinalText = extractAgyFinalTextFromSteps(readAgyTrajectorySteps(dbPath));
+        }
+      }
       const parsedPlainText = classifyAntigravityCliPlainText({
         stdout,
         stderr,
         resumed: Boolean(options?.sessionId),
         agyLogText,
+        resumedFinalText,
       });
+      const diagnosticInvocationId = resolveDiagnosticInvocationId(options);
+      const agyDebugRef = buildAgyDebugRef({
+        agyProfile,
+        childEnv,
+        spawnCwd: agySpawnCwd,
+        exitCode,
+        signal: exitSignal,
+        ...(diagnosticInvocationId ? { invocationId: diagnosticInvocationId } : {}),
+      });
+      const agyDebugRefExtras = pickAgyDebugRefExtras(agyDebugRef);
+      const agyDiagnosticHomePaths =
+        typeof childEnv?.HOME === 'string' && childEnv.HOME.trim().length > 1 ? [childEnv.HOME] : undefined;
+      const stderrPresent = stderr.trim().length > 0;
+      const sanitizedAgyStderr = stderrPresent
+        ? sanitizeCliStderr(
+            stderr,
+            agyDiagnosticHomePaths ? { additionalHomePaths: agyDiagnosticHomePaths } : undefined,
+          )
+        : '';
+      const agyExitDiagnostics =
+        exitCode !== 0 || exitSignal !== null || cliErrorEvent
+          ? buildCliDiagnostics({
+              // Exit fallback diagnostics are user-visible, so they only classify
+              // stderr. AGY stdout may contain partial/private model text; stdout
+              // is admitted separately only through the provider-safe plain-text parser.
+              rawText: stderr,
+              // rawText still drives classification, but public excerpts are admitted
+              // only from sanitized stderr; unknown debug stderr stays closed.
+              safeExcerptRawText: sanitizedAgyStderr,
+              debugRef: agyDebugRef,
+              stderrEmpty: !stderrPresent,
+              ...(agyDiagnosticHomePaths ? { additionalHomePaths: agyDiagnosticHomePaths } : {}),
+            })
+          : undefined;
+      const parsedPlainTextDiagnostics =
+        parsedPlainText.kind === 'error'
+          ? buildCliDiagnostics({
+              // Use the parser's provider-safe message here, not raw stdout, so AGY OAuth URLs
+              // never leak into the user-facing diagnostics payload.
+              rawText: parsedPlainText.error,
+              debugRef: agyDebugRef,
+              stderrEmpty: !stderrPresent,
+              ...(agyDiagnosticHomePaths ? { additionalHomePaths: agyDiagnosticHomePaths } : {}),
+            })
+          : undefined;
+      const emptyPlainTextStderrDiagnostics =
+        parsedPlainText.kind === 'empty' && stderrPresent
+          ? buildCliDiagnostics({
+              rawText: stderr,
+              // rawText still drives classification, but the public excerpt is pre-sanitized
+              // before admission so OAuth fragments and child HOME paths cannot leak.
+              safeExcerptRawText: sanitizedAgyStderr,
+              debugRef: agyDebugRef,
+              stderrEmpty: false,
+              ...(agyDiagnosticHomePaths ? { additionalHomePaths: agyDiagnosticHomePaths } : {}),
+            })
+          : undefined;
+      const emptyPlainTextDiagnostics =
+        parsedPlainText.kind === 'empty'
+          ? emptyPlainTextStderrDiagnostics?.reasonCode
+            ? emptyPlainTextStderrDiagnostics
+            : buildSilentCompletionDiagnostic({
+                command: 'agy',
+                ...(diagnosticInvocationId ? { invocationId: diagnosticInvocationId } : {}),
+                // AGY --print is plain text, not NDJSON. Use a synthetic event marker so
+                // the F212 silent-completion panel can distinguish this path honestly.
+                eventCount: 1,
+                eventTypes: ['plain_text_empty'],
+                model: metadata.model,
+                sessionId: options?.sessionId ?? metadata.sessionId,
+                exitCode,
+                stderrPresent,
+                ...(stderrPresent ? { stderrExcerpt: stderr } : {}),
+                ...(agyDiagnosticHomePaths ? { additionalHomePaths: agyDiagnosticHomePaths } : {}),
+                debugRefExtras: agyDebugRefExtras,
+              })
+          : undefined;
+      const actionableEmptyPlainTextDiagnostics =
+        emptyPlainTextDiagnostics?.reasonCode && emptyPlainTextDiagnostics.reasonCode !== 'silent_completion'
+          ? emptyPlainTextDiagnostics
+          : undefined;
+      const timeoutCliDiagnostics = withAgyDebugRefExtras(timeoutEvent?.cliDiagnostics, agyDebugRefExtras);
+      const cliErrorEventDiagnostics = withAgyDebugRefExtras(cliErrorEvent?.cliDiagnostics, agyDebugRefExtras);
       const canRecordFreshConversation =
         !emittedSessionInit &&
         parsedPlainText.kind === 'text' &&
@@ -999,9 +1377,7 @@ export class GeminiAgentService implements AgentService {
           type: 'error',
           catId: this.catId,
           error: `Antigravity CLI 响应超时 (${Math.round(timeoutEvent.timeoutMs / 1000)}s)`,
-          metadata: timeoutEvent.cliDiagnostics
-            ? { ...metadata, cliDiagnostics: timeoutEvent.cliDiagnostics }
-            : metadata,
+          metadata: timeoutCliDiagnostics ? { ...metadata, cliDiagnostics: timeoutCliDiagnostics } : metadata,
           timestamp: Date.now(),
         };
       } else if (cancelled) {
@@ -1012,18 +1388,23 @@ export class GeminiAgentService implements AgentService {
           type: 'error',
           catId: this.catId,
           error: parsedPlainText.error,
-          metadata,
+          metadata: parsedPlainTextDiagnostics ? { ...metadata, cliDiagnostics: parsedPlainTextDiagnostics } : metadata,
           timestamp: Date.now(),
         };
       } else if (cliErrorEvent) {
         // F212 Phase A: forward cliDiagnostics on metadata for frontend folded panel (Phase B).
+        // AGY plain-text spawn yields __cliPlainText followed by __cliError on nonzero exit; rebuild
+        // diagnostics here so raw stdout/stderr, auditContext invocation, and isolated child HOME
+        // redaction are applied before the public payload.
         yield {
           type: 'error',
           catId: this.catId,
           error: formatCliExitError('Antigravity CLI', cliErrorEvent),
-          metadata: cliErrorEvent.cliDiagnostics
-            ? { ...metadata, cliDiagnostics: cliErrorEvent.cliDiagnostics }
-            : metadata,
+          metadata: agyExitDiagnostics
+            ? { ...metadata, cliDiagnostics: agyExitDiagnostics }
+            : cliErrorEventDiagnostics
+              ? { ...metadata, cliDiagnostics: cliErrorEventDiagnostics }
+              : metadata,
           timestamp: Date.now(),
         };
       } else if (exitCode !== 0 || exitSignal !== null) {
@@ -1035,14 +1416,22 @@ export class GeminiAgentService implements AgentService {
             signal: exitSignal,
             message: `CLI 异常退出 (code: ${exitCode ?? 'null'}, signal: ${exitSignal ?? 'none'})`,
           }),
-          metadata,
+          metadata: agyExitDiagnostics ? { ...metadata, cliDiagnostics: agyExitDiagnostics } : metadata,
+          timestamp: Date.now(),
+        };
+      } else if (parsedPlainText.kind === 'empty' && actionableEmptyPlainTextDiagnostics) {
+        yield {
+          type: 'error',
+          catId: this.catId,
+          error: actionableEmptyPlainTextDiagnostics.publicSummary,
+          metadata: { ...metadata, cliDiagnostics: actionableEmptyPlainTextDiagnostics },
           timestamp: Date.now(),
         };
       } else if (agyProfile && profileModelMismatch) {
         yield {
           type: 'error',
           catId: this.catId,
-          error: `AGY profile selected model mismatch: expected "${agyProfile.expectedModel}", observed "${observedProfileModel}".`,
+          error: `AGY profile selected model mismatch: expected "${agyModel}", observed "${observedProfileModel}".`,
           metadata,
           timestamp: Date.now(),
         };
@@ -1050,8 +1439,19 @@ export class GeminiAgentService implements AgentService {
         yield {
           type: 'error',
           catId: this.catId,
-          error: `AGY profile selected model was not verified: expected "${agyProfile.expectedModel}", but no selected model label was observed in AGY logs.`,
+          error: `AGY profile selected model was not verified: expected "${agyModel}", but no selected model label was observed in AGY logs.`,
           metadata,
+          timestamp: Date.now(),
+        };
+      } else if (parsedPlainText.kind === 'empty') {
+        yield {
+          type: 'system_info' as const,
+          catId: this.catId,
+          content: JSON.stringify({
+            type: 'silent_completion',
+            detail: 'Antigravity CLI completed without textual output.',
+          }),
+          metadata: emptyPlainTextDiagnostics ? { ...metadata, cliDiagnostics: emptyPlainTextDiagnostics } : metadata,
           timestamp: Date.now(),
         };
       } else if (parsedPlainText.kind === 'text') {

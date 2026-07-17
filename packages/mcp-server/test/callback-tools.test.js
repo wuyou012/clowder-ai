@@ -82,6 +82,42 @@ describe('MCP Callback Tools', () => {
     assert.equal(capturedOptions.headers['x-callback-token'], 'test-token');
   });
 
+  test('handleGetMessage forwards mode + stays pass-through (F236 AC-A5/B1)', async () => {
+    const { handleGetMessage } = await import('../dist/tools/callback-tools.js');
+
+    let capturedUrl;
+    // route returns an already-anchored payload; the MCP handler must NOT re-transform it
+    const routePayload = { message: { id: 'm1', preview: 'excerpt', truncated: true, contentLength: 500 } };
+    globalThis.fetch = async (url) => {
+      capturedUrl = url;
+      return { ok: true, json: async () => routePayload };
+    };
+
+    const result = await handleGetMessage({ messageId: 'm1', mode: 'full' });
+
+    assert.equal(result.isError, undefined);
+    assert.ok(capturedUrl.includes('/api/callbacks/get-message'));
+    assert.ok(capturedUrl.includes('messageId=m1'));
+    assert.ok(capturedUrl.includes('mode=full'), 'mode forwarded to route (truncation lives in route layer, AC-A5)');
+    // pass-through: route payload returned verbatim, anchor fields intact
+    assert.deepEqual(JSON.parse(result.content[0].text), routePayload);
+  });
+
+  test('handleListTasks forwards taskId why-drill param (F236 AC-A4)', async () => {
+    const { handleListTasks } = await import('../dist/tools/callback-tools.js');
+
+    let capturedUrl;
+    globalThis.fetch = async (url) => {
+      capturedUrl = url;
+      return { ok: true, json: async () => ({ tasks: [] }) };
+    };
+
+    await handleListTasks({ taskId: 'task-123' });
+
+    assert.ok(capturedUrl.includes('/api/callbacks/list-tasks'));
+    assert.ok(capturedUrl.includes('taskId=task-123'), 'taskId forwarded for full-why drill');
+  });
+
   test('handlePostMessage forwards threadId for agent-key callers (F178)', async () => {
     // F193 KD-1: principal detection follows buildAuthHeaders precedence —
     // if env has BOTH invocation_id AND callback_token, request is
@@ -373,6 +409,109 @@ describe('MCP Callback Tools', () => {
     assert.ok(capturedUrl.includes('limit=25'));
     assert.ok(capturedUrl.includes('featId=F043'));
     assert.ok(capturedUrl.includes('query=mcp'));
+  });
+
+  test('handleFeatIndex renders suggested cross-post action', async () => {
+    const { handleFeatIndex } = await import('../dist/tools/callback-tools.js');
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            featId: 'F193',
+            name: 'Cross Thread Comm',
+            status: 'in-progress',
+            owner: '布偶猫',
+            ownerCatId: 'opus',
+            threadIds: ['thread-f193'],
+            suggestedAction: {
+              type: 'cross_post',
+              threadId: 'thread-f193',
+              featureId: 'F193',
+              ownerCatId: 'opus',
+              targetCats: ['opus'],
+              reason: 'F193 is owned by opus; dispatch findings to the owning thread.',
+              source: 'feat_index',
+            },
+          },
+        ],
+      }),
+    });
+
+    const result = await handleFeatIndex({ featId: 'F193' });
+
+    assert.equal(result.isError, undefined);
+    const text = result.content[0].text;
+    assert.ok(text.includes('F193 — Cross Thread Comm'));
+    assert.ok(text.includes('owner: 布偶猫 (opus)'));
+    assert.ok(text.includes('cat_cafe_cross_post_message(threadId="thread-f193", targetCats=["opus"]'));
+    assert.ok(text.includes('reason: F193 is owned by opus'));
+  });
+
+  test('handleFeatIndex preserves keyDecisions in formatted output', async () => {
+    const { handleFeatIndex } = await import('../dist/tools/callback-tools.js');
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            featId: 'F043',
+            name: 'MCP Unification',
+            status: 'spec',
+            keyDecisions: ['Keep raw feature decisions visible', 'Do not hide routing contract changes'],
+          },
+        ],
+      }),
+    });
+
+    const result = await handleFeatIndex({ featId: 'F043' });
+
+    assert.equal(result.isError, undefined);
+    const text = result.content[0].text;
+    assert.ok(text.includes('F043 — MCP Unification'));
+    assert.ok(text.includes('key decisions:'));
+    assert.ok(text.includes('- Keep raw feature decisions visible'));
+    assert.ok(text.includes('- Do not hide routing contract changes'));
+  });
+
+  test('handleFeatIndex renders owner-only suggested cross-post action guidance', async () => {
+    const { handleFeatIndex } = await import('../dist/tools/callback-tools.js');
+
+    globalThis.fetch = async () => ({
+      ok: true,
+      json: async () => ({
+        items: [
+          {
+            featId: 'F194',
+            name: 'Owner Only Feature',
+            status: 'spec',
+            owner: '布偶猫',
+            ownerCatId: 'opus',
+            threadIds: [],
+            suggestedAction: {
+              type: 'cross_post',
+              featureId: 'F194',
+              ownerCatId: 'opus',
+              targetCats: ['opus'],
+              reason: 'F194 is owned by opus; find the feature thread before dispatching findings.',
+              source: 'feat_index',
+            },
+          },
+        ],
+      }),
+    });
+
+    const result = await handleFeatIndex({ featId: 'F194' });
+
+    assert.equal(result.isError, undefined);
+    const text = result.content[0].text;
+    assert.ok(text.includes('F194 — Owner Only Feature'));
+    assert.ok(text.includes('owner: 布偶猫 (opus)'));
+    assert.ok(text.includes('cat_cafe_cross_post_message(threadId="<feature-thread-id>", targetCats=["opus"]'), text);
+    assert.ok(text.includes('routing: find the feature thread before sending'));
+    assert.ok(text.includes('reason: F194 is owned by opus'));
   });
 
   test('handles API error response', async () => {
@@ -902,6 +1041,85 @@ describe('MCP Callback Tools', () => {
 
     assert.equal(result.isError, undefined);
     assert.ok(capturedUrl.includes('/api/callbacks/create-rich-block'));
+  });
+
+  test('handleCreateRichBlock requires threadId for shared Antigravity agent-key auth', async () => {
+    const { handleCreateRichBlock } = await import('../dist/tools/callback-tools.js');
+
+    delete process.env.CAT_CAFE_INVOCATION_ID;
+    delete process.env.CAT_CAFE_CALLBACK_TOKEN;
+    process.env.CAT_CAFE_AGENT_KEY_FILES = JSON.stringify({ gemini25: join(outboxDir, 'missing.secret') });
+
+    globalThis.fetch = async () => {
+      throw new Error('fetch must not be called without threadId');
+    };
+
+    const block = JSON.stringify({ id: 'agent-rb-missing-thread', kind: 'card', v: 1, title: 'Missing Thread' });
+    const result = await handleCreateRichBlock({ block, agentKeyCatId: 'gemini25' });
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /threadId is required/);
+  });
+
+  test('handleCreateRichBlock routes shared Antigravity agent-key calls through post_message Route B', async () => {
+    const { handleCreateRichBlock } = await import('../dist/tools/callback-tools.js');
+
+    delete process.env.CAT_CAFE_INVOCATION_ID;
+    delete process.env.CAT_CAFE_CALLBACK_TOKEN;
+    const keyPath = join(outboxDir, 'gemini25.secret');
+    writeFileSync(keyPath, 'gemini25-agent-key');
+    process.env.CAT_CAFE_AGENT_KEY_FILES = JSON.stringify({ gemini25: keyPath });
+
+    let capturedUrl;
+    let capturedHeaders;
+    let capturedBody;
+    globalThis.fetch = async (url, options) => {
+      capturedUrl = url;
+      capturedHeaders = options.headers;
+      capturedBody = JSON.parse(options.body);
+      return {
+        ok: true,
+        json: async () => ({ status: 'ok' }),
+      };
+    };
+
+    const block = JSON.stringify({ id: 'agent-rb-1', kind: 'card', v: 1, title: 'Agent Rich Block' });
+    const result = await handleCreateRichBlock({ block, threadId: 'thread-agent-rich', agentKeyCatId: 'gemini25' });
+
+    assert.equal(result.isError, undefined);
+    assert.ok(capturedUrl.includes('/api/callbacks/post-message'));
+    assert.ok(!capturedUrl.includes('/api/callbacks/create-rich-block'));
+    assert.equal(capturedHeaders['x-agent-key-secret'], 'gemini25-agent-key');
+    assert.equal(capturedBody.threadId, 'thread-agent-rich');
+    assert.match(capturedBody.content, /```cc_rich/);
+  });
+
+  test('handleCreateRichBlock rejects malformed agent-key rich blocks before Route B', async () => {
+    const { handleCreateRichBlock } = await import('../dist/tools/callback-tools.js');
+
+    delete process.env.CAT_CAFE_INVOCATION_ID;
+    delete process.env.CAT_CAFE_CALLBACK_TOKEN;
+    process.env.CAT_CAFE_AGENT_KEY_FILES = JSON.stringify({ gemini25: join(outboxDir, 'missing.secret') });
+
+    globalThis.fetch = async () => {
+      throw new Error('fetch must not be called for invalid rich block payloads');
+    };
+
+    const malformedBlocks = [
+      { id: 'agent-rb-invalid-card', kind: 'card', v: 1 },
+      { id: 'agent-rb-invalid-checklist', kind: 'checklist', v: 1, items: [] },
+    ];
+
+    for (const malformed of malformedBlocks) {
+      const result = await handleCreateRichBlock({
+        block: JSON.stringify(malformed),
+        threadId: 'thread-agent-rich',
+        agentKeyCatId: 'gemini25',
+      });
+
+      assert.equal(result.isError, true);
+      assert.match(result.content[0].text, /Invalid rich block/);
+    }
   });
 
   test('handleCreateRichBlock falls back to Route B (post_message + cc_rich) when Route A fails', async () => {

@@ -8,7 +8,7 @@ related_features: [F128, F192, F201, F210, F211, F212, F186, F188]
 
 # Capability Wakeup Index — 家里独有能力速查（L0 §8 配套）
 
-> **L0 §8** = Tier 1（高频日常反射，13 条直接进 native L0 注入）
+> **L0 §8** = Tier 1（高频日常反射，14 条直接进 native L0 注入）
 > **本文档** = Tier 1 完整 fallback + Tier 2（场景专项，低频但 trigger 明确）
 > **数据驱动 iterate**: F192 Phase F `eval:capability-wakeup` per-cat per-scenario miss rate verdict → L0 §8 v2
 
@@ -18,7 +18,7 @@ L0 §8 trigger 写了 ≠ 猫真用。判断"为什么 miss + 怎么修"必须�
 
 **筛子 0 — Reachability（这能力当前 context 调得到吗？怎么调？）**
 - ❌ 调不到 / trigger 没写"怎么调" → 猫误判"这是别人的工具"，100% miss。**修法 = 补"怎么调"一行，不是 hook**。
-- 教训（2026-05-27）：opus-47 断言"terminal 调不了 workspace-navigator"——纯脑补没 verify（「我能猜出来」病）。实际 SKILL.md Step 3 = `curl localhost:${API_SERVER_PORT}/api/workspace/navigate`，Bash 直接调；opus-48 + opus-47 各实测 `{"ok":true}`。**一个你以为够不着的能力，miss 不是因为懒，是从没进考虑**——独立于"偷懒"的失败域，药方相反（补可达性 ≠ 上 forcing function）。
+- 教训（2026-05-27）：opus-47 断言"terminal 调不了 workspace-navigator"——纯脑补没 verify（「我能猜出来」病）。当时底层 API 可由 Bash 直调；F223 Phase B 后主路径升级为 `cat_cafe_workspace_navigate` typed MCP。**一个你以为够不着的能力，miss 不是因为懒，是从没进考虑**——独立于"偷懒"的失败域，药方相反（补可达性 ≠ 上 forcing function）。
 
 **筛子 1 — Enforcement Tier（过了筛子 0 才分）**
 - **Tier A · episodic**：需要时自然想起，无零摩擦偷懒竞品。L0 advisory 够。例：`start_vote` / `expert-panel` / `deep-research`
@@ -33,11 +33,11 @@ opus-47 原把 `workspace-navigator` / `rich-messaging` / `browser-preview` 一�
 
 | 能力 | reachability（实测凭证） | 过筛归类 | 修法 |
 |---|---|---|---|
-| `workspace-navigator` | ✅ 直接可调 `/api/workspace/navigate`（action `reveal\|open`）；curl `{"ok":true}` 实测（opus-47 + opus-48 各开过文件） | 真 Tier B | 已补 curl 调用方式（上文）；reachability 修完后才轮到 hook |
+| `workspace-navigator` | ✅ `cat_cafe_workspace_navigate` typed MCP（底层 `/api/workspace/navigate`，action `reveal\|open`） | 真 Tier B | 主路径改 typed MCP；reachability 修完后才轮到 hook |
 | `rich-messaging` | ✅ `cat_cafe_create_rich_block` MCP，同 `cat_cafe_post_message` callback 路径（本 session post_message 多次 routed ok）；未单独直调（避免 thread 噪声） | 真 Tier B（纯文字零摩擦抢活） | 候选 forcing-function（hook：长纯文字回复 + 无 rich block → 提醒） |
-| `browser-preview` | ✅ 可达——cat POST `/api/preview/auto-open`（`preview.ts:92`，源码注释 "Cat-initiated auto-open — skips toast, directly opens browser panel" + `socketEmit('preview:auto-open')`）；同文件共 6 个 cat-callable POST（`/validate-port` `/open` `/close` `/navigate` `/auto-open` `/screenshot`，全是 `app.post<{...}>(...)` 泛型签名）。与 workspace-navigator `/api/workspace/navigate` **完全平行**，唯一区别多一个前提（dev server 先跑，cat 起） | 真 Tier B | 跟另两个一致：补可达性认知（cat 主动 POST auto-open，不是"等 Hub 检测/等铲屎官点"）+ 候选 hook |
+| `browser-preview` | ✅ `cat_cafe_preview_open` typed MCP（底层 `/api/preview/auto-open`）；同文件共 6 个 cat-callable POST（`/validate-port` `/open` `/close` `/navigate` `/auto-open` `/screenshot`，全是 `app.post<{...}>(...)` 泛型签名） | 真 Tier B | 跟另两个一致：补可达性认知（cat 主动打开，不是"等 Hub 检测/等operator点"）+ 候选 hook |
 
-**这张表本身就是 reachability 前置筛的价值**：三个"看着该 Tier B"的，过筛后**全是可达的真 Tier B**——workspace / rich-messaging / browser-preview 各有 cat 可调路径（`/api/workspace/navigate` / `cat_cafe_create_rich_block` / `/api/preview/auto-open`）。筛子的价值是**逼出每个的实测调用方式**，把"以为够不着"的误判挡在 hook 决策之外，不是脑补"哪个无 API"。
+**这张表本身就是 reachability 前置筛的价值**：三个"看着该 Tier B"的，过筛后**全是可达的真 Tier B**——workspace / rich-messaging / browser-preview 各有 typed cat path（`cat_cafe_workspace_navigate` / `cat_cafe_create_rich_block` / `cat_cafe_preview_open`）。筛子的价值是**逼出每个的实测调用方式**，把"以为够不着"的误判挡在 hook 决策之外，不是脑补"哪个无 API"。
 
 > **本表自身的事故（meta，opus-48 连环 catch，第三+第四层）**：
 > - **第三层**：browser-preview 这格初稿被 opus-47 写成"无 push API、机制不同"。根因**不是"多行"**——是 grep 模式 `app.post('/api/preview` 假设 `app.post` 直接跟 `(`，但 `preview.ts` 全部 6 个 POST 都是泛型签名 `app.post<{ Body... }>('/...'`，`<{...}>` 把 `app.post` 和 `(` 隔开 → 对 6 个**全部**零命中（auto-open 恰好也多行，但那是次要），只匹配到 2 个 GET，下了否定结论。
@@ -51,9 +51,9 @@ opus-47 原把 `workspace-navigator` / `rich-messaging` / `browser-preview` 一�
 **坏直觉**：默认纯文字回复（开发系猫习惯）
 **场景 trigger**：
 - 想发一堆文字 / 日志 / 步骤
-- 给铲屎官展示 diff / 选项 / 列表
-- 庆祝 / 仪式感 / 给铲屎官惊喜
-- 给铲屎官听 / 看（语音 / 图 / 视频）
+- 给operator展示 diff / 选项 / 列表
+- 庆祝 / 仪式感 / 给operator惊喜
+- 给operator听 / 看（语音 / 图 / 视频）
 
 **用法**：`cat_cafe_create_rich_block` + 字段 `kind` / `v` / `id`
 **完整 schema**：`cat_cafe_get_rich_block_rules`
@@ -63,11 +63,11 @@ opus-47 原把 `workspace-navigator` / `rich-messaging` / `browser-preview` 一�
 
 **坏直觉**：改完前端发"开浏览器看 http://localhost:5102/foo"
 **场景 trigger**：
-- 改了前端代码想让铲屎官看效果
+- 改了前端代码想让operator看效果
 - 前端 component / 页面 / 布局 review
 - dev server 已起来想 demo
 
-**用法**：worktree 内 OFFSET-aware ports；prevent runtime 3003/3004 误打
+**用法**：`cat_cafe_preview_open`；worktree 内 OFFSET-aware ports；prevent runtime 3003/3004 误打
 **边界**：localhost 预览用 `browser-preview`；外部网站用 `browser-automation`
 
 ### 3. `image-generation` — AI 生图
@@ -85,19 +85,13 @@ opus-47 原把 `workspace-navigator` / `rich-messaging` / `browser-preview` 一�
 
 **坏直觉**：报文件路径 "见 `packages/web/foo.tsx`"（+ 误判"这是 Hub 专属、terminal 调不了"）
 **场景 trigger**：
-- 铲屎官说"打开 X" / "看看那个文件"
-- 想让铲屎官直接看到目标文件
+- operator说"打开 X" / "看看那个文件"
+- 想让operator直接看到目标文件
 - 文档 / 代码 / 设计图
 
-**用法（reachability — 别误判成 Hub 专属！terminal/Bash 直接调 localhost HTTP，不走 MCP）**：
-```bash
-API_PORT="${API_SERVER_PORT:-3004}"   # 运行态 env 优先；验证：curl localhost:$API_PORT/api/workspace/worktrees 返回 JSON
-curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
-  -H "Content-Type: application/json" \
-  -d '{"path": "相对路径", "action": "open", "worktreeId": "cat-cafe"}'
-```
+**用法（reachability — 别误判成 Hub 专属！）**：`cat_cafe_workspace_navigate({ path, action: "open" | "reveal", worktreeId, threadId })`
 完整：`workspace-navigator/SKILL.md` Step 3。F148 navigation 系统底层。
-**分类**：reachability ✅（curl 实测 `{"ok":true}`）；enforcement = Tier B（零摩擦"报路径"抢活）——但**先补可达性认知（本条），再考虑 hook**，不是上来就 hook。
+**分类**：reachability ✅（typed MCP + 底层 API 实测）；enforcement = Tier B（零摩擦"报路径"抢活）——但**先补可达性认知（本条），再考虑 hook**，不是上来就 hook。
 
 ### 5. `pencil-design` — .pen 设计文件 + React 代码导出
 
@@ -112,9 +106,9 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 
 ### 6. `guide-interaction` — 场景式引导
 
-**坏直觉**：丢一大段 README 让铲屎官自己看
+**坏直觉**：丢一大段 README 让operator自己看
 **场景 trigger**：
-- 铲屎官问"这个怎么用 / 怎么配置 / 怎么操作"
+- operator问"这个怎么用 / 怎么配置 / 怎么操作"
 - 配置类 / 流程类 / 多步骤任务
 - 新手 onboarding
 
@@ -127,24 +121,24 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 - 架构决定（需要多视角校验）
 - bug 死磕无解
 - 技术趋势 / 竞品 / 行业分析
-- 铲屎官说"帮我分析一下"
+- operator说"帮我分析一下"
 
 **用法**：`expert-panel` 多猫专家辩论 / `collaborative-thinking` 单猫独立思考
 
 ### 8. `cat_cafe_propose_thread` — 提议创建新 thread（F128）
 
-**坏直觉**：口头说"你新开一个 thread"让铲屎官手动操作
+**坏直觉**：口头说"你新开一个 thread"让operator手动操作
 **场景 trigger**：
 - 想做新 issue 独立调查
 - 子任务需要 isolated context
 - 长讨论已超出当前 thread scope
 
-**用法**：propose-first 流程 — 猫填好 thread 信息 → 卡片让铲屎官确认或编辑 → 系统创建
+**用法**：propose-first 流程 — 猫填好 thread 信息 → 卡片让operator确认或编辑 → 系统创建
 **ADR 锚点**：ADR-035
 
 ### 9. F211 外部 runtime session 查询
 
-**坏直觉**：问铲屎官"截图给我看" / "你刚在哪说的"
+**坏直觉**：问operator"截图给我看" / "你刚在哪说的"
 **场景 trigger**：
 - Antigravity / 孟加拉 / IDE-direct 会话像丢了
 - cross-runtime session transparency 需要
@@ -161,7 +155,7 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 - 用户视角 only 一行 error message
 
 **Tools**：读 `cliDiagnostics` / safe excerpt / `debugRef`
-**Fallback**：直接 ssh 到 runtime worktree 看 stderr log（铲屎官 ops only）
+**Fallback**：直接 ssh 到 runtime worktree 看 stderr log（operator ops only）
 
 ### 11. F192 Eval Hub / Verdict Handoff
 
@@ -196,28 +190,46 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 **场景 trigger**：
 - feature 推进到新 stage
 - 想给下一棒猫看到当前 stage 状态
-- 想给铲屎官 Hub visibility
+- 想给operator Hub visibility
 
 **用法**：推 stage → 告示牌更新 → Mission Control panel 反映
 **Schema 真相源**：F203 #748 SopDefinition (`sop-definitions/development.yaml`)
 
 ---
 
+### 14. `context-self-management` — context 自管理（handoff vs 压缩，F225 软层）
+
+**坏直觉**：① 一看 context 涨就焦虑"我脏了我要 clear"（你内省不准 context%，别自己猜）；② 收到 warn 就反射 handoff（丢半成品 in-flight 线索）；③ 或干脆无视信号硬冲到 auto-seal（有损兜底）
+**场景 trigger**：
+- 系统发来 `context_management_hint(warn)` 系统信号（warn 区，离 auto-seal 还有窗口）
+- 自觉这一程话题漂移大（线→树），想换张干净桌子
+
+**reachability**：✅ 信号由 `invoke-single-cat` 在 strategy `action==='warn'` 时 queue，下轮经 **prompt-injection** 注入 cat prompt（非 hook、非 system_info——system_info 到不了 cat，cloud review P1 纠正；cross-runtime 统一）；猫读 hint 即触发，调 `cat_cafe_propose_session_handoff` 落地
+**用法**：加载 `context-self-management` skill → 三问（线/树? 干净断点? 压几轮?）+ 2×2 矩阵 → handoff / 续 / 冲刺；handoff 走 `cat_cafe_propose_session_handoff` 写五件套（人来 gate）
+**vs `cross-cat-handoff`**：那个是把活交给**别的猫**；这个是封印**自己** spawn 干净的自己
+**enforcement tier**：候选 Tier A（系统信号显式到达 = 自带 forcing function），但有"无视/反射"两种偷懒默认 → 由 eval 定夺
+**eval（F192 `eval:capability-wakeup`）**：
+- activation：warn + 干净断点时 `propose_session_handoff` 调用率；脏/中途时是否正确**不** handoff（避免过度触发）
+- friction：续接 session 第一个 invocation 是否引用五件套
+- sunset：连续 N 周 0 调用 → 唤醒路径无效，重评（demote / 改写 trigger）
+
+---
+
 ## Tier 2（不进 L0 §8，但 trigger 明确）
 
-### 14. F201 Antigravity 中断 recovery
+### 15. F201 Antigravity 中断 recovery
 
 **坏直觉**：中断后盲重跑命令
 **场景 trigger**：Antigravity session 中断但可能已经写文件 / 跑命令
 **用法**：查 recovery card / supervisor / side-effect journal
 
-### 15. F186/F188 Library memory federation
+### 16. F186/F188 Library memory federation
 
 **坏直觉**：项目 repo 里搜不到就说"没有"
 **场景 trigger**：跨领域知识 / Lexander 虚拟世界 / 多 domain knowledge
 **Tools**：`cat_cafe_library_list` / `cat_cafe_library_dry_run` / `cat_cafe_library_create` / `cat_cafe_library_rebuild` / `cat_cafe_library_verify`
 
-### 16. `video-forge` / `ppt-forge` / `tech-writing` — 对外产出
+### 17. `video-forge` / `ppt-forge` / `tech-writing` — 对外产出
 
 **坏直觉**：阶段成果只发一堆 commits / markdown
 **场景 trigger**：
@@ -227,23 +239,23 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 
 **Pipeline**：schema-driven 全链路（不要 ad-hoc 写）
 
-### 17. `hyperfocus-brake` — 健康提醒
+### 18. `hyperfocus-brake` — 健康提醒
 
-**坏直觉**：铲屎官连续肝代码 / 情绪波动时硬干
+**坏直觉**：operator连续肝代码 / 情绪波动时硬干
 **场景 trigger**：hook 触发 / 连续工作时长超阈值 / 情绪信号
 **用法**：三猫撒娇打断 hyperfocus
 
-### 18. `deep-research` — 多源调研
+### 19. `deep-research` — 多源调研
 
 **坏直觉**：单 grep / 单 WebSearch 草草搜两下
 **场景 trigger**：
 - 技术问题需要多源调查
 - 设计决策需要证据
-- 铲屎官说"调研" / "research"
+- operator说"调研" / "research"
 
 **Pipeline**：Web Deep Research + Coder 合成 + 云端模型咨询
 
-### 19. `mark_generalizable` / `nominate_for_global` — Lesson 全局化
+### 20. `mark_generalizable` / `nominate_for_global` — Lesson 全局化
 
 **坏直觉**：学到 lesson 只记 local memory
 **场景 trigger**：
@@ -253,13 +265,13 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 
 **Tools**：`cat_cafe_mark_generalizable` / `cat_cafe_nominate_for_global`
 
-### 20. F210 AGY adapter sticky 行为
+### 21. F210 AGY adapter sticky 行为
 
 **坏直觉**：以为 `/model` 直觉判断就够
 **场景 trigger**：Siamese / Antigravity carrier 或 model sticky 行为异常
 **Source**：`docs/architecture/cli-integration.md` + F210
 
-### 21. `enterprise-workflow` — 飞书 / 企微 IM 产物
+### 22. `enterprise-workflow` — 飞书 / 企微 IM 产物
 
 **坏直觉**：只想到普通 chat
 **场景 trigger**：
@@ -272,7 +284,7 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 
 ## MCP capability 快扫（underused cat_cafe_* 工具）
 
-> 铲屎官 2026-05-27 提醒："盘点 skills + features 还不够，MCP 也得盘"。~75 个 `cat_cafe_*` 里大多数是 plumbing（`ack_mentions` / `get_thread_cats` / `list_*` / `update_task` 等机制类，不算 capability-wakeup）；下面是"做了但猫忘了用"的**能力类** MCP，按坏直觉列：
+> operator 2026-05-27 提醒："盘点 skills + features 还不够，MCP 也得盘"。~75 个 `cat_cafe_*` 里大多数是 plumbing（`ack_mentions` / `get_thread_cats` / `list_*` / `update_task` 等机制类，不算 capability-wakeup）；下面是"做了但猫忘了用"的**能力类** MCP，按坏直觉列：
 
 | 坏直觉 | 该用的 MCP | 说明 |
 |---|---|---|
@@ -281,6 +293,7 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 | expert-panel / review 报告只发聊天 | `cat_cafe_generate_document` | 生成正式 DOCX/PDF 文档（凭证不过期、可存档、可对外） |
 | 想重开一条已知调查路线 | `cat_cafe_run_perspective` | git-backed Perspective live query 计划重放（advanced/niche，返回 route hints + anchors，仍需 typed reader 取证据） |
 | review 后 lesson 散在脑子里 | `cat_cafe_review_distillation` | 蒸馏 review 结论沉淀（配合 mark_generalizable） |
+| operator说了 Magic Word / 直说"记一下/以后这样" / 同类被纠正 ≥2 次 / 做对了被明确表扬 / operator分享个人近况 | `cat_cafe_propose_profile_update` | 提议更新 per-cat 关系画像 primer（F231 Phase C），operator 在 Hub 卡片审批；工具在 deferred list 需先 `tool_search` 加载（已进 L0 §8 Tier 1） |
 
 > **MCP 完整速查**：L0 §7 是 quick index（记忆 / 协作 / 任务 / Rich block / Drill-down 5 类）；本表补"能力类但易忘"的。完整工具集 `tool_search` 精确搜或读 `packages/mcp-server/src/tools/`。
 
@@ -288,7 +301,7 @@ curl -X POST http://localhost:$API_PORT/api/workspace/navigate \
 
 ## 维护协议
 
-- **新增 capability**：当家里 ship 一个独有 feature/skill 且铲屎官观察到"做了但猫不知道用" → 加进本文档 Tier 2；连续 N 周 eval verdict miss rate > 30% → promote Tier 1（进 L0 §8）
+- **新增 capability**：当家里 ship 一个独有 feature/skill 且operator观察到"做了但猫不知道用" → 加进本文档 Tier 2；连续 N 周 eval verdict miss rate > 30% → promote Tier 1（进 L0 §8）
 - **降级 capability**：F192 `eval:capability-wakeup` verdict 显示某条 Tier 1 miss rate < 5% 持续 4 周 → demote Tier 2（出 L0 §8）
 - **删除 capability**：feature sunset / skill 退役 → 同步删本文档对应条目
 - **数据源**：F192 Phase F `eval:capability-wakeup` weekly verdict bundle（依赖 #748 后 ship）

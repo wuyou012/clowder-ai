@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { posix, win32 } from 'node:path';
-import type { PluginConfigField, PluginHealthCheck, PluginManifest, PluginResourceDef } from '@cat-cafe/shared';
+import type { PluginHealthCheck, PluginManifest, PluginResourceDef, ValueConfigField } from '@cat-cafe/shared';
 import { parse as parseYaml } from 'yaml';
+import { getValueFields, parseConfigFields } from '../../infrastructure/config-field-parser.js';
 import { resourceCapId } from './PluginRegistry.js';
 
 const SYSTEM_ENV_DENYLIST_PREFIXES = [
@@ -18,8 +19,8 @@ const SYSTEM_ENV_DENYLIST_PREFIXES = [
 
 const SYSTEM_ENV_DENYLIST_EXACT = new Set(['NODE_OPTIONS', 'NODE_ENV', 'PATH', 'HOME', 'SHELL', 'PORT']);
 
-const SUPPORTED_RESOURCE_TYPES = new Set(['skill', 'mcp', 'limb']);
-const DEFERRED_RESOURCE_TYPES = new Set(['schedule']);
+const SUPPORTED_RESOURCE_TYPES = new Set(['skill', 'mcp', 'limb', 'schedule']);
+const DEFERRED_RESOURCE_TYPES = new Set<string>();
 
 export const BUILTIN_PLUGIN_IDS = new Set<string>();
 
@@ -86,25 +87,16 @@ export function parsePluginManifest(yamlPath: string): PluginManifest {
     );
   }
 
-  const config: PluginConfigField[] = [];
   const rawConfig = doc['config'];
+  let config: ValueConfigField[];
   if (Array.isArray(rawConfig)) {
-    for (const c of rawConfig) {
-      const rc = c as Record<string, unknown>;
-      if (typeof rc['envName'] !== 'string' || typeof rc['label'] !== 'string') {
-        throw new Error(`Invalid config entry in ${yamlPath}: envName and label must be strings`);
-      }
-      const envName = rc['envName'];
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envName)) {
-        throw new Error(`Invalid envName '${envName}': must be a valid shell variable name`);
-      }
-      config.push({
-        envName,
-        label: rc['label'],
-        sensitive: rc['sensitive'] === true,
-        required: rc['required'] !== false,
-      });
+    const allFields = parseConfigFields(rawConfig, `${yamlPath}/config`);
+    config = getValueFields(allFields);
+    if (config.length < allFields.length) {
+      console.warn(`[PluginManifest] ${yamlPath}: operation fields are not supported in plugin.yaml, skipped`);
     }
+  } else {
+    config = [];
   }
 
   const resources: PluginResourceDef[] = [];
@@ -184,8 +176,34 @@ export function parsePluginManifest(yamlPath: string): PluginManifest {
         throw new Error(`MCP resource in ${yamlPath} must have a 'command' field`);
       }
 
+      // F202 Phase 2: schedule resource validation — factoryId + name required
+      const rawFactoryId = rr['factoryId'];
+      if (rawFactoryId != null && typeof rawFactoryId !== 'string') {
+        throw new Error(`Invalid resource factoryId in ${yamlPath}: must be a string`);
+      }
+      const factoryId = rawFactoryId as string | undefined;
+      if (type === 'schedule') {
+        if (!factoryId || factoryId.trim().length === 0) {
+          throw new Error(`Schedule resource in ${yamlPath} must have a 'factoryId' field`);
+        }
+        if (!name) {
+          throw new Error(`Schedule resource in ${yamlPath} must have a 'name' field`);
+        }
+        // P2-2: Backslash in schedule name causes normalizeCapId / resourceCapId mismatch.
+        // normalizeCapId converts \ → / but resourceCapId uses raw name, so stored
+        // "plugin:p:a\b" won't match lookup "plugin:p:a/b" → disable/cleanup misses it.
+        if (/\\/.test(name)) {
+          throw new Error(`Schedule resource name "${name}" in ${yamlPath} must not contain backslashes`);
+        }
+      }
+
+      // F202 Phase 2 follow-up: parse optional flag for resources
+      const optional = rr['optional'] === true;
+
       resources.push({
         type: type as PluginResourceDef['type'],
+        ...(type === 'schedule' && factoryId ? { factoryId } : {}),
+        ...(optional ? { optional } : {}),
         path,
         name,
         command: command as string | undefined,

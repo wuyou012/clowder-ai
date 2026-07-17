@@ -261,6 +261,8 @@ export interface SearchOptions {
   sceneId?: string;
   /** F200 v1.1 DF-3: include explainability fields in results */
   explain?: boolean;
+  /** F200 HW-1: search intent — topk (default) or coverage (exhaustive multi-scope) */
+  intent?: 'topk' | 'coverage';
 }
 
 export type SearchDegradeReason =
@@ -354,6 +356,8 @@ export type RebuildProgressCallback = (phase: string, percent: number) => void;
 export interface IIndexBuilder {
   rebuild(options?: { force?: boolean; onProgress?: RebuildProgressCallback }): Promise<RebuildResult>;
   startPassageEmbeddingWarmup(): void;
+  /** True while background passage-vector backfill is running. */
+  isPassageWarmupActive(): boolean;
   incrementalUpdate(changedPaths: string[]): Promise<void>;
   checkConsistency(): Promise<ConsistencyReport>;
 }
@@ -367,6 +371,12 @@ export interface IMarkerQueue {
 export interface MaterializeOptions {
   targetRoot?: string;
   indexBuilder?: Pick<IIndexBuilder, 'incrementalUpdate'> | null;
+  /**
+   * Opt-in: git-commit the materialized .md (default off). Auto-committing onto
+   * the current branch (e.g. runtime/main-sync) silently diverges it and breaks
+   * the next ff-only sync — callers that want git persistence must opt in explicitly.
+   */
+  commit?: boolean;
 }
 
 export interface IMaterializationService {

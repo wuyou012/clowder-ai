@@ -75,11 +75,67 @@ describe('deriveResultSummary — graph_resolve anchor parsing (砚砚 cloud P2)
     assert.equal(result.topConfidence, 'low');
   });
 
+  test('search_evidence: successful results may contain failure words in hit titles', async () => {
+    const { deriveResultSummary } = await import('../dist/domains/cats/services/tool-usage/derive-result-summary.js');
+    const text = 'Found 1 result(s): [high] F999 — Failed callback handling retrospective';
+    const result = deriveResultSummary('search_evidence', text);
+
+    assert.equal(result.isError, undefined);
+    assert.equal(result.resultCount, 1);
+    assert.equal(result.topConfidence, 'high');
+  });
+
   test('list_recent: parses since + count', async () => {
     const { deriveResultSummary } = await import('../dist/domains/cats/services/tool-usage/derive-result-summary.js');
     const text = 'Recent items (last 7d): 5 found';
     const result = deriveResultSummary('list_recent', text);
     assert.equal(result.since, '7d');
     assert.equal(result.resultCount, 5);
+  });
+
+  test('F256 Phase B: extracts expansion hint anchors from "📎 Related directions" block', async () => {
+    const { deriveResultSummary } = await import('../dist/domains/cats/services/tool-usage/derive-result-summary.js');
+    const text = [
+      'Found 2 result(s) for "routing"',
+      '',
+      '1. [high] Routing System',
+      '   anchor: F102-routing',
+      '',
+      '2. [mid] Thread Digest',
+      '   anchor: thread-abc123',
+      '',
+      '📎 Related directions:',
+      '   - F208-capability-profile: Capability Profile Routing [frontmatter-alias: keyword:routing]',
+      '   - thread-def456-digest: Discussion about routing [source-thread: thread-def456]',
+      '',
+      '📊 本轮第 1 次搜索',
+    ].join('\n');
+
+    const result = deriveResultSummary('search_evidence', text);
+    assert.equal(result.resultCount, 2);
+    assert.deepEqual(result.expansionHintAnchors, ['F208-capability-profile', 'thread-def456-digest']);
+  });
+
+  test('F256 Phase B: no expansionHintAnchors when "📎 Related directions" absent', async () => {
+    const { deriveResultSummary } = await import('../dist/domains/cats/services/tool-usage/derive-result-summary.js');
+    const text = [
+      'Found 1 result(s) for "test"',
+      '',
+      '1. [high] Test Feature',
+      '   anchor: F100',
+      '',
+      '📊 本轮第 1 次搜索',
+    ].join('\n');
+
+    const result = deriveResultSummary('search_evidence', text);
+    assert.equal(result.expansionHintAnchors, undefined);
+  });
+
+  test('generic MCP errors: parses non-memory tool failure text', async () => {
+    const { deriveResultSummary } = await import('../dist/domains/cats/services/tool-usage/derive-result-summary.js');
+    const result = deriveResultSummary('publish_verdict', 'Callback failed (404): no_trials_in_window');
+
+    assert.equal(result.isError, true);
+    assert.equal(result.errorMessage, 'Callback failed (404): no_trials_in_window');
   });
 });

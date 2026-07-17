@@ -327,13 +327,13 @@ describe('F192 Attribution', () => {
           makeComponent({
             componentId: 'C1',
             activationCounts: { hold_ball_calls: 10 },
-            frictionCounts: { 'c1.zombie_hold_count': 6 },
+            frictionCounts: { 'c1.hold_zombie_count': 6 },
           }),
         ],
       },
     });
-    const zombie = report.findings.find((f) => f.frictionSignal.type === 'c1.zombie_hold_count');
-    assert.ok(zombie, 'zombie_hold must surface');
+    const zombie = report.findings.find((f) => f.frictionSignal.type === 'c1.hold_zombie_count');
+    assert.ok(zombie, 'hold_zombie must surface');
     // 6/10 = 60% real ratio → high / human-required, computed against the real denominator.
     assert.equal(zombie.frictionSignal.severity, 'high');
     assert.equal(zombie.attribution.pipelineOrHuman, 'human-required');
@@ -473,5 +473,272 @@ describe('findingFingerprint', () => {
   it('falls back to type only when no evidence', () => {
     const fp = findingFingerprint({ frictionSignal: { type: 'shadow_miss' } });
     assert.equal(fp, 'shadow_miss');
+  });
+});
+
+describe('F192 Phase D — per-fire sample evidence + sampleCoverage', () => {
+  function makeSample({
+    spanId = 's-1',
+    trigger = 'reject',
+    agentId = 'codex',
+    firedAt = '2026-06-08T00:00:00.000Z',
+  } = {}) {
+    return {
+      traceId: 't-1',
+      spanId,
+      messageIdHash: `hash-msg-${spanId}`,
+      invocationIdHash: `hash-inv-${spanId}`,
+      threadIdHash: `hash-thread-${spanId}`,
+      agentId,
+      threadSystemKind: 'product',
+      trigger,
+      firedAt,
+    };
+  }
+
+  it('emits one per-fire-sample evidence row per sample alongside the counter row', () => {
+    const samples = [
+      makeSample({ spanId: 's-a', trigger: 'reject', firedAt: '2026-06-08T01:00:00.000Z' }),
+      makeSample({ spanId: 's-b', trigger: 'p1p2', agentId: 'opus', firedAt: '2026-06-08T02:00:00.000Z' }),
+      makeSample({ spanId: 's-c', trigger: 'approve_cn', firedAt: '2026-06-08T03:00:00.000Z' }),
+    ];
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C2',
+            activationCounts: { 'c2.checked': 17 },
+            frictionCounts: { 'c2.verdict_without_pass_count': 3 },
+            frictionSamples: { 'c2.verdict_without_pass_count': samples },
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c2.verdict_without_pass_count');
+    assert.ok(finding, 'must surface a friction finding for verdict_without_pass_count');
+    // 1 counter + 3 per-fire-sample rows = 4 evidence rows
+    assert.equal(finding.attribution.evidence.length, 4);
+    assert.equal(finding.attribution.evidence[0].type, 'counter');
+    assert.equal(finding.attribution.evidence[1].type, 'per-fire-sample');
+    assert.equal(finding.attribution.evidence[1].sample.spanId, 's-a');
+    assert.equal(finding.attribution.evidence[1].sample.trigger, 'reject');
+    assert.equal(finding.attribution.evidence[2].sample.trigger, 'p1p2');
+    assert.equal(finding.attribution.evidence[3].sample.trigger, 'approve_cn');
+    // Anchor incorporates spanId for stable join
+    assert.equal(finding.attribution.evidence[1].anchor, 'C2/c2.verdict_without_pass_count/s-a');
+    // Excerpt carries label-rich human-readable summary
+    assert.match(finding.attribution.evidence[1].excerpt, /firedAt=.*trigger=reject.*agentId=codex/);
+  });
+
+  it('sampleCoverage.complete=true when sampleCount >= metricCount', () => {
+    const samples = [
+      makeSample({ spanId: 's-a', trigger: 'reject' }),
+      makeSample({ spanId: 's-b', trigger: 'p1p2' }),
+      makeSample({ spanId: 's-c', trigger: 'approve_cn' }),
+    ];
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C2',
+            activationCounts: { 'c2.checked': 17 },
+            frictionCounts: { 'c2.verdict_without_pass_count': 3 },
+            frictionSamples: { 'c2.verdict_without_pass_count': samples },
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c2.verdict_without_pass_count');
+    assert.deepEqual(finding.sampleCoverage, { sampleCount: 3, metricCount: 3, complete: true });
+  });
+
+  it('sampleCoverage.complete=false when active span dropped some sample emissions', () => {
+    // Counter shows 5 fires but only 2 samples captured (active span missing for 3)
+    const samples = [
+      makeSample({ spanId: 's-a', trigger: 'reject' }),
+      makeSample({ spanId: 's-b', trigger: 'reject' }),
+    ];
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C2',
+            activationCounts: { 'c2.checked': 30 },
+            frictionCounts: { 'c2.verdict_without_pass_count': 5 },
+            frictionSamples: { 'c2.verdict_without_pass_count': samples },
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c2.verdict_without_pass_count');
+    assert.deepEqual(finding.sampleCoverage, { sampleCount: 2, metricCount: 5, complete: false });
+    // 1 counter + 2 per-fire-sample rows = 3 evidence rows (incomplete coverage still surfaces what we have)
+    assert.equal(finding.attribution.evidence.length, 3);
+  });
+
+  it('void_hold finding carries sampleCoverage when samples are present (F192 D — 2026-06-10 build verdict)', () => {
+    // Verdict 2026-06-10-eval-a2a-c2-void-hold-samples-build extends sampling to
+    // `c2.void_hold_hint_emitted` so void-hold findings now carry per-fire drilldown
+    // refs + sampleCoverage just like verdict-without-pass.
+    const samples = [
+      makeSample({ spanId: 's-vh-a', trigger: 'cn_chiqiu', agentId: 'opus-47' }),
+      makeSample({ spanId: 's-vh-b', trigger: 'mcp_tool_name', agentId: 'opus-47' }),
+    ];
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C2',
+            activationCounts: { 'c2.void_hold_checked': 25 },
+            frictionCounts: { 'c2.void_hold_hint_emitted': 4 },
+            frictionSamples: { 'c2.void_hold_hint_emitted': samples },
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c2.void_hold_hint_emitted');
+    assert.ok(finding, 'void_hold friction must surface');
+    assert.deepEqual(finding.sampleCoverage, { sampleCount: 2, metricCount: 4, complete: false });
+  });
+
+  it('void_hold finding still emits sampleCoverage with sampleCount=0 when frictionSamples empty (honest gap report)', () => {
+    // Counters say 4 fires happened but no span events captured them →
+    // sampleCoverage still emitted (showing the gap honestly: sampleCount=0).
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C2',
+            activationCounts: { 'c2.void_hold_checked': 25 },
+            frictionCounts: { 'c2.void_hold_hint_emitted': 4 },
+            frictionSamples: {},
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c2.void_hold_hint_emitted');
+    assert.ok(finding, 'void_hold friction must surface');
+    assert.deepEqual(finding.sampleCoverage, { sampleCount: 0, metricCount: 4, complete: false });
+  });
+
+  it('artifact contains NO raw IDs — only hashes and OTel locators (privacy invariant)', () => {
+    const samples = [makeSample({ spanId: 's-a', trigger: 'reject' })];
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C2',
+            activationCounts: { 'c2.checked': 17 },
+            frictionCounts: { 'c2.verdict_without_pass_count': 3 },
+            frictionSamples: { 'c2.verdict_without_pass_count': samples },
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const serialized = JSON.stringify(report);
+    // The sample's HMAC strings start with `hash-` (test fixture convention);
+    // assert no raw-style ids leak (no `raw-msg`, `raw-inv`, `raw-thread` strings).
+    assert.ok(!serialized.includes('raw-msg'), 'no raw message id should appear in artifact');
+    assert.ok(!serialized.includes('raw-inv'), 'no raw invocation id should appear in artifact');
+    assert.ok(!serialized.includes('raw-thread'), 'no raw thread id should appear in artifact');
+    // Positive: hashes are present (Hash-suffix naming is honest)
+    assert.ok(serialized.includes('hash-msg-s-a'), 'messageIdHash retained');
+  });
+});
+
+describe('F192 D — C1 zombie-hold sampleCoverage (eval:a2a 2026-06-12 build verdict)', () => {
+  function makeC1Sample({ spanId = 's-1', trigger = 'prior_imminent', firedAt = '2026-06-12T00:00:00.000Z' } = {}) {
+    return {
+      traceId: 't-1',
+      spanId,
+      messageIdHash: `hash-prior-${spanId}`,
+      invocationIdHash: `hash-inv-${spanId}`,
+      threadIdHash: `hash-thread-${spanId}`,
+      agentId: 'opus-47',
+      threadSystemKind: 'product',
+      trigger,
+      firedAt,
+    };
+  }
+
+  it('C1 zombie-hold finding carries sampleCoverage when samples are present', () => {
+    const samples = [
+      makeC1Sample({ spanId: 's-c1-a', trigger: 'prior_imminent' }),
+      makeC1Sample({ spanId: 's-c1-b', trigger: 'prior_long' }),
+      makeC1Sample({ spanId: 's-c1-c', trigger: 'prior_imminent' }),
+    ];
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C1',
+            activationCounts: { hold_ball_calls: 7 },
+            frictionCounts: { 'c1.hold_zombie_count': 5 },
+            frictionSamples: { 'c1.hold_zombie_count': samples },
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c1.hold_zombie_count');
+    assert.ok(finding, 'C1 hold_zombie friction must surface');
+    assert.deepEqual(finding.sampleCoverage, { sampleCount: 3, metricCount: 5, complete: false });
+  });
+
+  it('C1 hold_zombie finding sampleCoverage still emits when frictionSamples empty (honest gap report)', () => {
+    const report = generateAttributionReport({
+      featureId: 'F167',
+      snapshot: {
+        components: [
+          {
+            componentId: 'C1',
+            activationCounts: { hold_ball_calls: 7 },
+            frictionCounts: { 'c1.hold_zombie_count': 5 },
+            frictionSamples: {},
+            telemetryGaps: [],
+            confidence: 'medium',
+            falsePositiveCandidates: [],
+            bypassCandidates: [],
+          },
+        ],
+      },
+    });
+    const finding = report.findings.find((f) => f.frictionSignal.type === 'c1.hold_zombie_count');
+    assert.ok(finding, 'C1 hold_zombie friction must surface');
+    assert.deepEqual(finding.sampleCoverage, { sampleCount: 0, metricCount: 5, complete: false });
   });
 });

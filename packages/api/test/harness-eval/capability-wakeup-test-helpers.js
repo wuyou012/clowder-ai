@@ -12,7 +12,14 @@ export function transcriptEvent(eventNo, invocationId, event) {
   };
 }
 
-export function toolEvent({ invocationId, toolName, summary = {}, turnIndex = 0, timestamp = Date.now() }) {
+export function toolEvent({
+  invocationId,
+  toolName,
+  summary = {},
+  turnIndex = 0,
+  timestamp = Date.now(),
+  status = 'success',
+}) {
   return {
     invocationId,
     sessionId: 'session-cap',
@@ -21,7 +28,7 @@ export function toolEvent({ invocationId, toolName, summary = {}, turnIndex = 0,
     toolName,
     timestamp,
     turnIndex,
-    status: 'success',
+    status,
     summary,
   };
 }
@@ -33,6 +40,7 @@ export const domain = {
   evalCat: { catId: 'opus47', handle: '@opus47', model: 'claude-opus-4-7' },
   frequency: 'weekly',
   sourceAdapter: 'capability-wakeup-eval',
+  sourceRefsKind: 'capability-wakeup-trial-window',
   threadPolicy: {
     role: 'working-home',
     stateSot: 'registry',

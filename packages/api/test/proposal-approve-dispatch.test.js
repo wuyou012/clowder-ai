@@ -44,7 +44,7 @@ describe('F128 approve dispatch — initialMessage routing', () => {
       invocationQueueOverride: invocationQueue,
       queueProcessorOverride: queueProcessor,
     });
-    const source = await ctx.threadStore.create('alice', 'Source');
+    const source = await ctx.threadStore.create('alice', 'Source', '/projects/source-repo');
     const { proposalId } = JSON.parse(
       (
         await ctx.propose({
@@ -119,7 +119,7 @@ describe('F128 approve dispatch — initialMessage routing', () => {
       invocationQueueOverride: invocationQueue,
       queueProcessorOverride: queueProcessor,
     });
-    const source = await ctx.threadStore.create('alice', 'Source');
+    const source = await ctx.threadStore.create('alice', 'Source', '/projects/source-repo');
     const { proposalId } = JSON.parse(
       (
         await ctx.propose({
@@ -241,7 +241,17 @@ describe('F128 approve dispatch — initialMessage routing', () => {
     assert.ok(enqueued.includes('Strategy Discussion'), 'header must contain sourceThread title when available');
     assert.ok(
       enqueued.includes('cat_cafe_cross_post_message'),
-      'header must remind cats to cross_post the report back via cat_cafe_cross_post_message',
+      'default final-only mentions cross_post for report-back',
+    );
+    // F128 Phase AA (AC-AA1): default reportingMode is now `final-only`
+    // (supersedes Phase Y AC-Y6 default `none`). Cats are told to report back.
+    assert.ok(enqueued.includes('final-only'), 'AC-AA1: default must be final-only (supersedes Phase Y none)');
+    // F128 final-only hardening: chain order no longer includes "→ 回到主 Thread" for
+    // final-only mode (it misleads intermediate cats). The final report instruction lives
+    // in the chain steps section, not the order overview line.
+    assert.ok(
+      enqueued.includes('任务完成') || enqueued.includes('PR 合入') || enqueued.includes('任务关闭'),
+      'final-only must define completion as task closure, not last-step-done',
     );
     // Original user content must still be present — header is additive, not destructive.
     assert.ok(enqueued.includes('开玩！我先起头：一帆风顺'), 'original user-typed content must be preserved verbatim');

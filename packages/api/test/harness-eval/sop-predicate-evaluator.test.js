@@ -84,6 +84,43 @@ describe('Predicate: command_pattern', () => {
     const result = evalP({ type: 'command_pattern', mustMatch: 'pnpm gate|pnpm test|node --test' });
     assert.equal(result.status, 'pass'); // baseTrace has 'pnpm gate'
   });
+
+  it('violates when mustMatch command has non-zero exitCode', () => {
+    const trace = {
+      ...baseTrace,
+      commands: [{ command: 'pnpm check:features', exitCode: 1 }],
+    };
+    const result = evalP({ type: 'command_pattern', mustMatch: 'pnpm check:features' }, trace);
+    assert.equal(result.status, 'violation');
+    assert.ok(result.violation?.message.includes('pnpm check:features'));
+  });
+
+  it('passes when mustMatch command has exitCode 0', () => {
+    const trace = {
+      ...baseTrace,
+      commands: [{ command: 'pnpm check:features', exitCode: 0 }],
+    };
+    const result = evalP({ type: 'command_pattern', mustMatch: 'pnpm check:features' }, trace);
+    assert.equal(result.status, 'pass');
+  });
+
+  it('passes when mustMatch command has no exitCode (backward compat)', () => {
+    const trace = {
+      ...baseTrace,
+      commands: [{ command: 'pnpm check:features' }],
+    };
+    const result = evalP({ type: 'command_pattern', mustMatch: 'pnpm check:features' }, trace);
+    assert.equal(result.status, 'pass');
+  });
+
+  it('violates mustNotMatch even when command has non-zero exitCode', () => {
+    const trace = {
+      ...baseTrace,
+      commands: [{ command: 'git merge --squash', exitCode: 1 }],
+    };
+    const result = evalP({ type: 'command_pattern', mustNotMatch: 'git merge --squash' }, trace);
+    assert.equal(result.status, 'violation');
+  });
 });
 
 // ---- env_check (AC-E18, AC-E22) ----
@@ -557,11 +594,11 @@ describe('evaluateSopDefinition (AC-E22)', () => {
     const skipped = results.filter((r) => r.status === 'skipped');
     const violations = results.filter((r) => r.status === 'violation');
 
-    // 18 total rules in development.yaml
-    assert.equal(results.length, 18, `expected 18 rules, got ${results.length}`);
+    // 22 total rules in development.yaml (21 from main + impl-user-journey-missing)
+    assert.equal(results.length, 22, `expected 22 rules, got ${results.length}`);
 
-    // 7 manual_only rules → skipped
-    assert.equal(skipped.length, 7, `expected 7 skipped (manual_only), got ${skipped.length}`);
+    // 10 manual_only rules -> skipped (fresh-context-not-approval is manual_only)
+    assert.equal(skipped.length, 10, `expected 10 skipped (manual_only), got ${skipped.length}`);
 
     // Nominal trace should produce 0 violations
     assert.equal(
@@ -576,6 +613,7 @@ describe('evaluateSopDefinition (AC-E22)', () => {
     assert.ok(ruleIds.includes('impl-redis-6398-only'));
     assert.ok(ruleIds.includes('review-no-self-review'));
     assert.ok(ruleIds.includes('impl-main-sync-before-worktree'));
+    assert.ok(ruleIds.includes('impl-convention-graph-before-convention-edit'));
 
     // Verify specific rules pass
     const squashRule = results.find((r) => r.ruleId === 'merge-github-squash-only');

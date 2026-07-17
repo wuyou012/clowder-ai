@@ -3,7 +3,7 @@ name: worktree
 description: >
   创建 Git worktree 隔离开发环境，含 Redis 6398 安全配置。
   Use when: 开始任何代码修改、新功能开发、bug fix。
-  Not for: 纯文档修改（≤5 行）、不涉及代码的讨论。
+  Not for: 纯文档修改（≤5 行）、不涉及代码/脚本/API/第一方执行面的讨论。
   Output: 隔离的 worktree + 正确的 Redis/环境配置。
 triggers:
   - "开始开发"
@@ -14,7 +14,7 @@ renamed-from: using-git-worktrees
 
 # Worktree
 
-开始任何非 trivial 的功能开发前，必须拉 worktree 隔离，不要直接在 main 上改代码。
+开始任何非 trivial 的功能开发前，必须拉 worktree 隔离，不要直接在 main 上改代码。Skill / MCP description 如果改到 API route、localhost、script、CLI command、第一方执行面，即使是 ≤5 行，也不按“纯文档免验证”处理：至少 commit 前跑 `pnpm check`；非 trivial 行为改动仍应开 worktree。
 
 ## 开工前 Recall（F102 记忆系统）🔴
 
@@ -94,7 +94,7 @@ pnpm test
 
 | Redis | 端口 | 用途 |
 |-------|------|------|
-| **用户 Redis** | **6399** | 铲屎官的数据，🔴 圣域，只读 |
+| **用户 Redis** | **6399** | operator的数据，🔴 圣域，只读 |
 | **开发 Redis** | **6398** | 猫猫开发测试，随便折腾 |
 
 **Worktree 中启动服务 = 必须用 6398。**
@@ -146,7 +146,7 @@ OFFSET 非 0 时，**派生值优先级高于 `.env` 和 `CAT_CAFE_RESPECT_DOTEN
 pnpm check:worktree-port-offset   # 验证全部 7 个大赛 OFFSET 派生 + 端口无冲突
 ```
 
-诊断脚本是 CI 用，**不是唯一 gate**——唯一 gate 是 `start-dev.sh` 内置 preflight（启动时主动派生端口、强制 export sidecar=0、unset Redis dir 让重派生；OFFSET 派生失败 / Redis 圣域 6399 拒绝启动）。
+诊断脚本是 CI 用，**不是唯一 gate**——唯一 gate 是 `start-dev.sh` 内置 preflight（启动时主动派生端口、强制 export sidecar=0、unset Redis dir 让重派生；OFFSET 派生失败 / production data boundary 6399 拒绝启动）。
 
 ### Sidecar 处理
 
@@ -169,6 +169,28 @@ git worktree prune
 git worktree list             # 列出所有 worktree
 git branch --merged main      # 哪些分支已合入
 ```
+
+## Commit / Stash 溯源 Footer（F193 Phase E）
+
+当当前 worktree 的改动来自跨 thread 投递、跨 feature 调查、或你预期后续猫需要反查来源 thread 时，在 commit body 或 stash message 末尾加：
+
+```text
+Thread-Context: threadId=<threadId> invocationId=<invocationId> catId=<catId>
+```
+
+示例：
+
+```text
+Why: Add read-side affordance so search/list_recent results show where to cross-post.
+
+[Maine Coon/GPT-5.5🐾]
+Thread-Context: threadId=[thread-id] invocationId=0001780508313338 catId=codex
+```
+
+规则：
+- 只在有明确 thread context 时写；拿不到 `invocationId` 就省略该键，不要猜。
+- 不通过 hook 自动改写或拒绝提交；这是降摩擦溯源字段，不是新门禁。
+- stash 只写 tracked 临时现场；多 session 工作目录里仍禁止 `git stash -u`，避免清掉别人未跟踪产物。
 
 ## Codex `apply_patch` 陷阱（开发猫必读）
 

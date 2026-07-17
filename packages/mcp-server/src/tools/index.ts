@@ -65,6 +65,15 @@ export {
   reviewDistillationInputSchema,
 } from './distillation-tools.js';
 export {
+  backfillEventsInputSchema,
+  eventMemoryTools,
+  handleBackfillEvents,
+  handleListEvents,
+  handleTeleport,
+  listEventsInputSchema,
+  teleportInputSchema,
+} from './event-memory-tools.js';
+export {
   evidenceTools,
   handleSearchEvidence,
   searchEvidenceInputSchema,
@@ -86,6 +95,12 @@ export {
   readFileSliceInputSchema,
 } from './file-tools.js';
 export {
+  createFinanceQueryHandler,
+  financeQueryInputSchema,
+  financeTools,
+  handleFinanceQuery,
+} from './finance-tools.js';
+export {
   gameActionTools,
   handleSubmitGameAction,
   submitGameActionInputSchema,
@@ -95,6 +110,13 @@ export {
   graphTools,
   handleGraphResolve,
 } from './graph-tools.js';
+export {
+  handlePreviewOpen,
+  handleWorkspaceNavigate,
+  hubActionTools,
+  previewOpenInputSchema,
+  workspaceNavigateInputSchema,
+} from './hub-action-tools.js';
 export {
   handleLibraryArchive,
   handleLibraryCreate,
@@ -111,10 +133,12 @@ export {
   libraryVerifyInputSchema,
 } from './library-lifecycle-tools.js';
 export {
-  handleLimbInvoke,
+  handleLimbInvokeTool,
   handleLimbListAvailable,
-  limbInvokeInputSchema,
+  handleLimbListTools,
+  limbInvokeToolInputSchema,
   limbListAvailableInputSchema,
+  limbListToolsInputSchema,
   limbTools,
 } from './limb-tools.js';
 export {
@@ -122,6 +146,8 @@ export {
   perspectiveTools,
   runPerspectiveInputSchema,
 } from './perspective-tools.js';
+// F192 Phase H AC-H4: cat_cafe_publish_verdict tool
+export { handlePublishVerdict, publishVerdictInputSchema, publishVerdictTools } from './publish-verdict-tool.js';
 export {
   handleListRecent,
   listRecentInputSchema,

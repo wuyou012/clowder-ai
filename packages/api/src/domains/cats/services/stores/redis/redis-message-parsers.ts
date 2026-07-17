@@ -46,7 +46,11 @@ export function safeParseExtra(raw: string | undefined):
       // Frontend `getBubbleInvocationId` uses turnInvocationId for bubble identity
       // (falls back to invocationId / parent only for legacy records).
       stream?: { invocationId: string; turnInvocationId?: string };
-      crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
+      crossPost?: {
+        sourceThreadId: string;
+        sourceInvocationId?: string;
+        effectClass?: 'fyi' | 'coordinate' | 'investigate' | 'assign_work';
+      };
       scheduler?: {
         hiddenTrigger?: boolean;
         toast?: {
@@ -58,8 +62,9 @@ export function safeParseExtra(raw: string | undefined):
         };
       };
       targetCats?: string[];
+      isExplicitPost?: boolean;
       tracing?: { traceId: string; spanId: string; parentSpanId?: string };
-      systemKind?: 'a2a_routing';
+      systemKind?: 'a2a_routing' | 'context_briefing';
     }
   | undefined {
   if (!raw) return undefined;
@@ -70,7 +75,11 @@ export function safeParseExtra(raw: string | undefined):
     const result: {
       rich?: RichMessageExtra;
       stream?: { invocationId: string; turnInvocationId?: string };
-      crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
+      crossPost?: {
+        sourceThreadId: string;
+        sourceInvocationId?: string;
+        effectClass?: 'fyi' | 'coordinate' | 'investigate' | 'assign_work';
+      };
       scheduler?: {
         hiddenTrigger?: boolean;
         toast?: {
@@ -82,8 +91,9 @@ export function safeParseExtra(raw: string | undefined):
         };
       };
       targetCats?: string[];
+      isExplicitPost?: boolean;
       tracing?: { traceId: string; spanId: string; parentSpanId?: string };
-      systemKind?: 'a2a_routing';
+      systemKind?: 'a2a_routing' | 'context_briefing';
       a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string };
     } = {};
     let hasField = false;
@@ -115,10 +125,15 @@ export function safeParseExtra(raw: string | undefined):
       typeof parsed.crossPost === 'object' &&
       typeof parsed.crossPost.sourceThreadId === 'string'
     ) {
+      const validEffectClasses = new Set(['fyi', 'coordinate', 'investigate', 'assign_work']);
       result.crossPost = {
         sourceThreadId: parsed.crossPost.sourceThreadId,
         ...(typeof parsed.crossPost.sourceInvocationId === 'string'
           ? { sourceInvocationId: parsed.crossPost.sourceInvocationId }
+          : {}),
+        // F246 Phase B: preserve effectClass through Redis round-trip
+        ...(typeof parsed.crossPost.effectClass === 'string' && validEffectClasses.has(parsed.crossPost.effectClass)
+          ? { effectClass: parsed.crossPost.effectClass as 'fyi' | 'coordinate' | 'investigate' | 'assign_work' }
           : {}),
       };
       hasField = true;
@@ -141,8 +156,13 @@ export function safeParseExtra(raw: string | undefined):
       hasField = true;
     }
 
-    if (parsed.systemKind === 'a2a_routing') {
-      result.systemKind = 'a2a_routing';
+    if (parsed.isExplicitPost === true) {
+      result.isExplicitPost = true;
+      hasField = true;
+    }
+
+    if (parsed.systemKind === 'a2a_routing' || parsed.systemKind === 'context_briefing') {
+      result.systemKind = parsed.systemKind;
       hasField = true;
     }
 

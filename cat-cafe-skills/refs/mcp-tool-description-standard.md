@@ -86,11 +86,11 @@ return errorResult('Invalid format "xlsx". Expected one of: pdf, docx, md. Examp
 - [ ] inputSchema 参数都有 `.describe()`
 - [ ] 枚举值用 `enum` 不用自由文本
 - [ ] tool-registration.test.js 已更新（EXPECTED_TOOLS / EXPECTED_COLLAB_TOOLS）
-- [ ] SystemPromptBuilder MCP_TOOLS_SECTION 已更新
+- [ ] 认知入口已更新：MCP tool description / 相关 skill refs / capability wakeup 或 L0 quick index；仅当 legacy/fallback surface 仍依赖时才更新 `SystemPromptBuilder.MCP_TOOLS_SECTION`
 
 ## 参考
 
 - Maine Coon《知识工程实践指南》：*(internal reference removed)*
 - Anthropic Skills Best Practices：`cat-cafe-skills/writing-skills/anthropic-best-practices.md`
 - MCP 官方规范：`https://modelcontextprotocol.io/specification`
-- 金渐层 MCP description 优化审查：thread `thread_mn1u0ygkt76bzxks`
+- 金渐层 MCP description 优化审查：thread `[thread-id]`

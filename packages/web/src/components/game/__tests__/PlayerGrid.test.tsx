@@ -7,10 +7,10 @@ import { PlayerGrid } from '../PlayerGrid';
 Object.assign(globalThis as Record<string, unknown>, { React });
 
 const mockSeats: SeatView[] = [
-  { seatId: 'P1', actorType: 'human', actorId: 'coCreator', displayName: '铲屎官', alive: true },
+  { seatId: 'P1', actorType: 'human', actorId: 'coCreator', displayName: 'co-creator', alive: true },
   { seatId: 'P2', actorType: 'cat', actorId: 'opus', displayName: '宪宪', alive: true },
   { seatId: 'P3', actorType: 'cat', actorId: 'codex', displayName: '砚砚', alive: true },
-  { seatId: 'P6', actorType: 'cat', actorId: 'dare', displayName: 'Dare', alive: false },
+  { seatId: 'P6', actorType: 'cat', actorId: 'sonnet', displayName: 'Sonnet', alive: false },
 ];
 
 function render(props: Partial<Parameters<typeof PlayerGrid>[0]> = {}): string {
@@ -20,10 +20,10 @@ function render(props: Partial<Parameters<typeof PlayerGrid>[0]> = {}): string {
 describe('PlayerGrid', () => {
   it('renders all seat display names', () => {
     const html = render();
-    expect(html).toContain('铲屎官');
+    expect(html).toContain('co-creator');
     expect(html).toContain('宪宪');
     expect(html).toContain('砚砚');
-    expect(html).toContain('Dare');
+    expect(html).toContain('Sonnet');
   });
 
   it('renders seat IDs', () => {
@@ -51,7 +51,7 @@ describe('PlayerGrid', () => {
     const html = render();
     expect(html).toContain('src="/avatars/opus.png"');
     expect(html).toContain('src="/avatars/coCreator.png"');
-    expect(html).toContain('src="/avatars/dare.png"');
+    expect(html).toContain('src="/avatars/sonnet.png"');
   });
 
   it('shows 死亡 for dead seats', () => {

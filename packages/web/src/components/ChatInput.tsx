@@ -21,19 +21,39 @@ import { ImagePreview } from './ImagePreview';
 import { AttachIcon } from './icons/AttachIcon';
 import { MobileInputToolbar } from './MobileInputToolbar';
 import { PathCompletionMenu } from './PathCompletionMenu';
+import { ReplyPreviewBar } from './ReplyPreviewBar';
 import { pushThreadRouteWithHistory } from './ThreadSidebar/thread-navigation';
-import { hasPendingThreadDraft, syncDraftToStorage, threadDrafts, threadImageDrafts } from './thread-drafts';
+import {
+  hasPendingThreadDraft,
+  syncDraftToStorage,
+  syncReplyDraftToStorage,
+  threadDrafts,
+  threadImageDrafts,
+  threadReplyDrafts,
+} from './thread-drafts';
 import { WhisperCatSelector, WhisperTargetChips } from './WhisperCatSelector';
 
 /** Module-level draft storage — survives component unmount/remount across thread switches */
-export { syncDraftToStorage, threadDrafts, threadImageDrafts } from './thread-drafts';
+export {
+  syncDraftToStorage,
+  syncReplyDraftToStorage,
+  threadDrafts,
+  threadImageDrafts,
+  threadReplyDrafts,
+} from './thread-drafts';
 
 const MAX_IMAGE_DRAFT_THREADS = 5;
 
 interface ChatInputProps {
   /** Thread ID for draft persistence — drafts are saved per-thread */
   threadId?: string;
-  onSend: (content: string, images?: File[], whisper?: WhisperOptions, deliveryMode?: DeliveryMode) => void;
+  onSend: (
+    content: string,
+    images?: File[],
+    whisper?: WhisperOptions,
+    deliveryMode?: DeliveryMode,
+    replyToId?: string,
+  ) => void;
   onStop?: () => void;
   disabled?: boolean;
   hasActiveInvocation?: boolean;
@@ -57,6 +77,26 @@ export function ChatInput({
   const catOptions = useMemo(() => buildCatOptions(cats), [cats]);
   // F108 Scene 2: whisper-eligible cats (CatData[] for WhisperCatSelector)
   const whisperCats = useMemo(() => cats.filter((c) => c.roster?.available !== false), [cats]);
+
+  // #699: Reply-to (quote) state — thread-scoped to prevent split-pane leaks
+  const rawReplyToMessage = useChatStore((s) => s.replyToMessage);
+  const setReplyToStore = useChatStore((s) => s.setReplyTo);
+  const clearReplyTo = useChatStore((s) => s.clearReplyTo);
+  // Only surface the reply when it belongs to this ChatInput's thread
+  const replyToMessage = rawReplyToMessage?.threadId === threadId ? rawReplyToMessage : null;
+  const replyHydrationThreadRef = useRef<string | null>(null);
+  const replyPersistenceThreadRef = useRef<string | null>(null);
+
+  // #934: Restore reply context from thread draft store before mount-time persistence.
+  // ChatInput is keyed by threadId so this runs once per thread visit.
+  useLayoutEffect(() => {
+    if (!threadId || replyHydrationThreadRef.current === threadId) return;
+    replyHydrationThreadRef.current = threadId;
+    const savedReply = threadReplyDrafts.get(threadId);
+    if (savedReply && rawReplyToMessage?.threadId !== threadId) {
+      setReplyToStore(savedReply);
+    }
+  }, [threadId, rawReplyToMessage, setReplyToStore]);
 
   // F122B AC-B10: track which cats are actively executing (for whisper disable)
   const activeInvocations = useChatStore((s) => s.activeInvocations);
@@ -105,7 +145,9 @@ export function ChatInput({
   const imageLifecycleStatus = deriveImageLifecycleStatus(isPreparingImages, uploadStatus);
   const sendTemporarilyDisabled = isImageLifecycleBlockingSend(imageLifecycleStatus);
 
-  // F63-AC15: consume pendingChatInsert from workspace (thread-guarded)
+  // F63-AC15: consume pendingChatInsert (ComposerDraftInsert) from workspace (thread-guarded)
+  // #706: restores text, image attachments, and quote state from recall-edit
+  // Phase 2 (#833 merged): replyToId → setReplyTo() restores ReplyPreviewBar
   const pendingChatInsert = useChatStore((s) => s.pendingChatInsert);
   const setPendingChatInsert = useChatStore((s) => s.setPendingChatInsert);
   const setThreadHasDraft = useChatStore((s) => s.setThreadHasDraft);
@@ -116,9 +158,62 @@ export function ChatInput({
       const separator = prev && !prev.endsWith('\n') ? '\n' : '';
       return prev + separator + pendingChatInsert.text;
     });
+    // #706: Restore images from recalled queue message.
+    // Writes to threadImageDrafts directly so files survive unmount if the user
+    // switches threads while fetches are in-flight.
+    if (pendingChatInsert.imageUrls?.length) {
+      const urls = pendingChatInsert.imageUrls;
+      const targetThreadId = pendingChatInsert.threadId;
+      void (async () => {
+        setIsPreparingImages(true);
+        try {
+          const restored: File[] = [];
+          for (const url of urls) {
+            if (restored.length >= 5) break;
+            try {
+              const res = await apiFetch(url);
+              if (!res.ok) continue; // Skip images that return non-2xx (stale/cleaned-up uploads)
+              const blob = await res.blob();
+              const ext = url.split('.').pop() ?? 'png';
+              const name = `recalled-${Date.now()}-${restored.length}.${ext}`;
+              restored.push(new File([blob], name, { type: blob.type || `image/${ext}` }));
+            } catch {
+              // Best-effort: skip images that fail to fetch
+            }
+          }
+          if (restored.length > 0) {
+            // Persist to module-level draft so data survives component unmount
+            const existing = threadImageDrafts.get(targetThreadId) ?? [];
+            const merged = [...existing, ...restored].slice(0, 5);
+            threadImageDrafts.set(targetThreadId, merged);
+            setThreadHasDraft(targetThreadId, true);
+            // Also update local state if still mounted on the same thread
+            setImages((prev) => [...prev, ...restored].slice(0, 5));
+          }
+        } finally {
+          setIsPreparingImages(false);
+        }
+      })();
+    }
+    // #706 Phase 2: Restore quote composing state from recall-edit.
+    // Always calls setReplyTo when replyToId is present so the re-sent
+    // message preserves its quote relationship. If the parent message
+    // isn't loaded in the client store (e.g. after a page reload with
+    // partial history), falls back to a placeholder — the replyTo ID
+    // is still sent to the server on submit.
+    if (pendingChatInsert.replyToId) {
+      const { messages: storeMessages, setReplyTo } = useChatStore.getState();
+      const parentMsg = storeMessages.find((m) => m.id === pendingChatInsert.replyToId);
+      setReplyTo({
+        id: pendingChatInsert.replyToId,
+        content: parentMsg?.content ?? '(原消息未加载)',
+        senderCatId: parentMsg?.catId ?? null,
+        threadId,
+      });
+    }
     setPendingChatInsert(null);
     textareaRef.current?.focus();
-  }, [pendingChatInsert, setPendingChatInsert, threadId]);
+  }, [pendingChatInsert, setPendingChatInsert, setThreadHasDraft, threadId]);
 
   const handleTranscript = useCallback((text: string) => {
     setInput((prev) => {
@@ -159,16 +254,29 @@ export function ChatInput({
           whisperMode && whisperTargets.size > 0
             ? { visibility: 'whisper' as const, whisperTo: [...whisperTargets] }
             : undefined;
-        onSend(trimmed, images.length > 0 ? images : undefined, whisper, deliveryMode);
+        onSend(trimmed, images.length > 0 ? images : undefined, whisper, deliveryMode, replyToMessage?.id);
         setInput('');
         ghostRef.current = null;
         setGhostSuggestion(null);
         setImages([]);
         setShowMentions(false);
         setShowGameMenu(false);
+        // Only clear reply if it belongs to this thread (preserve other thread's reply in split-pane)
+        if (replyToMessage) clearReplyTo();
       }
     },
-    [input, disabled, onSend, images, sendTemporarilyDisabled, whisperMode, whisperTargets, addHistoryEntry],
+    [
+      input,
+      disabled,
+      onSend,
+      images,
+      sendTemporarilyDisabled,
+      whisperMode,
+      whisperTargets,
+      addHistoryEntry,
+      replyToMessage,
+      clearReplyTo,
+    ],
   );
 
   const handleSend = useCallback(() => doSend(undefined), [doSend]);
@@ -502,14 +610,18 @@ export function ChatInput({
     });
   }, []);
 
-  // Sync input text + images to module-level draft maps (covers all sources: typing, voice, mentions)
+  // Sync input text + images + reply context to module-level draft maps (covers all sources: typing, voice, mentions)
   // useLayoutEffect runs synchronously before browser paint and before unmount,
   // ensuring the draft is written to the Map before the component is destroyed
   // on thread switch (key={threadId}). useEffect would lose the final keystroke.
   useLayoutEffect(() => {
     if (!threadId) return;
     const hasDraft = input.trim().length > 0 || images.length > 0;
+    const firstPersistenceForThread = replyPersistenceThreadRef.current !== threadId;
+    const replyDraft = replyToMessage ?? (firstPersistenceForThread ? (threadReplyDrafts.get(threadId) ?? null) : null);
     syncDraftToStorage(threadId, input || undefined);
+    // #934: Persist reply context alongside text/image drafts
+    syncReplyDraftToStorage(threadId, replyDraft);
     if (images.length > 0) {
       threadImageDrafts.delete(threadId); // move to end (Map insertion order)
       threadImageDrafts.set(threadId, images);
@@ -524,8 +636,9 @@ export function ChatInput({
     } else {
       threadImageDrafts.delete(threadId);
     }
-    setThreadHasDraft(threadId, hasDraft);
-  }, [input, images, threadId, setThreadHasDraft]);
+    setThreadHasDraft(threadId, hasDraft || Boolean(replyDraft));
+    replyPersistenceThreadRef.current = threadId;
+  }, [input, images, threadId, setThreadHasDraft, replyToMessage]);
 
   // F080: recalculate ghost suggestion whenever input changes (covers all setInput paths)
   useEffect(() => {
@@ -647,6 +760,9 @@ export function ChatInput({
 
       <ImagePreview files={images} onRemove={handleRemoveImage} />
 
+      {/* #699: Reply preview bar — matches ReplyPill styling with sender theme color */}
+      {replyToMessage && <ReplyPreviewBar replyToMessage={replyToMessage} cats={cats} onClear={clearReplyTo} />}
+
       <input
         ref={fileInputRef}
         type="file"
@@ -705,7 +821,7 @@ export function ChatInput({
           disabled={disabled || sendTemporarilyDisabled}
           className={`hidden md:block p-3 rounded-xl transition-colors disabled:opacity-30 disabled:cursor-not-allowed ${
             whisperMode
-              ? 'text-cafe-accent bg-accent-50 ring-1 ring-cafe-accent'
+              ? 'text-cafe-accent bg-accent-50'
               : 'text-cafe-muted hover:text-cafe-accent hover:bg-cafe-surface'
           }`}
           aria-label="Whisper mode"

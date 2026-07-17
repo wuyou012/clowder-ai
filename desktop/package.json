@@ -1,7 +1,7 @@
 {
   "name": "cat-cafe-desktop",
   "version": "0.10.1",
-  "description": "Cat Cafe Desktop - Multi-Agent Collaboration Platform",
+  "description": "Clowder AI Desktop - Multi-Agent Collaboration Platform",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -9,16 +9,16 @@
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac dmg --arm64 --x64"
   },
-  "author": "Cat Cafe",
+  "author": "Clowder AI",
   "license": "AGPL-3.0-only",
   "devDependencies": {
     "electron": "35.7.5",
     "electron-builder": "26.8.1"
   },
   "build": {
-    "appId": "ai.catcafe.desktop",
-    "productName": "Cat Cafe",
-    "artifactName": "CatCafe-${version}-${arch}.${ext}",
+    "appId": "ai.clowderai.desktop",
+    "productName": "Clowder AI",
+    "artifactName": "ClowderAI-${version}-${arch}.${ext}",
     "win": {
       "target": "dir",
       "icon": "assets/icon.ico"
@@ -116,8 +116,12 @@
         "to": "guides"
       },
       {
-        "from": "../assets/system-prompts",
-        "to": "assets/system-prompts"
+        "from": "../assets",
+        "to": "assets"
+      },
+      {
+        "from": "../plugins",
+        "to": "plugins"
       }
     ],
     "asar": false,

@@ -8,11 +8,12 @@ created: 2026-03-27
 
 # F144: PPT Forge — AI 演示文稿生成引擎
 
-> **Status**: in-progress | **Owner**: 三猫 | **Priority**: P2
+> **Status**: done | **Owner**: 三猫 | **Priority**: P2
+> **Closed**: 2026-06-18 | **终态**：低保真 MD → imagegen 精美图（KD-20）
 
 ## Why
 
-team experience（2026-03-27）：
+operator experience（2026-03-27）：
 
 > "如果要让你组织猫猫们来实现一个 ppt 生成的 skills 或者说引擎！比如我和你说我想要华为/IBM/xxx/yyy 风格的 ppt，然后给你们一些主题……来吧我们也来搞一个业界 sota 的 ppt skills！"
 >
@@ -20,7 +21,7 @@ team experience（2026-03-27）：
 
 **核心动机**：
 1. **能力证明**：用真正的工程系统对比对方团队的"SOTA"（纯 prompt 编排 pptx-craft），证明愿景驱动开发的产出力
-2. **实用价值**：team lead给主题+风格 → 自动产出专业级 PPT，覆盖技术分享、架构设计、行业分析等场景
+2. **实用价值**：operator给主题+风格 → 自动产出专业级 PPT，覆盖技术分享、架构设计、行业分析等场景
 3. **方法论验证**：多猫协作（研究+叙事+设计+质量守护）生成内容的端到端管线
 
 **背景**：对方团队归档的 `deepresearch`（3 个 MD 文件，零运行时代码）+ `pptx-craft`（HTML 截图转 PPTX），被三猫侦查定性为 "Promptware"——我们要做的是 "Governanceware"。
@@ -30,14 +31,14 @@ team experience（2026-03-27）：
 ### 五层架构（头脑风暴收敛版）
 
 ```
-team lead输入: "华为企业流程信息化架构分析，华为风格"
+operator输入: "华为企业流程信息化架构分析，华为风格"
   ↓
 Layer 1: Research        → deep-research skill（三路 DR + Pro 审阅）
   ↓  产物: research.md（带来源引用）
   ↓  ── Research Gate ──
 Layer 2: Narrative       → 结构化叙事引擎（金字塔/SCQ/问题-方案）
   ↓  产物: storyline.md（每页有"存在目的"）
-  ↓  ── Narrative Gate（team lead审批叙事方向）──
+  ↓  ── Narrative Gate（operator审批叙事方向）──
 Layer 3: Blueprint       → 页面蓝图生成器（layout + 元素规划）
   ↓  产物: deck.blueprint.json（每页 layout/元素/图表位/引用位）
   ↓  ── Blueprint Gate ──
@@ -70,13 +71,13 @@ Layer 5: Export          → pptxgenjs 原生 OOXML 生成
 8. **SlideBuilder diagram renderer**：flex-like 空间计算 → pptxgenjs shapes 绝对坐标
 
 **Phase A 关键决策**：
-- 首个风格改为**华为风格（huawei-like）** — team lead要求最大信息密度挑战，华为 PPT 一页塞 50+ 盒子，比 NVIDIA keynote 难 10 倍（KD-8）
+- 首个风格改为**华为风格（huawei-like）** — operator要求最大信息密度挑战，华为 PPT 一页塞 50+ 盒子，比 NVIDIA keynote 难 10 倍（KD-8）
 - **Pencil MCP 降级为可选审批器**，不进主路径硬依赖 — 避免被集成卡住（Maine Coon pushback，采纳）
 - SlideBuilder 抽象层处理 pptxgenjs 的 x/y/w/h 绝对定位计算
 - **GPT Pro 审阅吸纳 7 项**：renderBudget / slideId / sections[] / transition 枚举 / ChartData union / Render Recipes / 支持矩阵冻结（详见 GPT Pro 咨询文档 Part 3）
 - **CJK 图表字体升级为 release-gate P1**（Maine Coon要求：POC 不过就收紧支持矩阵）
 
-#### 华为 PPT 参考图分析（team lead提供，6 张）
+#### 华为 PPT 参考图分析（operator提供，6 张）
 
 | 类型 | 描述 | Phase A 可行性 |
 |------|------|---------------|
@@ -99,7 +100,7 @@ Layer 5: Export          → pptxgenjs 原生 OOXML 生成
 
 ### Phase B: HTML Layout Compiler — 终态渲染引擎
 
-> **方向纠偏（2026-03-28）**：Phase A 用 pptxgenjs 原生 shapes 手算 x/y/w/h 坐标，在复杂嵌套布局（华为级 50+ 盒子）时效果差、算法复杂。team lead指出应与 F138 Video Studio（Remotion = HTML+CSS → 视频）复用同一思路。Maine Coon确认终态路线：HTML+CSS 做布局真相源 → DOM 语义编译器 → pptxgenjs 原生对象输出（不截图、不光栅化）。
+> **方向纠偏（2026-03-28）**：Phase A 用 pptxgenjs 原生 shapes 手算 x/y/w/h 坐标，在复杂嵌套布局（华为级 50+ 盒子）时效果差、算法复杂。operator指出应与 F138 Video Studio（Remotion = HTML+CSS → 视频）复用同一思路。Maine Coon确认终态路线：HTML+CSS 做布局真相源 → DOM 语义编译器 → pptxgenjs 原生对象输出（不截图、不光栅化）。
 
 **终态架构**：
 ```
@@ -133,17 +134,17 @@ deck.pptx
 
 ### Phase C: SVG 渲染后端 — 确定性 SVG 编译器
 
-> **方向纠偏（2026-03-31）**：Phase B 的 HTML→DOM→pptxgenjs 路线在复杂中文嵌套布局（diagram 71 shapes）仍然崩溃。team lead指出应学习 pptx-craft 的 SVG 路线。核心发现：pptx-craft 不是"Promptware"，其 `svg_to_shapes.py`(70k) 是成熟的 SVG→DrawingML 原生 shapes 转换器。
+> **方向纠偏（2026-03-31）**：Phase B 的 HTML→DOM→pptxgenjs 路线在复杂中文嵌套布局（diagram 71 shapes）仍然崩溃。operator指出应学习 pptx-craft 的 SVG 路线。核心发现：pptx-craft 不是"Promptware"，其 `svg_to_shapes.py`(70k) 是成熟的 SVG→DrawingML 原生 shapes 转换器。
 >
-> **选型收敛（2026-04-02）**：Ragdoll+Maine Coon讨论，team lead约束"不引入 Python，用我们自己的 TS/JS 技术栈"。最终方案：**C3 为主（确定性 SVG 编译）+ C2 为辅（AI-direct SVG 可选高创意模式）**。C1（Python）team lead否决，C4（图片降级）只做应急兜底。
+> **选型收敛（2026-04-02）**：Ragdoll+Maine Coon讨论，operator约束"不引入 Python，用我们自己的 TS/JS 技术栈"。最终方案：**C3 为主（确定性 SVG 编译）+ C2 为辅（AI-direct SVG 可选高创意模式）**。C1（Python）operator否决，C4（图片降级）只做应急兜底。
 
 #### 选型决策过程
 
-**team lead约束**：❌ 不引入 Python | ✅ 有 Pencil MCP | ✅ 纯 TS/JS 技术栈
+**operator约束**：❌ 不引入 Python | ✅ 有 Pencil MCP | ✅ 纯 TS/JS 技术栈
 
 | 方案 | 结论 | 理由 |
 |------|------|------|
-| C1 吸收 Python 转换器 | ❌ 否决 | team lead约束：不引入 Python |
+| C1 吸收 Python 转换器 | ❌ 否决 | operator约束：不引入 Python |
 | **C3 确定性 SVG 编译（默认）** | ✅ **主选** | 确定性强、可测、可回归，符合 Phase B「语义编译器」方向（Maine Coon推荐） |
 | C2 AI-direct SVG（可选） | ⚠️ 辅助 | 创意强但输出不稳定，进入人工验收通道（非默认） |
 | C4 Diagram 图片降级 | ⚠️ 兜底 | 改动最小但不可编辑，仅应急 |
@@ -221,7 +222,7 @@ svg_to_pptx.py (41k Python) → python-pptx 组装
 
 ### Phase D: AI 猫猫画 HTML — 学 pptx-craft 超越 pptx-craft
 
-> **方向转变（2026-04-03）**：Phase C 的确定性 SVG 编译器解决了 CJK 渲染问题（不再竖排乱码），但布局密度仍不够华为级。team lead分析 pptx-craft 后拍板：**核心页面让猫猫直接写 HTML+CSS，不靠编译器算布局**。
+> **方向转变（2026-04-03）**：Phase C 的确定性 SVG 编译器解决了 CJK 渲染问题（不再竖排乱码），但布局密度仍不够华为级。operator分析 pptx-craft 后拍板：**核心页面让猫猫直接写 HTML+CSS，不靠编译器算布局**。
 
 #### 核心思路
 
@@ -240,9 +241,9 @@ pptx-craft 的关键技术：**AI (Opus) 直接生成 HTML+Tailwind (1280×720) 
 4. **D4-Integration**: 集成进 F144 管线 — Research → Narrative → **AI 画 HTML** → Playwright → dom-to-pptx → .pptx
 5. **D5-VerticalSlice**: 先做 1 页高密页验证"猫猫画 HTML → PPTX"全链路（HTML→截图→density 报告→PPTX），通过后再扩页。输入六件套（品牌/受众/页型/观看模式/页目的/证据源），输出四件套（HTML/截图/density/PPTX）
 
-#### 华为级密度填充技巧（team lead反馈沉淀 2026-04-05）
+#### 华为级密度填充技巧（operator反馈沉淀 2026-04-05）
 
-team lead反复指出猫猫画的 HTML"空白太多"。根本问题不是空白检测不够，而是猫猫没有用足页面空间。华为真正的 PPT 会用以下手段把页面塞满：
+operator反复指出猫猫画的 HTML"空白太多"。根本问题不是空白检测不够，而是猫猫没有用足页面空间。华为真正的 PPT 会用以下手段把页面塞满：
 
 1. **SmartArt/流程图**：把端到端工作流画成箭头连接的步骤图，占满横向空间
 2. **多区块混排**：一页同时包含表格 + 文字总结 + 图表 + 截图/示意图
@@ -253,14 +254,39 @@ team lead反复指出猫猫画的 HTML"空白太多"。根本问题不是空白�
 7. **信息层级压缩**：别人用 4-5 页讲的内容，华为用 1-2 页讲清，靠的是排版密度而非内容删减
 8. **结论性文字条**：页面底部用深色底条放核心结论，不浪费任何空间
 
-#### 其他进阶能力（Phase E+）
+#### ~~其他进阶能力（Phase E+）~~ — Superseded by KD-20
 
-1. SVG 全覆盖（path/gradient/filter/clipPath）
-2. Combo chart 双轴（pptxgenjs combo API 稳定后）
-3. 演讲者备注自动生成
-4. Narrative 编辑部（reference-retriever / deck-critic / redundancy-pruner）
-5. 多语言支持
-6. Gate patch loop（qa.report.json → 局部回修）+ Gate scorecard 评分协议
+> 以下进阶能力基于 pptxgenjs 代码管线，已被 KD-20 imagegen 路径取代，不再追进。
+
+### 终态：低保真 MD → imagegen 精美图（KD-20）
+
+> **方向终局（2026-05-29）**：Phases A-D 探索了"代码生成可编辑 .pptx"路线（pptxgenjs 原生 shapes → HTML layout compiler → SVG 编译器 → AI 画 HTML）。每一轮都在逼近更好的布局，但产出的视觉品质始终不如 AI 原生图片生成。operator在试用期工作总结 PPT 实战中发现：**架构猫写低保真 MD（ASCII art 结构图 + 视觉指引）→ imagegen 猫逐页出精美 raster PNG** 的路径，视觉质量远超任何代码渲染，且速度更快。
+>
+> 这不是"又一次 pivot"——这是终态。代码管线的价值在于帮我们理解了 PPT 制作的信息架构（分页规划 / 内容类型 / 密度原则 / 风格 token），这些认知全部沉淀进了 ppt-forge skill 的 ref 文档。
+
+**终态架构**：
+```
+operator输入: "做个 PPT，华为风格，内容是..."
+    ↓
+架构猫: 内容分析 → 分页规划 → 低保真 MD（ASCII art + 视觉指引）
+    ↓  产物: xxx-lofi.md（每页结构图 + 视觉指引引用风格 preset）
+    ↓  ── operator审稿 ──
+imagegen 猫: 逐页生成精美 raster PNG
+    ↓  产物: assets/p{N}-{描述}.png
+    ↓  ── 交付 ──
+```
+
+**三份 skill 文件 = 终态交付物**：
+1. `cat-cafe-skills/ppt-forge/SKILL.md` — 入口 + 场景路由 + 交接协议
+2. `cat-cafe-skills/refs/ppt-lofi-authoring.md` — 低保真 MD 写作规范（最小可抄模板 + 8 种面板内容类型 + 概念图描述格式 + imagegen 交接协议）
+3. `cat-cafe-skills/refs/ppt-style-huawei.md` — 华为风格 preset（PANTONE 185C 色系 + 6 级灰 + 6 级字体 + 8 种页面模式 + 装饰元素层 + 10 条禁忌）
+
+**已废弃的旧 ref（Phase A-D 产物，已 git rm）**：
+`ppt-css-whitelist.md` / `ppt-delivery.md` / `ppt-density-playbook.md` / `ppt-slide-authoring.md` / `ppt-style-tile.md` / `ppt-visual-review.md`
+
+**成功案例**：
+- LLE 自进化平台架构图（2026-05-28）
+- 试用期工作总结 9 页 PPT（2026-05-29，华为风格，已出图）
 
 ## Acceptance Criteria
 
@@ -272,20 +298,20 @@ team lead反复指出猫猫画的 HTML"空白太多"。根本问题不是空白�
 - [x] AC-A5: Style 层产出 `theme.tokens.json`，Design Token 三层体系（品牌→语义→Slide Master）
 - [x] AC-A6: Export 层产出原生 .pptx，文字可编辑、可搜索、布局无溢出
 - [x] AC-A7: 企业风格模板（**huawei-like**）可用，信息密度达到华为参考图水平 — 单页 52 boxes（≥50 门槛），`countBoxes()` 自动统计，Maine Coon复审通过
-- [ ] AC-A8: 五道门禁全部嵌入管线（Research/Narrative/Blueprint/Export 已有；**Vision Gate 仍未收进统一执行链**）
+- [x] AC-A8: ~~五道门禁全部嵌入管线~~ → **Superseded by KD-20**：imagegen 路径用operator审稿替代代码门禁
 - [x] AC-A9: 密排状态矩阵表格 — 单元格级颜色编码，可编辑
 - [x] AC-A10: （Level 2 stretch / non-blocking）嵌套盒子架构图 — nested-box renderer，只矩形/圆角矩形/侧栏标签，最大 3 层，输入必须是树不是图，不做 connector/自动布线
 - [x] AC-A11: CJK 图表字体 POC 通过（release-gate P1，不过则收紧支持矩阵）
-- [ ] AC-A12: 生成的 .pptx 在 PPT 365 Win/Mac 打开无 repair 弹窗 — **BLOCKED(owner: @you, action: 用 PPT 365 打开 ~/Desktop/cat-cafe-architecture.pptx 验证无 repair)**
+- [x] AC-A12: ~~生成的 .pptx 在 PPT 365 Win/Mac 打开无 repair 弹窗~~ → **Superseded by KD-20**：终态产出 PNG 图片，不产 .pptx 文件
 
 ### Phase B（HTML Layout Compiler — 共享编译基础设施，见 KD-19）
 - [x] AC-B1: `html-layout-compiler` 子模块可用 — Blueprint → HTML+Tailwind → Playwright 布局求值 → DOM 坐标提取
 - [x] AC-B2: DOM Semantic Compiler — `data-ppt-role` 标注 → pptxgenjs 原生对象（text/table/chart/shape/group），零截图
 - [x] AC-B3: ~~5 个 renderer（text/chart/table/kpi/diagram）全部迁移为吃 compiler output，手算坐标代码清零~~ → **Superseded by KD-16/KD-17**：核心页面默认走 D 路径（AI 直接画 HTML），diagram 走 Phase C SVG fallback，不再追求“所有页面都经 compiler-output renderer 迁移”
-- [ ] AC-B4: 字体嵌入 — opentype.js 解析 + fonteditor-core 子集化，嵌入 .pptx 的 `ppt/fonts/`
+- [x] AC-B4: ~~字体嵌入~~ → **Superseded by KD-20**：imagegen 原生渲染字体，无需嵌入
 - [x] AC-B5: ~~华为级复杂布局视觉验收 — 同一 Blueprint 对比 Phase A vs Phase B 渲染，Phase B 视觉品质 ≥ 对手 pptx-craft~~ → **Superseded by AC-D6**：视觉验收对象已改为 AI 直画 HTML 的主路径页面，而不是 compiler-only 输出
-- [x] AC-B6: ~~Skill 化 — team lead一句话触发全流程（research → storyline → blueprint → HTML → compile → .pptx）~~ → **Superseded by AC-D7**：一键触发现在指向 Research → Narrative → AI 画 HTML → Playwright → PPTX 的主路径
-- [ ] AC-B7: ≥3 种企业风格 HTML+Tailwind 模板可用（huawei-like/nvidia-like/Apple）— **保留需求，但已从 compiler blocker 改为 D 路径 authoring kit backlog**
+- [x] AC-B6: ~~Skill 化 — operator一句话触发全流程（research → storyline → blueprint → HTML → compile → .pptx）~~ → **Superseded by AC-D7**：一键触发现在指向 Research → Narrative → AI 画 HTML → Playwright → PPTX 的主路径
+- [x] AC-B7: ~~≥3 种企业风格模板~~ → **Superseded by KD-20**：华为 preset 已完成（`ppt-style-huawei.md`），Apple/阿里 preset 按需新建 ref 即可，不再需要 HTML+Tailwind 模板
 
 ### Phase C（SVG 渲染后端 — 确定性 SVG 编译器）
 - [x] AC-C1: TS SVG 编译器 — DiagramElement → 确定性 1280×720 SVG string（含 CJK 字宽预设表）
@@ -301,8 +327,8 @@ team lead反复指出猫猫画的 HTML"空白太多"。根本问题不是空白�
 - [x] AC-D3: Playwright 白空间检测 — 渲染后自动检测白空间占比 < 30%，溢出检测，不达标退回
 - [x] AC-D4: 同一主题对比 pptx-craft vs Phase D 输出，信息密度 ≥ 对方，内容准确性 > 对方（research 质量差异）
 - [x] AC-D5: 垂直切片验证 — 1 页高密页走完 HTML→截图→density 报告→PPTX 全链路。输入六件套（品牌/受众/页型/观看模式/页目的/证据源），输出四件套（HTML/截图/density/PPTX）。Maine Coon D1 结构审 + Siamese D2 美学审
-- [ ] AC-D6: 华为级视觉验收 — team lead确认"一两页讲清楚重点"，信息密度达华为参考图水平，运用密度填充技巧（SmartArt/多区块混排/极小间距/全版面利用）
-- [ ] AC-D7: 集成进管线 — Research → Narrative → AI 画 HTML → Playwright → dom-to-pptx → .pptx，team lead一句话触发
+- [x] AC-D6: ~~华为级视觉验收~~ → **Superseded by KD-20**：imagegen 出图质量已获operator认可（试用期工作总结 + ISCAS 分析后优化）
+- [x] AC-D7: ~~集成进管线~~ → **Superseded by KD-20**：终态管线 = ppt-forge skill（低保真 MD → imagegen），一句话触发已达成
 
 ## Phase B Reconciliation（2026-04-14）
 
@@ -311,22 +337,24 @@ team lead反复指出猫猫画的 HTML"空白太多"。根本问题不是空白�
 | AC-B1 | ✅ 已完成 | 仍是 D 路径 / C 路径共用基础设施 |
 | AC-B2 | ✅ 已完成 | 仍是 D 路径 / C 路径共用基础设施 |
 | AC-B3 | ✅ 关闭（Superseded） | 被 KD-16/KD-17 改写：不再要求“所有页面都经 compiler-output renderer 迁移” |
-| AC-B4 | ⏳ 保留 | 字体嵌入仍是跨平台保真能力，继续保留为真实剩余项 |
+| AC-B4 | ✅ 关闭（Superseded by KD-20） | imagegen 原生渲染字体，无需嵌入 |
 | AC-B5 | ✅ 关闭（Superseded） | 视觉验收职责迁移到 AC-D6（AI 直画 HTML 主路径） |
 | AC-B6 | ✅ 关闭（Superseded） | 一句话触发职责迁移到 AC-D7（端到端主路径集成） |
-| AC-B7 | ⏳ 保留（重定义） | 仍需要 ≥3 套企业风格模板，但现在是 D 路径 authoring kit，不是 compiler-only blocker |
+| AC-B7 | ✅ 关闭（Superseded by KD-20） | 华为 preset 已完成；Apple/阿里按需新建 ref，不需要 HTML+Tailwind 模板 |
 
-## Unified Remaining Checklist（2026-04-14）
+## Unified Remaining Checklist（2026-06-18 — Feature Close）
+
+> **全部关闭。** KD-20（低保真 MD → imagegen）使代码管线相关的剩余项全部 superseded。
 
 | 类别 | 剩余项 | 对应 AC | 状态 | 说明 |
 |------|--------|---------|------|------|
-| 主路径 | 垂直切片签收 | AC-D5 | ✅ 已交付 | `htmlToSlide` 编排器 + 4 e2e tests (PR #1172)，Maine Coon 2 轮 review + 云端 2 轮 clean |
-| 主路径 | 华为级视觉验收 | AC-D6 | 待做 | 这是当前默认产品路径的真正验收门 |
-| 主路径 | 一句话触发全流程 | AC-D7 | 待做 | 这条承接了旧 AC-B6 的“一键触发”诉求 |
-| 共享能力 | 字体嵌入 | AC-B4 | 待做 | 同时服务 D 路径导出保真与 C 路径 SVG 文字保真 |
-| 共享能力 | 企业风格 authoring kit ≥3 | AC-B7 | 待做 | 保留需求，但执行口径改为 D 路径 HTML+Tailwind 模板库 |
-| 共享能力 | Vision Gate 并入统一 gate chain | AC-A8 | 待做 | Research/Narrative/Blueprint/Export 已有，Vision Gate 仍未收进统一执行链 |
-| 外部阻塞 | PPT 365 repair 验证 | AC-A12 | BLOCKED on @you | 需要用真实 PPT 365 Win/Mac 打开产物验收 |
+| 主路径 | 垂直切片签收 | AC-D5 | ✅ 已交付 | `htmlToSlide` 编排器 + 4 e2e tests (PR #1172) |
+| 主路径 | 华为级视觉验收 | AC-D6 | ✅ Superseded | imagegen 出图质量operator认可 |
+| 主路径 | 一句话触发全流程 | AC-D7 | ✅ Superseded | ppt-forge skill 入口即一句话触发 |
+| 共享能力 | 字体嵌入 | AC-B4 | ✅ Superseded | imagegen 原生渲染字体 |
+| 共享能力 | 企业风格 authoring kit ≥3 | AC-B7 | ✅ Superseded | 华为 preset 完成，按需加 ref |
+| 共享能力 | Vision Gate 并入统一 gate chain | AC-A8 | ✅ Superseded | operator审稿替代代码门禁 |
+| 外部阻塞 | PPT 365 repair 验证 | AC-A12 | ✅ Superseded | 终态产出 PNG 不产 .pptx |
 
 ## Dependencies
 
@@ -365,20 +393,50 @@ team lead反复指出猫猫画的 HTML"空白太多"。根本问题不是空白�
 | KD-5 | **五份中间产物作为 contract chain** | Maine Coon提出：research.md → storyline.md → deck.blueprint.json → theme.tokens.json → deck.pptx，每份可审计可回溯 | 2026-03-27 |
 | KD-6 | **五道门禁嵌入管线** | Maine Coon提出：Research/Narrative/Blueprint/Export/Vision Gate，审批点前置防止级联浪费 | 2026-03-27 |
 | KD-7 | **叙事引擎 = 结构化模板 + prompt 增强** | 金渐层+Maine Coon共识：纯 prompt 不稳定，纯模板僵硬，混合方案最优 | 2026-03-27 |
-| KD-8 | Phase A 首发风格从 nvidia-like **改为 huawei-like** | team lead要求：华为信息密度最高（一页 50+ 盒子），最能证明引擎能力；对比打脸效果最强 | 2026-03-27 |
+| KD-8 | Phase A 首发风格从 nvidia-like **改为 huawei-like** | operator要求：华为信息密度最高（一页 50+ 盒子），最能证明引擎能力；对比打脸效果最强 | 2026-03-27 |
 | KD-13 | **huawei-like 字体统一 Noto Sans SC** | Maine Coon要求：高密中文场景 Latin/CJK 度量不一致会搞乱断行和容量判断。Phase A 不追品牌拟真，追稳定可读 | 2026-03-27 |
 | KD-9 | **GPT Pro 审阅吸纳 7 项** | renderBudget / slideId / sections[] / transition 枚举 / ChartData union / Render Recipes / 支持矩阵冻结 | 2026-03-27 |
 | KD-10 | **CJK 图表字体升级为 release-gate P1** | Maine Coon要求：首发场景是中文企业汇报，图表 CJK 翻车 = 现场打脸自己 | 2026-03-27 |
 | KD-11 | **Pushback renderer-agnostic adapter** | Ragdoll+Maine Coon共识：YAGNI，但守住 contract 不泄漏 renderer 细节（ChartData + hints 折中） | 2026-03-27 |
 | KD-12 | **Phase A 分 Level 1/2 两级** | Level 1 = 表格+KPI+图表（必须做到）；Level 2 = DiagramElement 架构图（挑战目标） | 2026-03-27 |
-| KD-14 | **Phase C 选型：C3 确定性 SVG 编译为主，C2 AI-direct SVG 为辅** | Ragdoll+Maine Coon共识：C3 确定性强/可测/可回归；C2 创意强但不稳定，进人工验收通道。C1 team lead否决（不引入 Python），C4 仅应急兜底 | 2026-04-02 |
+| KD-14 | **Phase C 选型：C3 确定性 SVG 编译为主，C2 AI-direct SVG 为辅** | Ragdoll+Maine Coon共识：C3 确定性强/可测/可回归；C2 创意强但不稳定，进人工验收通道。C1 operator否决（不引入 Python），C4 仅应急兜底 | 2026-04-02 |
 | KD-15 | **Pencil MCP 定位为 design-time，不进 runtime 主路径** | Maine Coon pushback：Pencil 主打 .pen 编辑/导出，自动化 Blueprint→稳定 SVG 链路不够硬。适合模板设计与视觉校准 | 2026-04-02 |
-| KD-16 | **Phase D 方向转变：AI 猫猫直接画 HTML，不靠确定性编译器排版** | team lead拍板：确定性编译器/规则自动生成布局效果不够好，密度不够华为级。学习 pptx-craft 的 "AI 直接写 HTML+CSS" 路线——让猫猫（Opus）直接画布局，而不是用算法算。Phase C SVG 编译器保留为 diagram fallback。核心差异化：我们的 research pipeline（deep-research + 多猫讨论）内容质量碾压对方 web fetch，配合 AI 画 HTML 实现"高质量内容 × 高密度布局" | 2026-04-03 |
-| KD-17 | **默认主路径：AI 猫猫画 HTML 是唯一创作路径** | 编译器（Phase B/C）不替猫猫做版式决策。猫猫拿 storyline + theme tokens 直接画 1280×720 HTML+CSS。编译器降级为基础设施：只负责 HTML→可编辑 PPTX 的转换 + 密度/溢出门禁检测。chart/table/KPI 保留语义 emitter（原生可编辑对象），但版式由猫猫在 HTML 中决定。猫猫画的 D4 华为高密战略页密度远超编译器自动布局，team lead直接确认。Ragdoll+Maine Coon共识 | 2026-04-05 |
+| KD-16 | **Phase D 方向转变：AI 猫猫直接画 HTML，不靠确定性编译器排版** | operator拍板：确定性编译器/规则自动生成布局效果不够好，密度不够华为级。学习 pptx-craft 的 "AI 直接写 HTML+CSS" 路线——让猫猫（Opus）直接画布局，而不是用算法算。Phase C SVG 编译器保留为 diagram fallback。核心差异化：我们的 research pipeline（deep-research + 多猫讨论）内容质量碾压对方 web fetch，配合 AI 画 HTML 实现"高质量内容 × 高密度布局" | 2026-04-03 |
+| KD-17 | **默认主路径：AI 猫猫画 HTML 是唯一创作路径** | 编译器（Phase B/C）不替猫猫做版式决策。猫猫拿 storyline + theme tokens 直接画 1280×720 HTML+CSS。编译器降级为基础设施：只负责 HTML→可编辑 PPTX 的转换 + 密度/溢出门禁检测。chart/table/KPI 保留语义 emitter（原生可编辑对象），但版式由猫猫在 HTML 中决定。猫猫画的 D4 华为高密战略页密度远超编译器自动布局，operator直接确认。Ragdoll+Maine Coon共识 | 2026-04-05 |
 | KD-18 | **D4 对比口径：密度结论有效，baseline 是模拟非实测** | AC-D4 的 4.1% vs 43.9% 白空间对比有效证明方向正确，但 pptx-craft baseline 是竞品报告模拟生成、非实际 pptx-craft 跑出来的。后续需对方实际输出作为对拍基准集。不影响 Phase D 默认路径决策 | 2026-04-05 |
-| KD-19 | **Phase B 角色重定义：从“终态主路径”降级为“共享编译基础设施”** | KD-16/KD-17 落定后，Phase B 不再拥有核心页面创作权。B1/B2 保留为基础设施，B3/B5/B6 关闭为 superseded，B4/B7 保留为跨 Phase 能力 backlog。以后判断 F144 剩余工作，以 D5/D6/D7 + B4/B7 + A8/A12 为准 | 2026-04-14 |
+| KD-19 | **Phase B 角色重定义：从”终态主路径”降级为”共享编译基础设施”** | KD-16/KD-17 落定后，Phase B 不再拥有核心页面创作权。B1/B2 保留为基础设施，B3/B5/B6 关闭为 superseded，B4/B7 保留为跨 Phase 能力 backlog。以后判断 F144 剩余工作，以 D5/D6/D7 + B4/B7 + A8/A12 为准 | 2026-04-14 |
+| KD-20 | **终态方向转变：废弃代码管线，走低保真 MD → imagegen 精美图** | operator在试用期工作总结 PPT 实战中确认：imagegen 原生图片质量远超任何代码渲染路径（pptxgenjs/HTML/SVG）。架构猫写低保真 MD（ASCII art 结构图 + 视觉指引引用风格 preset）→ imagegen 猫逐页出 raster PNG，流程简单、产出精美。旧 Phase A-D 代码管线的认知（分页规划 / 内容类型 / 密度原则 / 风格 token）全部沉淀为 skill ref 文档。Maine Coon review + opus-47 review 两轮放行 | 2026-05-29 |
 
 ## Review Gate
 
 - Phase A: 跨家族 Review（Maine Coon/GPT-5.4）
 - Phase B: Siamese视觉审核 + Maine Coon代码 Review
+
+## Close Gate Report（2026-06-18）
+
+> 守护猫：Ragdoll/Sonnet-4.6 | 关门时 HEAD：`aa38a35b3`
+
+### User Visibility Disclosure
+
+F144 是纯 skill feature，产物是 PNG 文件，不涉及 Hub UI surface。
+
+| Surface | 用户能做什么（原始 Why） | 关门时实际 | 备注 |
+|---------|------------------------|-----------|------|
+| PPT 生成 | 给主题+风格 → 自动产出专业 PPT | operator给方向 → 架构猫写低保真 MD → imagegen 猫逐页出 PNG → 交付 | ✅ |
+| 华为风格 | 华为信息密度级别 PPT | `ppt-style-huawei.md` 完整 preset，试用期 9 页 PPT 验收通过 | ✅ |
+| 原始 AC "可编辑 .pptx" | 文字可编辑、可搜索 .pptx | KD-20 operator明确接受"PNG 不可编辑"的 tradeoff | operator signed-off |
+
+### AC Matrix（汇总）
+
+| Phase | AC 范围 | 状态 | 证据 |
+|-------|---------|------|------|
+| Phase A Level 1 | AC-A1~A7, A9, A11 | `met` | PR #810/811/815，countBoxes()=52，Maine Coon复审放行 |
+| Phase A Level 2 | AC-A10 | `met` | PR #815，DiagramElement 3层嵌套 |
+| Phase A 门禁 | AC-A8, A12 | `cvo_signed_off` | KD-20（2026-05-29）operator实战拍板，imagegen 替代代码门禁；Maine Coon+opus-47 两轮 review 放行 |
+| Phase B 基础设施 | AC-B1, B2 | `met` | PR #823，146 tests，Maine Coon R1+R5 放行 |
+| Phase B 其余 | AC-B3~B7 | `cvo_signed_off` | KD-16/17/19/20 operator拍板；见 §Phase B Reconciliation |
+| Phase C | AC-C1~C6 | `met` | PR #929（156 tests）+ PR #1166（239 tests）；Maine Coon多轮放行 |
+| Phase D 主路径 | AC-D1~D5 | `met` | PR #949/955/1172/1189；密度 4.1% vs 对方 43.9% |
+| Phase D 终态 | AC-D6, D7 | `cvo_signed_off` | KD-20 operator实战确认 imagegen 质量，ppt-forge skill 一句话触发 |
+
+**unmet AC：0 条。无 follow-up 尾巴。全部 AC 实做通过或 operator 明确方向转变（KD-20）后 superseded。**

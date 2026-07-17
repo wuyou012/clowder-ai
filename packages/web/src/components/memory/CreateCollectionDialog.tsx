@@ -89,7 +89,7 @@ export function CreateCollectionDialog({ onClose, onCreated }: { onClose: () => 
 
   return (
     <div
-      className="fixed inset-0 bg-[var(--console-overlay-light)] flex items-center justify-center z-50"
+      className="fixed inset-0 bg-[var(--console-overlay-light)] backdrop-blur-sm flex items-center justify-center z-50"
       data-testid="create-collection-dialog"
     >
       <form
@@ -142,7 +142,7 @@ export function CreateCollectionDialog({ onClose, onCreated }: { onClose: () => 
               setRoot(e.target.value);
               setDryRun(null);
             }}
-            placeholder="/home/user/finance"
+            placeholder="/home/user/docs/finance"
             className="mt-1 block w-full appearance-none rounded-lg bg-[var(--console-field-bg)] px-2 py-1.5 text-xs text-cafe-secondary outline-none transition focus:ring-1 focus:ring-[var(--console-input-stroke)]"
           />
         </label>

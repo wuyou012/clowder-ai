@@ -14,7 +14,7 @@ import type { CommunityIssueItem, CreateCommunityIssueInput, UpdateCommunityIssu
 import { generateId } from '@cat-cafe/shared';
 import type { RedisClient } from '@cat-cafe/shared/utils';
 import type { ICommunityIssueStore } from '../ports/CommunityIssueStore.js';
-import { CommunityIssueKeys } from '../redis-keys/community-issue-keys.js';
+import { CommunityIssueKeys } from '../redis-keys/community/community-issue-keys.js';
 
 const DEFAULT_TTL = 0;
 
@@ -191,6 +191,8 @@ export class RedisCommunityIssueStore implements ICommunityIssueStore {
       ownerDecision: item.ownerDecision ?? '',
       relatedFeature: item.relatedFeature ?? '',
       guardianAssignment: item.guardianAssignment ? JSON.stringify(item.guardianAssignment) : '',
+      routeAcceptance: item.routeAcceptance ?? '',
+      routeSource: item.routeSource ?? '',
       lastActivityAt: item.lastActivity.at,
       lastActivityEvent: item.lastActivity.event,
       createdAt: item.createdAt,
@@ -215,6 +217,8 @@ export class RedisCommunityIssueStore implements ICommunityIssueStore {
       ownerDecision: raw.ownerDecision ? (raw.ownerDecision as CommunityIssueItem['ownerDecision']) : null,
       relatedFeature: raw.relatedFeature || null,
       guardianAssignment: raw.guardianAssignment ? JSON.parse(raw.guardianAssignment) : null,
+      routeAcceptance: raw.routeAcceptance ? (raw.routeAcceptance as CommunityIssueItem['routeAcceptance']) : undefined,
+      routeSource: raw.routeSource ? (raw.routeSource as CommunityIssueItem['routeSource']) : undefined,
       lastActivity: {
         at: Number(raw.lastActivityAt),
         event: raw.lastActivityEvent,

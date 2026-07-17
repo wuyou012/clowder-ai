@@ -30,6 +30,8 @@ const SERVER_ENTRYPOINTS: Record<string, string> = {
   'cat-cafe-limb': 'limb.js',
   'cat-cafe-memory': 'memory.js',
   'cat-cafe-signals': 'signals.js',
+  'cat-cafe-audio': 'audio.js',
+  'cat-cafe-finance': 'finance.js',
 };
 
 function mcpToolTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -183,7 +185,7 @@ function isErrorMcpResult(result: unknown): boolean {
 async function callMcpToolViaStdio(input: McpToolInput, ctx: ExecutorContext): Promise<unknown> {
   const resolved = resolveMcpEntrypoint(input.serverName, ctx.cwd);
   if (!resolved) {
-    throw new Error(`Unsupported or unavailable Cat Cafe MCP server: ${input.serverName}`);
+    throw new Error(`Unsupported or unavailable Clowder AI MCP server: ${input.serverName}`);
   }
   const timeoutMs = mcpToolTimeoutMs();
   const serverParams: StdioServerParameters = {

@@ -60,12 +60,19 @@ describe('F128 chain protocol injection', () => {
     const geminiIdx = orderLine.indexOf('gemini');
     const codexIdx = orderLine.indexOf('codex');
     assert.ok(kimiIdx >= 0 && geminiIdx > kimiIdx && codexIdx > geminiIdx, 'order must follow preferredCats');
-    assert.ok(orderLine.includes('回到主 Thread'), 'order must end at 主 Thread');
+    // F128 final-only hardening: chain order line must NOT include "→ 回到主 Thread"
+    // for final-only mode — it misleads intermediate cats into thinking reporting back
+    // is a chain step they should do. The final report instruction lives in the
+    // dedicated final step, not the order overview.
+    assert.ok(
+      !orderLine.includes('回到主 Thread'),
+      'final-only chain order must NOT include "→ 回到主 Thread" (misleads intermediate cats)',
+    );
 
     assert.ok(enqueued.includes('行首独立一行'), 'must instruct cats to use line-start @-mention for handoff');
     assert.ok(
       enqueued.includes('cat_cafe_cross_post_message'),
-      'must mention cross_post_message for final report-back',
+      'default final-only mentions cross_post for report-back',
     );
     assert.ok(
       enqueued.includes('ideate'),

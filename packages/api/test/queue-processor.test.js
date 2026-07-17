@@ -63,6 +63,16 @@ function enqueueEntry(queue, overrides = {}) {
   return result.entry;
 }
 
+async function waitFor(predicate, timeoutMs = 5000, intervalMs = 10) {
+  const start = Date.now();
+  // biome-ignore lint: polling helper
+  while (true) {
+    if (predicate()) return;
+    if (Date.now() - start > timeoutMs) throw new Error('timeout');
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 describe('QueueProcessor', () => {
   let deps;
   let processor;
@@ -85,6 +95,122 @@ describe('QueueProcessor', () => {
     // Entry should be marked processing then removed
     // Wait a tick for background execution
     await new Promise((r) => setTimeout(r, 50));
+  });
+
+  it('issue #845: done event with metadata.usage → invocation.update writes usageByCat', async () => {
+    // Reproduce the QueueProcessor execution path where a routed done event carries
+    // metadata.usage. Prior to the fix, executeEntry only wrote `status: succeeded`
+    // without `usageByCat`, leaving 159+ historical succeeded invocations with empty
+    // usage in production. The Phase A fix mirrors the messages.ts collectedUsage
+    // pattern so the queue path now persists per-cat token usage.
+    const customDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* () {
+          yield {
+            type: 'done',
+            catId: 'opus',
+            timestamp: Date.now(),
+            metadata: {
+              provider: 'claude',
+              model: 'claude-opus-4-7',
+              usage: { inputTokens: 1234, outputTokens: 567, cacheReadTokens: 100, costUsd: 0.05 },
+            },
+          };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const customProcessor = new QueueProcessor(customDeps);
+    const entry = enqueueEntry(customDeps.queue);
+    customDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    await customProcessor.onInvocationComplete('t1', 'opus', 'succeeded');
+    // Wait for background executeEntry to finish (it's spawned in setImmediate).
+    await new Promise((r) => setTimeout(r, 100));
+
+    const updateCalls = customDeps.invocationRecordStore.update.mock.calls;
+    const succeededCall = updateCalls.find((c) => c.arguments[1]?.status === 'succeeded');
+    assert.ok(succeededCall, 'expected an update(...,{status:succeeded,...}) call');
+    const payload = succeededCall.arguments[1];
+    assert.ok(payload.usageByCat, 'usageByCat must be present on the succeeded update');
+    assert.deepEqual(payload.usageByCat.opus, {
+      inputTokens: 1234,
+      outputTokens: 567,
+      cacheReadTokens: 100,
+      costUsd: 0.05,
+    });
+  });
+
+  it('issue #845: done event without metadata.usage → succeeded update omits usageByCat', async () => {
+    // Guard the opposite direction: when a provider does not emit usage on done,
+    // we must not write an empty usageByCat (would mask the diagnostic that the
+    // provider is dropping usage upstream).
+    const customDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* () {
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const customProcessor = new QueueProcessor(customDeps);
+    const entry = enqueueEntry(customDeps.queue);
+    customDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    await customProcessor.onInvocationComplete('t1', 'opus', 'succeeded');
+    await new Promise((r) => setTimeout(r, 100));
+
+    const updateCalls = customDeps.invocationRecordStore.update.mock.calls;
+    const succeededCall = updateCalls.find((c) => c.arguments[1]?.status === 'succeeded');
+    assert.ok(succeededCall, 'expected an update(...,{status:succeeded,...}) call');
+    assert.equal(
+      succeededCall.arguments[1].usageByCat,
+      undefined,
+      'usageByCat must remain undefined when provider emitted no usage',
+    );
+  });
+
+  it('governance-blocked queue invocation stays failed and never flips to succeeded', async () => {
+    const customDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* () {
+          yield {
+            type: 'system_info',
+            catId: 'opus',
+            content: JSON.stringify({
+              type: 'governance_blocked',
+              projectPath: '/home/user/projects/EchoAgent',
+              reasonKind: 'needs_bootstrap',
+              invocationId: 'inv-stub',
+            }),
+            timestamp: Date.now(),
+          };
+          yield {
+            type: 'done',
+            catId: 'opus',
+            timestamp: Date.now(),
+            errorCode: 'GOVERNANCE_BOOTSTRAP_REQUIRED',
+          };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const customProcessor = new QueueProcessor(customDeps);
+    const entry = enqueueEntry(customDeps.queue);
+    customDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    const result = await customProcessor.processNext('t1', 'u1');
+    assert.equal(result.started, true, 'queue entry should start executing');
+    await new Promise((r) => setTimeout(r, 100));
+
+    const updateCalls = customDeps.invocationRecordStore.update.mock.calls;
+    const failedCall = updateCalls.find(
+      (c) => c.arguments[1]?.status === 'failed' && c.arguments[1]?.error === 'GOVERNANCE_BOOTSTRAP_REQUIRED',
+    );
+    assert.ok(failedCall, 'queue path must persist governance-blocked invocations as failed');
+
+    const succeededCall = updateCalls.find((c) => c.arguments[1]?.status === 'succeeded');
+    assert.equal(succeededCall, undefined, 'governance-blocked queue invocations must not be finalized as succeeded');
   });
 
   it('succeeded + stale user queued entry → auto-dequeues and starts execution', async () => {
@@ -157,6 +283,43 @@ describe('QueueProcessor', () => {
     const pausedCall = deps.socketManager.emitToUser.mock.calls.find((c) => c.arguments[1] === 'queue_paused');
     assert.ok(pausedCall, 'should emit queue_paused for stale connector work');
     assert.equal(pausedCall.arguments[2].reason, 'canceled');
+  });
+
+  it('failed + unrelated auto-continuation → pauses failed cat queued work', async () => {
+    const queuedWork = enqueueEntry(deps.queue, { targetCats: ['opus'], source: 'user', content: 'opus queued work' });
+    deps.queue.backfillMessageId('t1', 'u1', queuedWork.id, 'msg-opus-work');
+    const codexCapsule = completeCapsuleForSeal(
+      buildCapsuleFromRouteState({
+        threadId: 't1',
+        catId: 'codex',
+        mode: 'independent',
+        a2aEnabled: true,
+      }),
+      {
+        invocationId: 'inv-codex-seal',
+        createdAt: Date.now(),
+        seal: { sessionId: 'sess-codex', sessionSeq: 1, reason: 'threshold' },
+      },
+    );
+    const continuation = await processor.enqueueContinuation({
+      threadId: 't1',
+      userId: 'u1',
+      catId: 'codex',
+      capsule: codexCapsule,
+    });
+    assert.equal(continuation.outcome, 'enqueued');
+
+    await processor.onInvocationComplete('t1', 'opus', 'failed');
+
+    assert.equal(processor.isPaused('t1', 'opus'), true, 'unrelated continuation must not bypass failed opus pause');
+    assert.equal(
+      deps.invocationTracker.startAll.mock.calls.length,
+      0,
+      'unrelated codex continuation should not be started by opus failure cleanup',
+    );
+    const pausedCall = deps.socketManager.emitToUser.mock.calls.find((c) => c.arguments[1] === 'queue_paused');
+    assert.ok(pausedCall, 'should emit queue_paused for failed opus work');
+    assert.equal(pausedCall.arguments[2].reason, 'failed');
   });
 
   it('failed + stale user queued entry → #595 auto-recovery starts dispatch after pause delay', async (t) => {
@@ -255,6 +418,40 @@ describe('QueueProcessor', () => {
     assert.ok(canceledUpdate, 'aborted queued invocation should be recorded as canceled');
   });
 
+  it('user cancel during queued execution cleans up streaming placeholders', async () => {
+    let controller;
+    const streamingHook = {
+      onStreamStart: mock.fn(async () => {}),
+      onStreamChunk: mock.fn(async () => {}),
+      onStreamEnd: mock.fn(async () => {}),
+      cleanupPlaceholders: mock.fn(async () => {}),
+    };
+    deps.invocationTracker.startAll.mock.mockImplementation(() => {
+      controller = new AbortController();
+      return controller;
+    });
+    deps.router.routeExecution = mock.fn(async function* () {
+      yield { type: 'text', catId: 'opus', content: 'before cancel', timestamp: Date.now() };
+      controller.abort('user_cancel');
+      yield { type: 'done', catId: 'opus', isFinal: true, timestamp: Date.now() };
+    });
+    const cancelProcessor = new QueueProcessor({ ...deps, streamingHook });
+
+    enqueueEntry(deps.queue);
+
+    const result = await cancelProcessor.processNext('t1', 'u1');
+    assert.equal(result.started, true);
+    await waitFor(() => streamingHook.cleanupPlaceholders.mock.calls.length >= 1);
+
+    assert.ok(streamingHook.onStreamStart.mock.calls.length >= 1, 'onStreamStart should be called');
+    assert.ok(streamingHook.onStreamEnd.mock.calls.length >= 1, 'onStreamEnd should be called on cancel');
+    assert.equal(
+      streamingHook.cleanupPlaceholders.mock.calls.length,
+      1,
+      'cancel path should clean up the streaming placeholder exactly once',
+    );
+  });
+
   it('excludes the current processing agent entry from A2A cross-path dedup', async () => {
     let dedupResult;
     deps.router.routeExecution = mock.fn(
@@ -326,6 +523,41 @@ describe('QueueProcessor', () => {
       targetCats: ['codex'],
       invocationId: 'inv-stub',
     });
+  });
+
+  it('queued execution broadcasts spawn_started before waiting for first CLI event', async () => {
+    let releaseFirstEvent;
+    deps.router.routeExecution = mock.fn(async function* () {
+      await new Promise((resolve) => {
+        releaseFirstEvent = resolve;
+      });
+      yield { type: 'done', catId: 'codex', isFinal: true, timestamp: Date.now() };
+    });
+
+    const entry = enqueueEntry(deps.queue, { targetCats: ['codex'], intent: 'execute' });
+    deps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    const result = await processor.processNext('t1', 'u1');
+    assert.equal(result.started, true);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const spawnCall = deps.socketManager.broadcastToRoom.mock.calls.find((c) => c.arguments[1] === 'spawn_started');
+    assert.ok(spawnCall, 'should broadcast spawn_started for queued execution before intent_mode');
+    assert.deepEqual(spawnCall.arguments[2], {
+      threadId: 't1',
+      targetCats: ['codex'],
+      invocationId: 'inv-stub',
+    });
+
+    const earlyIntentCall = deps.socketManager.broadcastToRoom.mock.calls.find((c) => c.arguments[1] === 'intent_mode');
+    assert.equal(earlyIntentCall, undefined, 'intent_mode must stay deferred until the first CLI event');
+
+    releaseFirstEvent();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const intentCall = deps.socketManager.broadcastToRoom.mock.calls.find((c) => c.arguments[1] === 'intent_mode');
+    assert.ok(intentCall, 'intent_mode should broadcast after the first CLI event');
   });
 
   it('emits queue_updated(action=completed) after entry is removed from queue', async () => {
@@ -456,8 +688,128 @@ describe('QueueProcessor', () => {
     );
   });
 
-  it('threshold seal capsule in queued execution enqueues and starts bounded same-cat continuation', async () => {
+  it('#815: does not consume delivered historical A2A entries outside the current invocation context', async () => {
+    const active = enqueueEntry(deps.queue, { targetCats: ['opus'], content: 'current user work' });
+    deps.queue.backfillMessageId('t1', 'u1', active.id, 'current-user-msg');
+    const historicalA2A = enqueueEntry(deps.queue, {
+      source: 'agent',
+      sourceCategory: 'a2a',
+      targetCats: ['opus'],
+      autoExecute: true,
+      content: 'historical handoff',
+    });
+    deps.queue.backfillMessageId('t1', 'u1', historicalA2A.id, 'historical-a2a-msg');
+    deps.messageStore.getById = mock.fn(async (id) => {
+      if (id === 'historical-a2a-msg') {
+        return { id, deliveryStatus: 'delivered', content: 'historical handoff', mentions: [] };
+      }
+      return null;
+    });
+
+    const processing = deps.queue.markProcessing('t1', 'u1');
+    assert.equal(processing.id, active.id);
+
+    const status = await processor.executeEntry(processing);
+
+    assert.equal(status, 'succeeded');
+    assert.ok(
+      deps.queue.list('t1', 'u1').some((entry) => entry.id === historicalA2A.id),
+      'historical delivered A2A trigger was not in this invocation context and must stay queued',
+    );
+  });
+
+  it('uses SessionContinuationCoordinator to prepare context and commit outcome', async () => {
+    const routeContents = [];
+    const coordinator = {
+      prepareInvocationContext: mock.fn(async ({ content }) => ({
+        content: `prepared:${content}`,
+        sessionPolicy: 'resume',
+      })),
+      commitInvocationOutcome: mock.fn(async () => {}),
+    };
+    const coordinatorDeps = stubDeps({
+      sessionContinuationCoordinator: coordinator,
+      router: {
+        routeExecution: mock.fn(async function* (_userId, content) {
+          routeContents.push(content);
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const coordinatorProcessor = new QueueProcessor(coordinatorDeps);
+    const active = enqueueEntry(coordinatorDeps.queue, { targetCats: ['opus'], content: 'work' });
+    coordinatorDeps.queue.backfillMessageId('t1', 'u1', active.id, 'current-user-msg');
+    const processing = coordinatorDeps.queue.markProcessing('t1', 'u1');
+
+    const status = await coordinatorProcessor.executeEntry(processing);
+
+    assert.equal(status, 'succeeded');
+    assert.equal(coordinator.prepareInvocationContext.mock.calls.length, 1);
+    assert.deepEqual(coordinator.prepareInvocationContext.mock.calls[0].arguments[0], {
+      threadId: 't1',
+      catId: 'opus',
+      userId: 'u1',
+      content: 'work',
+    });
+    assert.deepEqual(routeContents, ['prepared:work']);
+    assert.equal(coordinator.commitInvocationOutcome.mock.calls.length, 1);
+    assert.equal(coordinator.commitInvocationOutcome.mock.calls[0].arguments[0].finalStatus, 'succeeded');
+  });
+
+  it('persists produced continuation even when it was already auto-queued', async () => {
+    const capsule = completeCapsuleForSeal(
+      buildCapsuleFromRouteState({
+        threadId: 't1',
+        catId: 'opus',
+        mode: 'independent',
+        a2aEnabled: true,
+      }),
+      {
+        invocationId: 'inv-queued-produced',
+        createdAt: Date.now(),
+        seal: { sessionId: 'sess-queued-produced', sessionSeq: 1, reason: 'threshold' },
+      },
+    );
+    const coordinator = {
+      prepareInvocationContext: mock.fn(async ({ content }) => ({ content, sessionPolicy: 'resume' })),
+      commitInvocationOutcome: mock.fn(async () => {}),
+    };
+    const coordinatorDeps = stubDeps({
+      sessionContinuationCoordinator: coordinator,
+      router: {
+        routeExecution: mock.fn(async function* () {
+          yield {
+            type: 'system_info',
+            catId: 'opus',
+            content: JSON.stringify({ type: 'session_seal_requested', continuityCapsule: capsule }),
+            timestamp: Date.now(),
+          };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+    });
+    const coordinatorProcessor = new QueueProcessor(coordinatorDeps);
+    const active = enqueueEntry(coordinatorDeps.queue, { targetCats: ['opus'], content: 'work' });
+    coordinatorDeps.queue.backfillMessageId('t1', 'u1', active.id, 'current-user-msg');
+    const processing = coordinatorDeps.queue.markProcessing('t1', 'u1');
+
+    const status = await coordinatorProcessor.executeEntry(processing);
+
+    assert.equal(status, 'succeeded');
+    assert.equal(coordinator.commitInvocationOutcome.mock.calls.length, 1);
+    const commitInput = coordinator.commitInvocationOutcome.mock.calls[0].arguments[0];
+    assert.deepEqual(Array.from(commitInput.producedCapsules ?? []), [capsule]);
+    const queuedContinuation = coordinatorDeps.queue
+      .list('t1', 'u1')
+      .find((entry) => entry.sourceCategory === 'continuation');
+    assert.ok(queuedContinuation, 'continuation should still be auto-queued');
+  });
+
+  it('threshold seal capsule in queued execution starts bounded same-cat continuation without pending duplicate', async () => {
     let routeCalls = 0;
+    let pendingContinuation = null;
     const capsule = completeCapsuleForSeal(
       buildCapsuleFromRouteState({
         threadId: 't1',
@@ -491,6 +843,17 @@ describe('QueueProcessor', () => {
         }),
         ackCollectedCursors: mock.fn(async () => {}),
       },
+      threadStore: {
+        isRebornSession: mock.fn(async () => false),
+        setPendingContinuation: mock.fn(async (_threadId, _catId, _userId, entry) => {
+          pendingContinuation = entry;
+        }),
+        consumePendingContinuation: mock.fn(async () => {
+          const pending = pendingContinuation;
+          pendingContinuation = null;
+          return pending;
+        }),
+      },
     });
     const sealProcessor = new QueueProcessor(sealDeps);
     const entry = enqueueEntry(sealDeps.queue, { targetCats: ['opus'], content: 'initial work' });
@@ -503,7 +866,99 @@ describe('QueueProcessor', () => {
 
     assert.equal(routeCalls, 2, 'second route call should be the continuation');
     assert.match(routeContents[1], /previous session was sealed/i);
+    assert.equal(
+      (routeContents[1].match(/Continue the same structured work from the sealed session/g) ?? []).length,
+      1,
+      'queued continuation must not duplicate the bootstrap prompt',
+    );
+    assert.equal(
+      sealDeps.threadStore.setPendingContinuation.mock.calls.length,
+      1,
+      'auto-queued continuation must also be persisted as durable pending state',
+    );
+    assert.equal(
+      sealDeps.threadStore.consumePendingContinuation.mock.calls.length,
+      2,
+      'initial and continuation executions still check pending storage; the queued capsule supplies the continuation',
+    );
     assert.ok(sealDeps.invocationTracker.startAll.mock.calls.length >= 2);
+  });
+
+  it('threshold seal capsule survives lost in-memory continuation queue entry via pending storage', async () => {
+    let routeCalls = 0;
+    let pendingContinuation = null;
+    const routeContents = [];
+    const capsule = completeCapsuleForSeal(
+      buildCapsuleFromRouteState({
+        threadId: 't1',
+        catId: 'opus',
+        mode: 'independent',
+        a2aEnabled: true,
+      }),
+      {
+        invocationId: 'inv-lost-queue-entry',
+        createdAt: Date.now(),
+        seal: { sessionId: 'sess-lost-queue-entry', sessionSeq: 1, reason: 'threshold' },
+      },
+    );
+    const sealDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* (_userId, content) {
+          routeCalls++;
+          routeContents.push(content);
+          if (routeCalls === 1) {
+            yield {
+              type: 'system_info',
+              catId: 'opus',
+              content: JSON.stringify({ type: 'session_seal_requested', continuityCapsule: capsule }),
+              timestamp: Date.now(),
+            };
+          } else {
+            yield { type: 'text', catId: 'opus', content: 'resumed from durable pending', timestamp: Date.now() };
+          }
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+      threadStore: {
+        isRebornSession: mock.fn(async () => false),
+        setPendingContinuation: mock.fn(async (_threadId, _catId, _userId, entry) => {
+          pendingContinuation = entry;
+        }),
+        consumePendingContinuation: mock.fn(async () => {
+          const pending = pendingContinuation;
+          pendingContinuation = null;
+          return pending;
+        }),
+      },
+    });
+    const sealProcessor = new QueueProcessor(sealDeps);
+    const initial = enqueueEntry(sealDeps.queue, { targetCats: ['opus'], content: 'initial work' });
+    sealDeps.queue.backfillMessageId('t1', 'u1', initial.id, 'msg-1');
+    const initialProcessing = sealDeps.queue.markProcessing('t1', 'u1');
+
+    const initialStatus = await sealProcessor.executeEntry(initialProcessing);
+    assert.equal(initialStatus, 'succeeded');
+    assert.equal(sealDeps.threadStore.setPendingContinuation.mock.calls.length, 1);
+
+    const queuedContinuation = sealDeps.queue.list('t1', 'u1').find((entry) => entry.sourceCategory === 'continuation');
+    assert.ok(queuedContinuation, 'continuation wake-up entry should be queued before simulated process loss');
+    sealDeps.queue.remove('t1', 'u1', queuedContinuation.id);
+
+    const followup = enqueueEntry(sealDeps.queue, { targetCats: ['opus'], content: 'follow-up work' });
+    sealDeps.queue.backfillMessageId('t1', 'u1', followup.id, 'msg-2');
+    const followupProcessing = sealDeps.queue.markProcessing('t1', 'u1');
+
+    const followupStatus = await sealProcessor.executeEntry(followupProcessing);
+    assert.equal(followupStatus, 'succeeded');
+    assert.equal(routeCalls, 2);
+    assert.match(routeContents[1], /previous session was sealed/i);
+    assert.match(routeContents[1], /follow-up work/);
+    assert.equal(
+      (routeContents[1].match(/Continue the same structured work from the sealed session/g) ?? []).length,
+      1,
+      'durable pending restore must inject the continuation prompt exactly once',
+    );
   });
 
   it('threshold seal capsule in queued multi-cat execution resumes the capsule owner cat', async () => {
@@ -631,7 +1086,10 @@ describe('QueueProcessor', () => {
     );
   });
 
-  it('threshold seal capsule does not enqueue continuation when execution fails afterward', async () => {
+  it('threshold seal capsule in failed queued execution still starts continuation', async () => {
+    let routeCalls = 0;
+    const routeContents = [];
+    let pendingContinuation = null;
     const capsule = completeCapsuleForSeal(
       buildCapsuleFromRouteState({
         threadId: 't1',
@@ -647,16 +1105,33 @@ describe('QueueProcessor', () => {
     );
     const failDeps = stubDeps({
       router: {
-        routeExecution: mock.fn(async function* () {
-          yield {
-            type: 'system_info',
-            catId: 'opus',
-            content: JSON.stringify({ type: 'session_seal_requested', continuityCapsule: capsule }),
-            timestamp: Date.now(),
-          };
-          throw new Error('route failed after seal notice');
+        routeExecution: mock.fn(async function* (_userId, content) {
+          routeCalls++;
+          routeContents.push(content);
+          if (routeCalls === 1) {
+            yield {
+              type: 'system_info',
+              catId: 'opus',
+              content: JSON.stringify({ type: 'session_seal_requested', continuityCapsule: capsule }),
+              timestamp: Date.now(),
+            };
+            throw new Error('route failed after seal notice');
+          }
+          yield { type: 'text', catId: 'opus', content: 'continued', timestamp: Date.now() };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
         }),
         ackCollectedCursors: mock.fn(async () => {}),
+      },
+      threadStore: {
+        isRebornSession: mock.fn(async () => false),
+        setPendingContinuation: mock.fn(async (_threadId, _catId, _userId, entry) => {
+          pendingContinuation = entry;
+        }),
+        consumePendingContinuation: mock.fn(async () => {
+          const pending = pendingContinuation;
+          pendingContinuation = null;
+          return pending;
+        }),
       },
     });
     const failProcessor = new QueueProcessor(failDeps);
@@ -668,8 +1143,92 @@ describe('QueueProcessor', () => {
 
     await new Promise((r) => setTimeout(r, 150));
 
-    assert.equal(failDeps.queue.list('t1', 'u1').length, 0, 'failed execution must not leave continuation queued');
-    assert.equal(failDeps.router.routeExecution.mock.calls.length, 1, 'must not start continuation after failure');
+    assert.equal(routeCalls, 2, 'second route call should be the continuation even after failure');
+    assert.match(routeContents[1], /previous session was sealed/i);
+    assert.equal(
+      (routeContents[1].match(/Continue the same structured work from the sealed session/g) ?? []).length,
+      1,
+      'stored pending continuation and queued continuation must not duplicate the bootstrap prompt',
+    );
+  });
+
+  it('threshold seal capsule after user stop stores pending but does not auto-run continuation', async () => {
+    let routeCalls = 0;
+    let pendingContinuation = null;
+    const capsule = completeCapsuleForSeal(
+      buildCapsuleFromRouteState({
+        threadId: 't1',
+        catId: 'opus',
+        mode: 'independent',
+        a2aEnabled: true,
+      }),
+      {
+        invocationId: 'inv-first',
+        createdAt: Date.now(),
+        seal: { sessionId: 'sess-user-stop', sessionSeq: 1, reason: 'user-stop-after-seal' },
+      },
+    );
+    const stopDeps = stubDeps({
+      invocationTracker: {
+        start: mock.fn(() => new AbortController()),
+        startAll: mock.fn(() => new AbortController()),
+        complete: mock.fn(),
+        completeAll: mock.fn(),
+        completeSlot: mock.fn(),
+        has: mock.fn(() => false),
+        resolveFinalStatus: mock.fn(() => 'canceled_by_user'),
+      },
+      router: {
+        routeExecution: mock.fn(async function* () {
+          routeCalls++;
+          if (routeCalls === 1) {
+            yield {
+              type: 'system_info',
+              catId: 'opus',
+              content: JSON.stringify({ type: 'session_seal_requested', continuityCapsule: capsule }),
+              timestamp: Date.now(),
+            };
+          } else {
+            yield { type: 'text', catId: 'opus', content: 'unexpected auto continuation', timestamp: Date.now() };
+          }
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+      threadStore: {
+        isRebornSession: mock.fn(async () => false),
+        setPendingContinuation: mock.fn(async (_threadId, _catId, _userId, entry) => {
+          pendingContinuation = entry;
+        }),
+        consumePendingContinuation: mock.fn(async () => {
+          const pending = pendingContinuation;
+          pendingContinuation = null;
+          return pending;
+        }),
+      },
+    });
+    const stopProcessor = new QueueProcessor(stopDeps);
+    const entry = enqueueEntry(stopDeps.queue, { targetCats: ['opus'], content: 'initial work' });
+    stopDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    const result = await stopProcessor.processNext('t1', 'u1');
+    assert.equal(result.started, true);
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    assert.equal(routeCalls, 1, 'user stop must not immediately auto-run the produced continuation');
+    assert.equal(
+      stopDeps.threadStore.setPendingContinuation.mock.calls.length,
+      1,
+      'capsule remains available for resume',
+    );
+    assert.equal(
+      stopDeps.queue
+        .list('t1', 'u1')
+        .some((queued) => queued.sourceCategory === 'continuation' && queued.autoExecute === true),
+      false,
+      'user-stopped capsule must not be queued as autoExecute continuation',
+    );
   });
 
   it('enqueueContinuation pins seal work ahead of queued user work without dropping either', async () => {
@@ -688,7 +1247,7 @@ describe('QueueProcessor', () => {
       },
     );
 
-    const outcome = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+    const outcome = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
 
     assert.equal(outcome.outcome, 'enqueued');
     const queue = deps.queue.list('t1', 'u1');
@@ -718,7 +1277,7 @@ describe('QueueProcessor', () => {
         },
       );
 
-      const outcome = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+      const outcome = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
 
       assert.equal(outcome.outcome, 'enqueued');
       const queue = deps.queue.list('t1', 'u1');
@@ -752,7 +1311,7 @@ describe('QueueProcessor', () => {
       },
     );
 
-    const outcome = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+    const outcome = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
 
     assert.equal(outcome.outcome, 'skipped_existing_entry');
     assert.equal(processor.continuationWindows.has('t1:opus'), false);
@@ -786,19 +1345,19 @@ describe('QueueProcessor', () => {
       },
     );
 
-    const first = processor.enqueueContinuation({
+    const first = await processor.enqueueContinuation({
       threadId: 't1',
       userId: 'u1',
       catId: 'opus',
       capsule: firstCapsule,
     });
-    const duplicateFirst = processor.enqueueContinuation({
+    const duplicateFirst = await processor.enqueueContinuation({
       threadId: 't1',
       userId: 'u1',
       catId: 'opus',
       capsule: firstCapsule,
     });
-    const second = processor.enqueueContinuation({
+    const second = await processor.enqueueContinuation({
       threadId: 't1',
       userId: 'u1',
       catId: 'opus',
@@ -832,7 +1391,7 @@ describe('QueueProcessor', () => {
         },
       );
 
-      const outcome = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+      const outcome = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
 
       assert.equal(outcome.outcome, 'enqueued');
       const queue = deps.queue.list('t1', 'u1');
@@ -870,7 +1429,7 @@ describe('QueueProcessor', () => {
         },
       );
 
-      const outcome = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+      const outcome = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
 
       assert.equal(outcome.outcome, 'enqueued');
       assert.equal(outcome.entry?.targetCats[0], 'opus');
@@ -916,7 +1475,12 @@ describe('QueueProcessor', () => {
         },
       );
 
-      const outcome = dispatchProcessor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+      const outcome = await dispatchProcessor.enqueueContinuation({
+        threadId: 't1',
+        userId: 'u1',
+        catId: 'opus',
+        capsule,
+      });
       assert.equal(outcome.outcome, 'enqueued');
       assert.equal(dispatchDeps.queue.list('t1', 'u1').length, 2, 'continuation should wait behind agent work');
 
@@ -952,12 +1516,12 @@ describe('QueueProcessor', () => {
     );
 
     for (let i = 0; i < 5; i++) {
-      const outcome = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+      const outcome = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
       assert.equal(outcome.outcome, 'enqueued');
       deps.queue.clear('t1', 'u1');
     }
 
-    const sixth = processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
+    const sixth = await processor.enqueueContinuation({ threadId: 't1', userId: 'u1', catId: 'opus', capsule });
 
     assert.equal(sixth.outcome, 'skipped_rate_limited');
     assert.equal(deps.queue.list('t1', 'u1').length, 0);
@@ -1043,6 +1607,72 @@ describe('QueueProcessor', () => {
     const failedUpdate = updateCalls.find((c) => c.arguments[1]?.status === 'failed');
     assert.ok(failedUpdate, 'should mark InvocationRecord as failed');
     assert.ok(failedUpdate.arguments[1].error, 'should include error message');
+  });
+
+  it('#1145: ensureTerminalStatus backstop writes failed when catch-block update throws', async () => {
+    // Track record state realistically so get() returns current status.
+    // Update call sequence for route-boom:
+    //   1. { userMessageId } — backfill
+    //   2. { status: 'running' } — mark running
+    //   3. { status: 'failed', error } (no expectedStatus) — catch block → THROW
+    //   4. { status: 'failed', expectedStatus: 'running' } — ensureTerminalStatus CAS → succeed
+    let recordStatus = 'pending';
+    const failDeps = stubDeps({
+      router: {
+        routeExecution: mock.fn(async function* () {
+          throw new Error('route boom');
+        }),
+        ackCollectedCursors: mock.fn(async () => {}),
+      },
+      invocationRecordStore: {
+        create: mock.fn(async () => ({ outcome: 'created', invocationId: 'inv-backstop' })),
+        update: mock.fn(async (_id, patch) => {
+          // Catch-block write: status='failed' WITHOUT expectedStatus (no CAS guard).
+          // This is the exact write that, when it throws, leaves the record in 'running'
+          // and triggers the ensureTerminalStatus backstop.
+          if (patch?.status === 'failed' && !patch?.expectedStatus) {
+            throw new Error('Redis blip');
+          }
+          // All other updates (userMessageId, running, CAS backstop) succeed normally.
+          if (patch?.status) recordStatus = patch.status;
+        }),
+        get: mock.fn(async (id) => {
+          // Return actual tracked state — after catch-block throw, record stays 'running'.
+          if (id === 'inv-backstop') return { invocationId: id, status: recordStatus };
+          return null;
+        }),
+      },
+    });
+    const failProcessor = new QueueProcessor(failDeps);
+
+    const entry = enqueueEntry(failDeps.queue);
+    failDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+    await failProcessor.processNext('t1', 'u1');
+    await new Promise((r) => setTimeout(r, 200));
+
+    const updateCalls = failDeps.invocationRecordStore.update.mock.calls;
+
+    // Verify catch-block write (status=failed, no expectedStatus) was attempted and threw.
+    const catchBlockCall = updateCalls.find(
+      (c) => c.arguments[1]?.status === 'failed' && !c.arguments[1]?.expectedStatus,
+    );
+    assert.ok(catchBlockCall, 'catch-block should attempt status=failed without CAS guard');
+
+    // Verify CAS backstop from ensureTerminalStatus fired with expectedStatus=running.
+    const casUpdate = updateCalls.find(
+      (c) => c.arguments[1]?.expectedStatus === 'running' && c.arguments[1]?.status === 'failed',
+    );
+    assert.ok(casUpdate, 'ensureTerminalStatus CAS backstop should write failed with expectedStatus=running');
+
+    // get() should have been called by ensureTerminalStatus to read current state.
+    assert.ok(
+      failDeps.invocationRecordStore.get.mock.calls.length > 0,
+      'ensureTerminalStatus should read the record via get()',
+    );
+
+    // After the CAS backstop succeeds, record should be in terminal state 'failed'.
+    assert.strictEqual(recordStatus, 'failed', 'record should reach terminal failed via CAS backstop');
   });
 
   // ── F039 remaining bugfix: queue execution should include contentBlocks ──
@@ -1840,6 +2470,59 @@ describe('QueueProcessor', () => {
       );
     });
 
+    it('governance-blocked failure cleans up streaming placeholders', async () => {
+      const streamingHook = {
+        onStreamStart: mock.fn(async () => {}),
+        onStreamChunk: mock.fn(async () => {}),
+        onStreamEnd: mock.fn(async () => {}),
+        cleanupPlaceholders: mock.fn(async () => {}),
+      };
+
+      const hookDeps = stubDeps({
+        router: {
+          routeExecution: mock.fn(async function* () {
+            yield {
+              type: 'system_info',
+              catId: 'opus',
+              content: JSON.stringify({
+                type: 'governance_blocked',
+                projectPath: '/home/user/projects/EchoAgent',
+                reasonKind: 'needs_bootstrap',
+                invocationId: 'inv-stub',
+              }),
+              timestamp: Date.now(),
+            };
+            yield {
+              type: 'done',
+              catId: 'opus',
+              timestamp: Date.now(),
+              errorCode: 'GOVERNANCE_BOOTSTRAP_REQUIRED',
+            };
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+        streamingHook,
+      });
+      const hookProcessor = new QueueProcessor(hookDeps);
+
+      const entry = enqueueEntry(hookDeps.queue);
+      hookDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+      await hookProcessor.processNext('t1', 'u1');
+      await waitFor(() => streamingHook.cleanupPlaceholders.mock.calls.length >= 1);
+
+      assert.ok(streamingHook.onStreamStart.mock.calls.length >= 1, 'onStreamStart should be called');
+      assert.ok(
+        streamingHook.onStreamEnd.mock.calls.length >= 1,
+        'governance failure should finalize the streaming session',
+      );
+      assert.equal(
+        streamingHook.cleanupPlaceholders.mock.calls.length,
+        1,
+        'governance failure should clean up the streaming placeholder exactly once',
+      );
+    });
+
     it('outboundHook set via late-bind setOutboundHook: deliver is called', async () => {
       const lateDeps = stubDeps({
         router: {
@@ -1947,6 +2630,130 @@ describe('QueueProcessor', () => {
     });
   });
 
+  // ── R7: silent fallback late-success/failure cleanup ──
+
+  describe('silent fallback late-success cleanup (R7)', () => {
+    /** Poll until predicate returns true or timeout. */
+    async function waitFor(predicate, timeoutMs = 5000, intervalMs = 10) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        if (predicate()) return;
+        await new Promise((r) => setTimeout(r, intervalMs));
+      }
+      throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+    }
+
+    it('silent fallback timeout + late-success → cleanupPlaceholders called', async () => {
+      // Silent invocation (only done, no text) → deliver times out → deliver
+      // later succeeds → cleanupPlaceholders must be called on late-success.
+      let resolveDeliver;
+      const deliverGate = new Promise((r) => {
+        resolveDeliver = r;
+      });
+      const outboundHook = {
+        deliver: mock.fn(async () => {
+          await deliverGate;
+        }),
+      };
+      const streamingHook = {
+        onStreamStart: mock.fn(async () => {}),
+        onStreamChunk: mock.fn(async () => {}),
+        onStreamEnd: mock.fn(async () => {}),
+        cleanupPlaceholders: mock.fn(async () => {}),
+      };
+
+      // Silent router: only yields done, no text content.
+      // deliverTimeoutMs: 50 — short timeout so test doesn't wait 10s.
+      const silentDeps = stubDeps({
+        router: {
+          routeExecution: mock.fn(async function* () {
+            yield { type: 'done', catId: 'opus', content: '', timestamp: Date.now() };
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+        outboundHook,
+        streamingHook,
+        deliverTimeoutMs: 50,
+        threadMetaLookup: mock.fn(async () => undefined),
+      });
+      const silentProcessor = new QueueProcessor(silentDeps);
+
+      const entry = enqueueEntry(silentDeps.queue);
+      silentDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+      await silentProcessor.processNext('t1', 'u1');
+
+      // Timeout (50ms) has already fired; deliver still hanging on deliverGate
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(
+        streamingHook.cleanupPlaceholders.mock.calls.length,
+        0,
+        'cleanup must NOT run immediately after silent timeout',
+      );
+
+      // Late-success: deliver finally resolves
+      resolveDeliver();
+      await waitFor(() => streamingHook.cleanupPlaceholders.mock.calls.length >= 1);
+      assert.equal(
+        streamingHook.cleanupPlaceholders.mock.calls.length,
+        1,
+        'cleanup must run after silent late-success delivery (R7)',
+      );
+    });
+
+    it('silent fallback timeout + late-failure → cleanupPlaceholders NOT called', async () => {
+      // Silent invocation → deliver times out → deliver later rejects
+      // → cleanupPlaceholders must NOT be called (thinking card stays).
+      let rejectDeliver;
+      const deliverGate = new Promise((_, rej) => {
+        rejectDeliver = rej;
+      });
+      const outboundHook = {
+        deliver: mock.fn(async () => {
+          await deliverGate;
+        }),
+      };
+      const streamingHook = {
+        onStreamStart: mock.fn(async () => {}),
+        onStreamChunk: mock.fn(async () => {}),
+        onStreamEnd: mock.fn(async () => {}),
+        cleanupPlaceholders: mock.fn(async () => {}),
+      };
+
+      const silentDeps = stubDeps({
+        router: {
+          routeExecution: mock.fn(async function* () {
+            yield { type: 'done', catId: 'opus', content: '', timestamp: Date.now() };
+          }),
+          ackCollectedCursors: mock.fn(async () => {}),
+        },
+        outboundHook,
+        streamingHook,
+        deliverTimeoutMs: 50,
+        threadMetaLookup: mock.fn(async () => undefined),
+      });
+      const silentProcessor = new QueueProcessor(silentDeps);
+
+      const entry = enqueueEntry(silentDeps.queue);
+      silentDeps.queue.backfillMessageId('t1', 'u1', entry.id, 'msg-1');
+
+      await silentProcessor.processNext('t1', 'u1');
+
+      // Timeout (50ms) has already fired; deliver still hanging on deliverGate
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(streamingHook.cleanupPlaceholders.mock.calls.length, 0, 'cleanup must NOT run after silent timeout');
+
+      // Late-failure: deliver rejects
+      rejectDeliver(new Error('connector down'));
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(
+        streamingHook.cleanupPlaceholders.mock.calls.length,
+        0,
+        'cleanup must NOT run after silent hard failure (R7: preserve placeholder)',
+      );
+    });
+  });
+
   // ── F175 Task 5: user-message batching at dequeue ──
 
   describe('user-message batching (F175)', () => {
@@ -1991,7 +2798,10 @@ describe('QueueProcessor', () => {
 
       const calledContent = deps.router.routeExecution.mock.calls[0].arguments[1];
       assert.equal(calledContent, 'conn-a', 'connector entries should not be batched');
-      assert.equal(deps.queue.list('t1', 'u1').filter((e) => e.status === 'queued').length, 1);
+      // After auto-dequeue settles, conn-b should be processed separately (not batched with conn-a)
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(deps.router.routeExecution.mock.calls.length, 2, 'each connector entry processed separately');
+      assert.equal(deps.router.routeExecution.mock.calls[1].arguments[1], 'conn-b');
     });
 
     it('stops batch at different intent', async () => {
@@ -2075,11 +2885,10 @@ describe('QueueProcessor', () => {
 
       const calledContent = deps.router.routeExecution.mock.calls[0].arguments[1];
       assert.equal(calledContent, 'user-msg', 'connector entry must not be batched into user content');
-      assert.equal(
-        deps.queue.list('t1', 'u1').filter((e) => e.status === 'queued').length,
-        1,
-        'connector entry should remain queued',
-      );
+      // After auto-dequeue settles, connector entry should be processed separately
+      await new Promise((r) => setTimeout(r, 100));
+      assert.equal(deps.router.routeExecution.mock.calls.length, 2, 'connector entry processed separately');
+      assert.equal(deps.router.routeExecution.mock.calls[1].arguments[1], 'connector-msg');
     });
 
     it('P2: urgent entry for busy slot does not block lower-priority entry for free slot', async () => {
@@ -2311,5 +3120,34 @@ describe('QueueProcessor', () => {
       const remaining = deps.queue.list('t1', 'u1').filter((e) => e.status === 'queued');
       assert.equal(remaining.length, 0, 'queue should be empty after supersede lifecycle');
     });
+  });
+
+  describe('F222 P1: frustrationAutoIssueEligible source whitelist', () => {
+    for (const { source, expected, label } of [
+      { source: 'user', expected: true, label: 'user source → eligible=true' },
+      { source: 'agent', expected: false, label: 'agent source → eligible=false' },
+      { source: 'connector', expected: false, label: 'connector source → eligible=false' },
+    ]) {
+      it(label, async () => {
+        let capturedEligible;
+        deps.router.routeExecution = mock.fn(
+          async function* (_userId, _content, _threadId, _messageId, _targetCats, _intent, options) {
+            capturedEligible = options?.frustrationAutoIssueEligible;
+            yield { type: 'done', catId: 'opus', isFinal: true, timestamp: Date.now() };
+          },
+        );
+
+        enqueueEntry(deps.queue, { source });
+        const result = await processor.processNext('t1', 'u1');
+        assert.equal(result.started, true);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+
+        assert.equal(
+          capturedEligible,
+          expected,
+          `source:'${source}' must pass frustrationAutoIssueEligible=${expected}`,
+        );
+      });
+    }
   });
 });

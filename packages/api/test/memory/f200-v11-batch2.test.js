@@ -25,10 +25,12 @@ describe('DF-6: list_recent scope/kinds intersection nudge', () => {
   async function setupStore() {
     const store = new SqliteEvidenceStore(':memory:');
     await store.initialize();
+    // Dynamic relative dates — never hardcode absolute dates (time-bomb, see PR #2284 block)
+    const day = (daysAgo) => new Date(Date.now() - daysAgo * 86_400_000).toISOString().slice(0, 10);
     await store.upsert([
-      { anchor: 'doc/plan-a', kind: 'plan', status: 'active', title: 'Plan A', updatedAt: '2026-05-15' },
-      { anchor: 'doc/discussion-1', kind: 'discussion', status: 'active', title: 'Disc 1', updatedAt: '2026-05-14' },
-      { anchor: 'doc/thread-1', kind: 'thread', status: 'active', title: 'Thread 1', updatedAt: '2026-05-13' },
+      { anchor: 'doc/plan-a', kind: 'plan', status: 'active', title: 'Plan A', updatedAt: day(1) },
+      { anchor: 'doc/discussion-1', kind: 'discussion', status: 'active', title: 'Disc 1', updatedAt: day(2) },
+      { anchor: 'doc/thread-1', kind: 'thread', status: 'active', title: 'Thread 1', updatedAt: day(3) },
     ]);
     const catalog = {
       list: () => [{ id: 'project:test', sensitivity: 'internal', kind: 'project' }],
@@ -882,10 +884,11 @@ describe('Cloud-P1: listTrajectories sorts across stores by updatedAt DESC', () 
 
   it('returns trajectories from multiple stores sorted by updatedAt descending', async () => {
     // Store A has an OLD trajectory, Store B has a NEW trajectory
+    const oldTrajectoryAt = Date.now() - 2 * 24 * 60 * 60 * 1000;
+    const newTrajectoryAt = Date.now() - 24 * 60 * 60 * 1000;
     const storeA = new SqliteEvidenceStore(':memory:');
     await storeA.initialize();
     const dbA = storeA.getDb();
-    // Old: 2026-05-10
     dbA
       .prepare(`INSERT INTO task_trajectories
       (trajectory_id, invocation_id, thread_id, cat_id, task_context,
@@ -906,14 +909,13 @@ describe('Cloud-P1: listTrajectories sorts across stores by updatedAt DESC', () 
         '[]',
         0,
         0,
-        new Date('2026-05-10T00:00:00Z').getTime(),
-        new Date('2026-05-10T00:00:00Z').getTime(),
+        oldTrajectoryAt,
+        oldTrajectoryAt,
       );
 
     const storeB = new SqliteEvidenceStore(':memory:');
     await storeB.initialize();
     const dbB = storeB.getDb();
-    // New: 2026-05-15
     dbB
       .prepare(`INSERT INTO task_trajectories
       (trajectory_id, invocation_id, thread_id, cat_id, task_context,
@@ -934,8 +936,8 @@ describe('Cloud-P1: listTrajectories sorts across stores by updatedAt DESC', () 
         '[]',
         0,
         0,
-        new Date('2026-05-15T00:00:00Z').getTime(),
-        new Date('2026-05-15T00:00:00Z').getTime(),
+        newTrajectoryAt,
+        newTrajectoryAt,
       );
 
     const catalog = {

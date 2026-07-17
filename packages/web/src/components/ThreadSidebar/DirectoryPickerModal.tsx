@@ -46,13 +46,18 @@ export function DirectoryPickerModal({
   const [pathError, setPathError] = useState<string | null>(null);
   const { getCatById } = useCatData();
   const modalRef = useRef<HTMLDivElement>(null);
+  const browserInitialPathRef = useRef<string | undefined>(undefined);
   const ime = useIMEGuard();
 
   // F068-R7: Two-step flow — select project first, then confirm
   // 'lobby' sentinel means user explicitly chose "大厅 (无项目)"
   const [selectedPath, setSelectedPath] = useState<string | 'lobby' | null>(null);
+  // Null can mean "no concrete directory is selectable right now" (virtual root),
+  // so async default initializers need a separate guard for explicit selection.
+  const selectionTouchedRef = useRef(false);
   // P2 fix: clear stale pathError whenever user selects a project
   const handleSelectPath = useCallback((path: string | 'lobby') => {
+    selectionTouchedRef.current = true;
     setPathError(null);
     setSelectedPath(path);
   }, []);
@@ -113,13 +118,18 @@ export function DirectoryPickerModal({
   }, [selectedPath, selectWithOptions]);
 
   // F113: Handle directory selection from the web-based browser
-  const handleBrowserSelect = useCallback(
+  const handleBrowserCurrentPathChange = useCallback(
     (path: string) => {
       handleSelectPath(path);
-      setShowBrowser(false);
     },
     [handleSelectPath],
   );
+
+  const handleBrowserVirtualLocationChange = useCallback(() => {
+    selectionTouchedRef.current = true;
+    setPathError(null);
+    setSelectedPath(null);
+  }, []);
 
   // F068: Submit path from text input — validate via browse endpoint before accepting
   const handlePathSubmit = useCallback(async () => {
@@ -151,13 +161,17 @@ export function DirectoryPickerModal({
         if (res.ok) {
           const data = await res.json();
           setCwdPath(data.path);
-          setSelectedPath((prev) => prev ?? data.path);
+          if (!selectionTouchedRef.current) {
+            setSelectedPath(data.path);
+          }
           return;
         }
       } catch {
         // cwd unavailable — fall through to existingProjects fallback
       }
-      setSelectedPath((prev) => prev ?? (existingProjects.length > 0 ? existingProjects[0] : null));
+      if (!selectionTouchedRef.current) {
+        setSelectedPath(existingProjects.length > 0 ? existingProjects[0] : null);
+      }
     })();
   }, [existingProjects]);
 
@@ -172,12 +186,28 @@ export function DirectoryPickerModal({
 
   const [catsExpanded, setCatsExpanded] = useState(false);
   const catSummary = selectedCats.length > 0 ? `已选 ${selectedCats.length} 只猫` : '';
+  const getBrowserInitialPath = useCallback(
+    () => (selectedPath && selectedPath !== 'lobby' ? selectedPath : (cwdPath ?? undefined)),
+    [cwdPath, selectedPath],
+  );
+
+  const setBrowserOpen = useCallback(
+    (open: boolean) => {
+      if (open) {
+        browserInitialPathRef.current = getBrowserInitialPath();
+      } else {
+        browserInitialPathRef.current = undefined;
+      }
+      setShowBrowser(open);
+    },
+    [getBrowserInitialPath],
+  );
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: modal backdrop click-to-close
     <div
       role="presentation"
-      className="fixed inset-0 bg-[var(--console-overlay-backdrop)] flex items-center justify-center z-50"
+      className="fixed inset-0 bg-[var(--console-overlay-backdrop)] backdrop-blur-sm flex items-center justify-center z-50"
       onClick={(e) => {
         if (modalRef.current && !modalRef.current.contains(e.target as Node)) onCancel();
       }}
@@ -389,10 +419,11 @@ export function DirectoryPickerModal({
         {showBrowser && (
           <div className="border-t border-cafe-subtle flex-1 min-h-0 flex flex-col overflow-hidden">
             <DirectoryBrowser
-              initialPath={cwdPath ?? undefined}
+              initialPath={browserInitialPathRef.current}
               activeProjectPath={cwdPath ?? undefined}
-              onSelect={handleBrowserSelect}
-              onCancel={() => setShowBrowser(false)}
+              onCurrentPathChange={handleBrowserCurrentPathChange}
+              onVirtualLocationChange={handleBrowserVirtualLocationChange}
+              onCancel={() => setBrowserOpen(false)}
             />
           </div>
         )}
@@ -402,7 +433,7 @@ export function DirectoryPickerModal({
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={() => setShowBrowser((v) => !v)}
+              onClick={() => setBrowserOpen(!showBrowser)}
               className={`flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium transition-colors ${
                 showBrowser
                   ? 'bg-cafe-accent text-[var(--cafe-surface)]'

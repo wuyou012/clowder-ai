@@ -76,7 +76,12 @@ function listenOnLoopback() {
   });
 }
 
-function createPnpmStub(projectDir) {
+function createPnpmStub(projectDir, options = {}) {
+  const {
+    failFrozenInstall = false,
+    frozenInstallFailure = 'ERR_PNPM_OUTDATED_LOCKFILE simulated frozen lockfile failure',
+    frozenInstallExitCode = 1,
+  } = options;
   const binDir = join(projectDir, 'bin');
   const logFile = join(projectDir, 'pnpm.log');
   mkdirSync(binDir, { recursive: true });
@@ -92,6 +97,20 @@ if [ "\${1:-}" = "-C" ]; then
   shift 2
 fi
 if [ "\${1:-}" = "install" ] && [ "\${2:-}" = "--frozen-lockfile" ]; then
+  if [ "${failFrozenInstall ? '1' : '0'}" = "1" ]; then
+    printf '%s\\n' "${frozenInstallFailure}" >&2
+    exit ${frozenInstallExitCode}
+  fi
+  mkdir -p "$target_dir/node_modules/.pnpm"
+  mkdir -p "$target_dir/packages/web/node_modules/next"
+  : > "$target_dir/packages/web/node_modules/next/package.json"
+  mkdir -p "$target_dir/packages/api/node_modules/tsx"
+  : > "$target_dir/packages/api/node_modules/tsx/package.json"
+  mkdir -p "$target_dir/packages/mcp-server/node_modules/typescript"
+  : > "$target_dir/packages/mcp-server/node_modules/typescript/package.json"
+  exit 0
+fi
+if [ "\${1:-}" = "install" ] && [ "\${2:-}" = "--no-frozen-lockfile" ]; then
   mkdir -p "$target_dir/node_modules/.pnpm"
   mkdir -p "$target_dir/packages/web/node_modules/next"
   : > "$target_dir/packages/web/node_modules/next/package.json"
@@ -104,6 +123,10 @@ fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "build" ]; then
   case "$target_dir" in
     */packages/shared)
+      mkdir -p "$target_dir/dist"
+      : > "$target_dir/dist/index.js"
+      ;;
+    */packages/api)
       mkdir -p "$target_dir/dist"
       : > "$target_dir/dist/index.js"
       ;;
@@ -125,8 +148,8 @@ exit 0
   return { binDir, logFile };
 }
 
-function withStubbedPnpmEnv(projectDir) {
-  const { binDir, logFile } = createPnpmStub(projectDir);
+function withStubbedPnpmEnv(projectDir, options = {}) {
+  const { binDir, logFile } = createPnpmStub(projectDir, options);
   return {
     ...process.env,
     CAT_CAFE_RUNTIME_RESTART_OK: '1',
@@ -143,6 +166,17 @@ function seedRuntimeDependencyMarkers(projectDir) {
   writeFileSync(join(projectDir, 'packages', 'api', 'node_modules', 'tsx', 'package.json'), '{}');
   mkdirSync(join(projectDir, 'packages', 'mcp-server', 'node_modules', 'typescript'), { recursive: true });
   writeFileSync(join(projectDir, 'packages', 'mcp-server', 'node_modules', 'typescript', 'package.json'), '{}');
+}
+
+function seedRuntimeBuildArtifacts(projectDir) {
+  mkdirSync(join(projectDir, 'packages', 'shared', 'dist'), { recursive: true });
+  writeFileSync(join(projectDir, 'packages', 'shared', 'dist', 'index.js'), '');
+  mkdirSync(join(projectDir, 'packages', 'api', 'dist'), { recursive: true });
+  writeFileSync(join(projectDir, 'packages', 'api', 'dist', 'index.js'), '');
+  mkdirSync(join(projectDir, 'packages', 'mcp-server', 'dist'), { recursive: true });
+  writeFileSync(join(projectDir, 'packages', 'mcp-server', 'dist', 'index.js'), '');
+  mkdirSync(join(projectDir, 'packages', 'web', '.next'), { recursive: true });
+  writeFileSync(join(projectDir, 'packages', 'web', '.next', 'BUILD_ID'), 'stub-build-id\n');
 }
 
 async function waitForLocalPort(port, attempts = 20) {
@@ -282,6 +316,7 @@ printf 'ok'`,
   it('starts in-place when project is not a git repository', () => {
     const projectDir = createTempProject('runtime-non-git');
     seedRuntimeDependencyMarkers(projectDir);
+    seedRuntimeBuildArtifacts(projectDir);
 
     const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
       cwd: projectDir,
@@ -297,6 +332,7 @@ printf 'ok'`,
   it('ignores sibling runtime .env when starting in-place outside git', async () => {
     const projectDir = createTempProject('runtime-non-git-sibling-runtime');
     seedRuntimeDependencyMarkers(projectDir);
+    seedRuntimeBuildArtifacts(projectDir);
 
     const siblingRuntimeDir = join(projectDir, '..', 'cat-cafe-runtime');
     mkdirSync(siblingRuntimeDir, { recursive: true });
@@ -406,6 +442,130 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     assert.match(pnpmLog, /install --frozen-lockfile/);
   });
 
+  it('falls back to no-frozen-lockfile when runtime frozen install cannot resolve platform deps', () => {
+    const projectDir = createTempProject('runtime-self-heal-install-fallback');
+    const env = withStubbedPnpmEnv(projectDir, { failFrozenInstall: true });
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env,
+    });
+
+    assert.equal(result.status, 0, `exit=${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /detected missing runtime prerequisites/);
+    assert.match(result.stdout, /retrying pnpm install --no-frozen-lockfile/);
+    assert.match(result.stdout, /STARTED:/);
+    const pnpmLog = readFileSync(env.RUNTIME_TEST_PNPM_LOG, 'utf8').trim().split('\n');
+    // After the no-frozen-lockfile install succeeds, the ADR-039 build invariant
+    // rebuilds the missing dist artifacts (shared/api/mcp-server/web) before start.
+    assert.deepEqual(pnpmLog, [
+      '-C ' + projectDir + ' install --frozen-lockfile',
+      '-C ' + projectDir + ' install --no-frozen-lockfile',
+      '-C ' + projectDir + '/packages/shared run build',
+      '-C ' + projectDir + '/packages/api run build',
+      '-C ' + projectDir + '/packages/mcp-server run build',
+      '-C ' + projectDir + '/packages/web run build',
+    ]);
+  });
+
+  it('does not retry without frozen lockfile for generic runtime install failures', () => {
+    const projectDir = createTempProject('runtime-self-heal-install-generic-failure');
+    const env = withStubbedPnpmEnv(projectDir, {
+      failFrozenInstall: true,
+      frozenInstallFailure: 'simulated network failure',
+    });
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env,
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /retrying pnpm install --no-frozen-lockfile/);
+    const pnpmLog = readFileSync(env.RUNTIME_TEST_PNPM_LOG, 'utf8').trim().split('\n');
+    assert.deepEqual(pnpmLog, ['-C ' + projectDir + ' install --frozen-lockfile']);
+  });
+
+  it('additional pnpm 9 lockfile-class failure phrases trigger no-frozen-lockfile retry', () => {
+    // Align with scripts/install.ps1::Test-LockfileMismatchFailure — Windows
+    // installer already treats these phrases as retryable; the bash runtime
+    // classifier must agree so cross-platform self-heal stays symmetric.
+    // codex review (R2 P2) flagged the BREAKING_CHANGE + "incompatible" gaps;
+    // AUDIT (§16e failure-mode sweep) extended the fix to the remaining two
+    // patterns that the PowerShell helper already classifies as lockfile drift.
+    const additionalPatterns = [
+      {
+        slug: 'breaking-change',
+        failure: 'ERR_PNPM_LOCKFILE_BREAKING_CHANGE: lockfile is at an incompatible version',
+      },
+      {
+        slug: 'incompatible',
+        failure: 'pnpm error: lockfile is incompatible with this version of pnpm',
+      },
+      {
+        slug: 'cannot-install-frozen',
+        failure: 'Cannot install with "frozen-lockfile" because lockfile is out of sync',
+      },
+      {
+        slug: 'cannot-proceed-without-lockfile',
+        failure: 'Cannot proceed with audit without the lockfile present',
+      },
+    ];
+
+    for (const { slug, failure } of additionalPatterns) {
+      const projectDir = createTempProject(`runtime-self-heal-install-${slug}`);
+      const env = withStubbedPnpmEnv(projectDir, {
+        failFrozenInstall: true,
+        frozenInstallFailure: failure,
+      });
+
+      const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
+        cwd: projectDir,
+        encoding: 'utf8',
+        env,
+      });
+
+      assert.equal(
+        result.status,
+        0,
+        `[${slug}] expected retry to succeed; exit=${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      );
+      assert.match(
+        result.stdout,
+        /retrying pnpm install --no-frozen-lockfile/,
+        `[${slug}] expected classified retry to fire on "${failure}"`,
+      );
+    }
+  });
+
+  it('preserves original frozen install exit code on non-retry-able generic failure', () => {
+    // Regression guard for @gpt52 R1 P1: `if pnpm | tee; then ... else return 1`
+    // collapsed every non-retry frozen-install failure to exit code 1, hiding the
+    // caller-visible status from `pnpm install --frozen-lockfile` (network/OOM/
+    // interrupt would all look identical to a plain failure). install_runtime_dependencies
+    // must surface the original pnpm exit code via ${PIPESTATUS[0]}.
+    const projectDir = createTempProject('runtime-self-heal-install-preserves-exit-code');
+    const env = withStubbedPnpmEnv(projectDir, {
+      failFrozenInstall: true,
+      frozenInstallFailure: 'simulated network failure',
+      frozenInstallExitCode: 42,
+    });
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env,
+    });
+
+    assert.equal(
+      result.status,
+      42,
+      `expected stub pnpm exit 42 to reach the caller; got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+  });
+
   it('fails with guidance when auto-install is disabled and prerequisites are missing', () => {
     const projectDir = createTempProject('runtime-self-heal-no-install');
     const env = withStubbedPnpmEnv(projectDir);
@@ -442,13 +602,15 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
     );
 
     assert.equal(result.status, 0);
-    assert.match(result.stdout, /quick start: shared dist stale\/missing/);
-    assert.match(result.stdout, /quick start: MCP server dist stale\/missing/);
-    assert.match(result.stdout, /quick start: web production build stale\/missing/);
+    assert.match(result.stdout, /runtime dist: shared stale\/missing/);
+    assert.match(result.stdout, /runtime dist: api stale\/missing/);
+    assert.match(result.stdout, /runtime dist: MCP server stale\/missing/);
+    assert.match(result.stdout, /runtime dist: web production build stale\/missing/);
     assert.match(result.stdout, /STARTED:/);
 
     const pnpmLog = readFileSync(env.RUNTIME_TEST_PNPM_LOG, 'utf8');
     assert.match(pnpmLog, /-C .*packages\/shared run build/);
+    assert.match(pnpmLog, /-C .*packages\/api run build/);
     assert.match(pnpmLog, /-C .*packages\/mcp-server run build/);
     assert.match(pnpmLog, /-C .*packages\/web run build/);
   });
@@ -456,6 +618,7 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
   it('starts in-place when .git is a dangling pointer file', () => {
     const projectDir = createTempProject('runtime-dangling-git');
     seedRuntimeDependencyMarkers(projectDir);
+    seedRuntimeBuildArtifacts(projectDir);
     writeFileSync(join(projectDir, '.git'), 'gitdir: /tmp/does-not-exist-anymore\n', 'utf8');
 
     const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-sync'], {
@@ -638,5 +801,148 @@ server.listen(3010,'127.0.0.1',()=>setInterval(()=>{},1000));`,
       `should reject but exited 0\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
     );
     assert.match(result.stderr, /runtime worktree has local changes/);
+  });
+
+  it('reports the actual untracked files blocking an ff-only runtime sync', () => {
+    const projectDir = createTempProject('runtime-untracked-blocker');
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'runtime-untracked-blocker-worktree-'));
+    const remoteDir = mkdtempSync(join(tmpdir(), 'runtime-untracked-blocker-remote-'));
+    tempDirs.push(runtimeDir, remoteDir);
+
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: projectDir, stdio: 'ignore' });
+
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'add', runtimeDir, '-b', 'runtime/main-sync', 'origin/main'], {
+      cwd: projectDir,
+      stdio: 'ignore',
+    });
+    const normalizedRuntimeDir = realpathSync(runtimeDir);
+
+    mkdirSync(join(normalizedRuntimeDir, 'assets', 'avatars'), { recursive: true });
+    writeFileSync(join(normalizedRuntimeDir, 'assets', 'avatars', 'claude-fable-5.png'), 'same-bytes\n', 'utf8');
+
+    mkdirSync(join(projectDir, 'assets', 'avatars'), { recursive: true });
+    writeFileSync(join(projectDir, 'assets', 'avatars', 'claude-fable-5.png'), 'same-bytes\n', 'utf8');
+    execFileSync('git', ['add', 'assets/avatars/claude-fable-5.png'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'add fable avatar'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-install'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CAT_CAFE_RUNTIME_DIR: normalizedRuntimeDir,
+        API_SERVER_PORT: '19899',
+      },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /Untracked files blocking sync:/);
+    assert.match(result.stdout, /assets\/avatars\/claude-fable-5\.png/);
+    assert.match(result.stdout, /same bytes as incoming/);
+    assert.doesNotMatch(result.stdout, /clean -fd \.claude\/skills/);
+  });
+
+  it('reports untracked directories blocking an incoming tracked file', () => {
+    const projectDir = createTempProject('runtime-untracked-dir-blocker');
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'runtime-untracked-dir-blocker-worktree-'));
+    const remoteDir = mkdtempSync(join(tmpdir(), 'runtime-untracked-dir-blocker-remote-'));
+    tempDirs.push(runtimeDir, remoteDir);
+
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: projectDir, stdio: 'ignore' });
+
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'add', runtimeDir, '-b', 'runtime/main-sync', 'origin/main'], {
+      cwd: projectDir,
+      stdio: 'ignore',
+    });
+    const normalizedRuntimeDir = realpathSync(runtimeDir);
+
+    mkdirSync(join(normalizedRuntimeDir, 'incoming-dir'), { recursive: true });
+    writeFileSync(join(normalizedRuntimeDir, 'incoming-dir', 'local.txt'), 'local\n', 'utf8');
+
+    writeFileSync(join(projectDir, 'incoming-dir'), 'tracked file\n', 'utf8');
+    execFileSync('git', ['add', 'incoming-dir'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'replace directory with file'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-install'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CAT_CAFE_RUNTIME_DIR: normalizedRuntimeDir,
+        API_SERVER_PORT: '19899',
+      },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /Untracked files blocking sync:/);
+    assert.match(result.stdout, /incoming-dir/);
+    assert.doesNotMatch(result.stdout, /No untracked files matching incoming tracked files were found/);
+  });
+
+  it('reports local ahead/diverged commits blocking an ff-only runtime sync', () => {
+    const projectDir = createTempProject('runtime-diverged-blocker');
+    const runtimeDir = mkdtempSync(join(tmpdir(), 'runtime-diverged-blocker-worktree-'));
+    const remoteDir = mkdtempSync(join(tmpdir(), 'runtime-diverged-blocker-remote-'));
+    tempDirs.push(runtimeDir, remoteDir);
+
+    execFileSync('git', ['init', '-b', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['add', '.'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: projectDir, stdio: 'ignore' });
+
+    execFileSync('git', ['init', '--bare', remoteDir], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'add', 'origin', remoteDir], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'add', runtimeDir, '-b', 'runtime/main-sync', 'origin/main'], {
+      cwd: projectDir,
+      stdio: 'ignore',
+    });
+    const normalizedRuntimeDir = realpathSync(runtimeDir);
+
+    // Local commit on the runtime branch → ahead of origin/main (simulates auto-materialized lesson commit)
+    writeFileSync(join(normalizedRuntimeDir, 'local-materialized.md'), 'local\n', 'utf8');
+    execFileSync('git', ['add', 'local-materialized.md'], { cwd: normalizedRuntimeDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'materialize: lesson-local'], { cwd: normalizedRuntimeDir, stdio: 'ignore' });
+
+    // origin/main advances → behind; ahead + behind = diverged, ff-only impossible
+    writeFileSync(join(projectDir, 'REMOTE_ADVANCE.md'), 'remote\n', 'utf8');
+    execFileSync('git', ['add', 'REMOTE_ADVANCE.md'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'remote advance'], { cwd: projectDir, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: projectDir, stdio: 'ignore' });
+
+    const result = spawnSync('bash', [join(projectDir, 'scripts', 'runtime-worktree.sh'), 'start', '--no-install'], {
+      cwd: projectDir,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        CAT_CAFE_RUNTIME_DIR: normalizedRuntimeDir,
+        API_SERVER_PORT: '19899',
+      },
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /ahead of origin\/main by 1 commit/);
+    assert.match(result.stdout, /reset --hard origin\/main/);
+    assert.doesNotMatch(result.stdout, /No untracked files matching incoming tracked files were found/);
   });
 });

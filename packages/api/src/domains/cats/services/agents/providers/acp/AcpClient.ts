@@ -12,6 +12,7 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
 import { dirname, isAbsolute } from 'node:path';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 
@@ -56,6 +57,30 @@ export interface AcpClientConfig {
   spawnFn?: typeof nodeSpawn;
   /** Custom permission request handler. Defaults to auto-approve (allow_once). */
   permissionHandler?: AcpPermissionHandler;
+}
+
+export interface AcpSpawnLogFields {
+  command: string;
+  argCount: number;
+  cwd: string;
+  pid?: number;
+  envKeyCount: number;
+}
+
+export function buildAcpSpawnLogFields(input: {
+  command: string;
+  args: readonly string[];
+  cwd: string;
+  pid?: number;
+  env?: Record<string, string>;
+}): AcpSpawnLogFields {
+  return {
+    command: input.command,
+    argCount: input.args.length,
+    cwd: input.cwd,
+    ...(input.pid !== undefined ? { pid: input.pid } : {}),
+    envKeyCount: Object.keys(input.env ?? {}).length,
+  };
 }
 
 // ─── Errors ──────────────��─────────────────────────────────────
@@ -134,6 +159,16 @@ export class AcpClient {
       const binDir = dirname(command);
       childEnv.PATH = childEnv.PATH ? `${binDir}:${childEnv.PATH}` : binDir;
     }
+    // #712: Re-create bootstrap CWD if it was cleaned up by OS temp-dir rotation
+    // or by the ACP agent process on exit. Node.js spawn() returns ENOENT when the
+    // cwd doesn't exist, even though the command binary itself exists — the error
+    // message misleadingly points at the command path.
+    // Skip when a test spawnFn is injected — the directory may be a fake path
+    // (e.g. '/my/project') that can't be created on CI runners.
+    if (!this.config.spawnFn) {
+      mkdirSync(this.config.cwd, { recursive: true, mode: 0o700 });
+    }
+
     const spawnOpts: SpawnOptions & { stdio: ['pipe', 'pipe', 'pipe'] } = {
       cwd: this.config.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -183,26 +218,121 @@ export class AcpClient {
 
     this.startReading();
 
+    log.info(
+      buildAcpSpawnLogFields({ command, args, cwd: this.config.cwd, pid: this.child.pid, env: this.config.env }),
+      'ACP initialize: process spawned, sending initialize request',
+    );
     const resp = await this.sendRequest(ACP_METHODS.initialize, { protocolVersion: 1 });
     this.initResult = resp.result as unknown as AcpInitializeResult;
+    log.info(
+      {
+        agentInfo: this.initResult.agentInfo,
+        mcpCapabilities: this.initResult.agentCapabilities?.mcpCapabilities,
+        loadSession: this.initResult.agentCapabilities?.loadSession,
+        pid: this.child?.pid,
+      },
+      'ACP initialize: agent ready',
+    );
     return this.initResult;
   }
 
   async newSession(cwd?: string, mcpServers: AcpMcpServer[] = []): Promise<AcpNewSessionResult> {
+    // F161: Filter MCP servers by client's announced mcpCapabilities.
+    // Per ACP spec: stdio is mandatory (always passes), http/sse are optional.
+    const compatible = this.filterMcpByCapabilities(mcpServers);
+    if (compatible.length !== mcpServers.length) {
+      log.info(
+        {
+          total: mcpServers.length,
+          compatible: compatible.length,
+          dropped: mcpServers.length - compatible.length,
+          droppedNames: mcpServers.filter((s) => !compatible.includes(s)).map((s) => s.name),
+          capabilities: this.initResult?.agentCapabilities?.mcpCapabilities ?? 'unknown',
+        },
+        'ACP: filtered incompatible MCP servers by client mcpCapabilities',
+      );
+    }
+
+    const effectiveCwd = cwd ?? this.config.cwd;
+    // F161 diagnostic: log the full session/new payload shape for timeout debugging
+    log.info(
+      {
+        cwd: effectiveCwd,
+        mcpServerCount: compatible.length,
+        mcpServers: compatible.map((s) => ({
+          name: s.name,
+          transport: 'type' in s ? s.type : 'stdio',
+          // For stdio: log command + args (no env values — security)
+          ...('command' in s ? { command: s.command, argCount: s.args.length } : {}),
+          // For http/sse: log url presence
+          ...('url' in s ? { hasUrl: !!s.url } : {}),
+          envKeyCount: 'env' in s && Array.isArray(s.env) ? s.env.length : 0,
+          envKeys: 'env' in s && Array.isArray(s.env) ? (s.env as Array<{ name: string }>).map((e) => e.name) : [],
+        })),
+        agentInfo: this.initResult?.agentInfo,
+        pid: this.child?.pid,
+      },
+      'ACP session/new: sending request',
+    );
+
+    const t0 = Date.now();
     const resp = await this.sendRequest(ACP_METHODS.sessionNew, {
-      cwd: cwd ?? this.config.cwd,
-      mcpServers,
+      cwd: effectiveCwd,
+      mcpServers: compatible,
     });
+    log.info({ durationMs: Date.now() - t0, hasResult: !!resp.result }, 'ACP session/new: response received');
     return resp.result as unknown as AcpNewSessionResult;
   }
 
   async loadSession(sessionId: string, cwd?: string, mcpServers: AcpMcpServer[] = []): Promise<AcpNewSessionResult> {
+    const compatible = this.filterMcpByCapabilities(mcpServers);
+    if (compatible.length !== mcpServers.length) {
+      log.info(
+        {
+          total: mcpServers.length,
+          compatible: compatible.length,
+          dropped: mcpServers.length - compatible.length,
+          droppedNames: mcpServers.filter((s) => !compatible.includes(s)).map((s) => s.name),
+          capabilities: this.initResult?.agentCapabilities?.mcpCapabilities ?? 'unknown',
+        },
+        'ACP loadSession: filtered incompatible MCP servers by client mcpCapabilities',
+      );
+    }
+
+    const effectiveCwd = cwd ?? this.config.cwd;
+    log.info(
+      { sessionId, cwd: effectiveCwd, mcpServerCount: compatible.length, pid: this.child?.pid },
+      'ACP session/load: sending request',
+    );
+    const t0 = Date.now();
     const resp = await this.sendRequest(ACP_METHODS.sessionLoad, {
       sessionId,
-      cwd: cwd ?? this.config.cwd,
-      mcpServers,
+      cwd: effectiveCwd,
+      mcpServers: compatible,
     });
+    log.info(
+      { sessionId, durationMs: Date.now() - t0, hasResult: !!resp.result },
+      'ACP session/load: response received',
+    );
     return resp.result as unknown as AcpNewSessionResult;
+  }
+
+  async setSessionConfigOption(sessionId: string, configId: string, value: string): Promise<void> {
+    const trimmedConfigId = configId.trim();
+    const trimmedValue = value.trim();
+    if (!trimmedConfigId || !trimmedValue) return;
+
+    log.info(
+      { sessionId, configId: trimmedConfigId, value: trimmedValue, pid: this.child?.pid },
+      'ACP session/set_config_option: sending request',
+    );
+    const t0 = Date.now();
+    await this.sendRequest(ACP_METHODS.sessionSetConfigOption, {
+      sessionId,
+      configId: trimmedConfigId,
+      value: trimmedValue,
+    });
+    log.info({ sessionId, durationMs: Date.now() - t0 }, 'ACP session/set_config_option: response received');
   }
 
   /**
@@ -339,11 +469,30 @@ export class AcpClient {
           }
           scheduleIdleCheck(); // Schedule stall check (remaining time)
         } else if (pendingTool) {
-          // Tool still executing — suppress stall, let absolute timeoutMs be the guard
-          log.info(
-            { sessionId, idleSinceMs, eventCount, pendingTool },
-            'Stream idle watchdog: tool still pending, suppressing stall',
-          );
+          // Tool still executing — allow extra time, but cap at TOOL_EXECUTION_CEILING_MS.
+          // Before this fix, pendingTool suppressed stall indefinitely without rescheduling,
+          // causing sessions (esp. kimi-acp) to block for up to 15min turn budget on hung tools.
+          const TOOL_EXECUTION_CEILING_MS = 180_000; // 3 minutes max for a single tool call
+          if (idleSinceMs >= TOOL_EXECUTION_CEILING_MS) {
+            log.error(
+              { sessionId, idleSinceMs, eventCount, pendingTool },
+              'Stream idle watchdog: tool execution exceeded ceiling — terminating',
+            );
+            this.cancelSession(sessionId);
+            promptError = new AcpStreamIdleError(sessionId, idleSinceMs, eventCount);
+            done = true;
+            if (waitResolve) {
+              const r = waitResolve;
+              waitResolve = null;
+              r();
+            }
+          } else {
+            log.info(
+              { sessionId, idleSinceMs, eventCount, pendingTool },
+              'Stream idle watchdog: tool still pending, scheduling follow-up check',
+            );
+            scheduleIdleCheck(); // Reschedule — don't dead-end
+          }
         } else {
           // Stall — terminate the stream and cancel the upstream session
           log.error({ sessionId, idleSinceMs, eventCount }, 'Stream idle watchdog: stall — terminating');
@@ -527,6 +676,37 @@ export class AcpClient {
     this._recentCapacitySignal = null;
   }
 
+  // ── MCP Capability Filtering ─────────────────────────────────
+
+  /**
+   * Filter MCP servers to only those compatible with the client's capabilities.
+   *
+   * Per the ACP spec (agentclientprotocol.com/protocol/v1/initialization):
+   *   - stdio is MANDATORY — all ACP agents MUST support it; not listed in mcpCapabilities
+   *   - mcpCapabilities only advertises OPTIONAL transports: { http?: boolean; sse?: boolean }
+   *
+   * Transport detection:
+   *   - Has `type: 'http'` → needs mcpCapabilities.http === true
+   *   - Has `type: 'sse'`  → needs mcpCapabilities.sse === true
+   *   - Has `command` (no type) → stdio; always passes (mandatory per ACP spec)
+   *
+   * If initResult is unavailable, all servers pass through (permissive fallback).
+   */
+  private filterMcpByCapabilities(servers: AcpMcpServer[]): AcpMcpServer[] {
+    const caps = this.initResult?.agentCapabilities?.mcpCapabilities;
+    if (!caps) return servers; // no capability info → pass all (backward compat)
+
+    return servers.filter((s) => {
+      if ('type' in s) {
+        if (s.type === 'http') return caps.http === true;
+        if (s.type === 'sse') return caps.sse === true;
+        return false; // unknown type
+      }
+      // Stdio server (has command, no type field) — mandatory per ACP spec, always pass
+      return true;
+    });
+  }
+
   // ── Internal ─────────────────────────────────────────────────
 
   private startReading(): void {
@@ -545,15 +725,23 @@ export class AcpClient {
         return;
       }
 
-      const id = msg.id as string | undefined;
+      // #712: id can be 0 (Kimi CLI uses numeric ids starting at 0).
+      // `0` is falsy in JS, so use explicit null check instead of truthiness.
+      const id = msg.id as string | number | undefined;
+      const hasId = id !== undefined && id !== null;
+      const idStr = hasId ? String(id) : undefined;
       const method = msg.method as string | undefined;
 
-      if (id && this.pending.has(id) && !method) {
+      if (hasId && idStr && this.pending.has(idStr) && !method) {
         // Response to one of our requests
-        const { resolve } = this.pending.get(id)!;
-        this.pending.delete(id);
+        const { resolve } = this.pending.get(idStr)!;
+        this.pending.delete(idStr);
         resolve(msg as unknown as AcpResponse);
-      } else if (method && !id) {
+      } else if (method && hasId) {
+        // Request from agent (permission, fs, terminal) — needs our response.
+        // Checked before notifications so id:0 (Kimi) is not misrouted.
+        this.handleAgentRequest(msg as unknown as AcpAgentRequest);
+      } else if (method && !hasId) {
         if (method === ACP_METHODS.requestPermission) {
           // Gemini CLI sends request_permission as notification (no id) when not in yolo mode.
           // Best-effort auto-approve with synthetic id (Gemini may ignore it).
@@ -578,9 +766,6 @@ export class AcpClient {
             listener(msg as unknown as AcpNotification);
           }
         }
-      } else if (method && id) {
-        // Request from agent (permission, fs, terminal) — needs our response
-        this.handleAgentRequest(msg as unknown as AcpAgentRequest);
       }
     });
   }
@@ -592,11 +777,21 @@ export class AcpClient {
 
     const id = randomUUID();
     const msg = { jsonrpc: '2.0', method, id, params };
-    this.child.stdin.write(JSON.stringify(msg) + '\n');
+    const payload = JSON.stringify(msg);
+    log.info(
+      { method, id, timeoutMs, pid: this.child?.pid, payloadBytes: payload.length },
+      'ACP sendRequest: writing to stdin',
+    );
+    this.child.stdin.write(payload + '\n');
 
     return new Promise<AcpResponse>((resolve, reject) => {
+      const sentAt = Date.now();
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        log.error(
+          { method, id, timeoutMs, pid: this.child?.pid, elapsedMs: Date.now() - sentAt, exited: this.exited },
+          'ACP sendRequest: TIMEOUT — no response from agent process',
+        );
         // For prompt timeouts, send session/cancel to stop the agent's internal retry loop
         if (method === ACP_METHODS.sessionPrompt && params.sessionId) {
           this.cancelSession(params.sessionId as string);
@@ -607,6 +802,10 @@ export class AcpClient {
       this.pending.set(id, {
         resolve: (resp) => {
           clearTimeout(timer);
+          log.info(
+            { method, id, durationMs: Date.now() - sentAt, hasError: !!resp.error },
+            'ACP sendRequest: response received',
+          );
           if (resp.error) {
             reject(new AcpProtocolError(resp.error.code, resp.error.message, resp.error.data));
           } else {
@@ -615,6 +814,7 @@ export class AcpClient {
         },
         reject: (err) => {
           clearTimeout(timer);
+          log.error({ method, id, durationMs: Date.now() - sentAt, error: err.message }, 'ACP sendRequest: rejected');
           reject(err);
         },
       });
@@ -648,7 +848,12 @@ export class AcpClient {
       } else {
         // Default: auto-approve (allow_once)
         const params = req.params as unknown as AcpPermissionRequest;
-        const allowOption = params.options?.find((o) => o.kind === 'allow_once') ?? params.options?.[0];
+        // Prefer allow_always (session-wide) over allow_once to avoid repeated permission
+        // prompts for every MCP tool call. Kimi sends optionId "approve_for_session" for this.
+        const allowOption =
+          params.options?.find((o) => o.kind === 'allow_always') ??
+          params.options?.find((o) => o.kind === 'allow_once') ??
+          params.options?.[0];
         respond({ optionId: allowOption?.optionId ?? 'allow_once' });
       }
     } else {

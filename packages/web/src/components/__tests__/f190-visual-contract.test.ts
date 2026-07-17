@@ -122,7 +122,7 @@ describe('F190 visual contract — no hard borders in card/panel components', ()
   it('HubConnectorConfigTab uses SettingsRow-aligned shadow, not --hub-shadow var', () => {
     const src = readSrc('HubConnectorConfigTab.tsx');
     expect(src).not.toContain('var(--hub-shadow)');
-    expect(src).toContain('shadow-[0_8px_22px_rgba(43,33,26,0.04)]');
+    expect(src).toContain('console-list-card rounded-xl overflow-hidden shadow-[var(--console-shadow-soft)]');
     expect(src).not.toContain('shadow-[0_12px_30px');
   });
 
@@ -456,7 +456,7 @@ describe('F190 typography guard — no hardcoded font sizes in console scope', (
     'settings/RulesPromptsContent.tsx',
     'settings/SkillPreviewModal.tsx',
     'settings/InstallPreviewModal.tsx',
-    'settings/GithubConfigPanel.tsx',
+    'settings/PluginConfigPanel.tsx',
     'settings/PushServiceConfig.tsx',
     'hub-cat-editor-fields.tsx',
     'hub-cat-editor-voice.tsx',
@@ -506,7 +506,7 @@ describe('F190 typography guard — no hardcoded font sizes in console scope', (
   it('src-wide guard: no raw pixel font definitions outside typography tokens', () => {
     const srcRoot = resolve(testDir, '..', '..');
     /* F056: dev/ tools (OklchTuner) intentionally use dense px sizes */
-    const DEV_EXCLUDE = /\/dev\//;
+    const DEV_EXCLUDE = /[\\/]dev[\\/]/;
     const violations = collectSourceFiles(srcRoot)
       .filter((file) => !DEV_EXCLUDE.test(file))
       .flatMap((file) => {
@@ -629,16 +629,16 @@ describe('#723 IM connector — typography and card guard', () => {
     expect(src).not.toContain('text-base font-extrabold');
   });
 
-  it('WeComBotSetupPanel inputs use field-bg pattern, not border-cafe', () => {
-    const src = readSrc('WeComBotSetupPanel.tsx');
-    expect(src).toContain('border-transparent');
-    expect(src).toContain('console-field-bg');
+  it('ConfigFieldRenderer inputs use field-bg pattern, not border-cafe', () => {
+    const src = readSrc('settings/primitives/ConfigFieldRenderer.tsx');
+    expect(src).toContain('console-form-input');
     expect(src).not.toMatch(/border border-cafe rounded-lg/);
   });
 
-  it('FeishuQrPanel QR card uses shadow, not border', () => {
-    const src = readSrc('FeishuQrPanel.tsx');
-    expect(src).toContain('shadow-[0_8px_22px_rgba(43,33,26,0.04)]');
+  it('ActionRenderer QR card uses shadow, not border', () => {
+    const src = readSrc('settings/primitives/ActionRendererParts.tsx');
+    expect(src).toContain('shadow-[var(--console-shadow-soft)]');
+    expect(src).not.toContain('border border-cafe');
   });
 });
 
@@ -667,7 +667,7 @@ describe('#723 cross-page typography consistency', () => {
       'settings/capability-settings-ui.tsx',
       'settings/primitives/SettingsCollapsibleCard.tsx',
       'settings/primitives/SettingsRow.tsx',
-      'settings/GithubConfigPanel.tsx',
+      'settings/PluginConfigPanel.tsx',
     ]) {
       const src = readSrc(file);
       expect(src).not.toContain('console-divider-t');
@@ -764,10 +764,10 @@ describe('#723 interactive button guard — no grey pill on action/toggle contro
     expect(src).toContain('text-cafe-secondary');
   });
 
-  it('ChatContainerHeader: RightPanelToggle text color in conditional branches, no cascade conflict', () => {
+  it('ChatContainerHeader: PanelToggle text color in conditional branches, no cascade conflict', () => {
     const src = readSrc('ChatContainerHeader.tsx');
     const lines = src.split('\n');
-    const start = lines.findIndex((l) => l.includes('function RightPanelToggle'));
+    const start = lines.findIndex((l) => l.includes('function PanelToggle'));
     const fnSrc = lines.slice(start, start + 50).join('\n');
     expect(fnSrc).not.toContain('hover:bg-[var(--console-hover-bg)]');
     expect(fnSrc).toContain('hover:text-cafe-accent');
@@ -975,7 +975,7 @@ describe('#723 round 4.1 — deeper primitive convergence guard', () => {
 
   it('HubConnectorConfigTab card shells match SettingsRow: rounded-xl + 0.04 shadow', () => {
     const src = readSrc('HubConnectorConfigTab.tsx');
-    expect(src).toContain('rounded-xl overflow-hidden shadow-[0_8px_22px_rgba(43,33,26,0.04)]');
+    expect(src).toContain('rounded-xl overflow-hidden shadow-[var(--console-shadow-soft)]');
     expect(src).not.toContain('shadow-[0_12px_30px');
   });
 });
@@ -1165,7 +1165,7 @@ describe('#723 round 6 — select/toggle/button primitive convergence', () => {
   });
 });
 
-describe('#723 round 7 — CVO visual convergence: tabs, search, selects, buttons, cards', () => {
+describe('#723 round 7 — operator visual convergence: tabs, search, selects, buttons, cards', () => {
   it('OpsContent: active tab uses Memory underline (border-b-2 + emphasis)', () => {
     const src = readSrc('settings/OpsContent.tsx');
     expect(src).toContain('border-b-2');
@@ -1283,15 +1283,6 @@ describe('#723 round 7 — CVO visual convergence: tabs, search, selects, button
     expect(skeleton![0]).not.toMatch(/style=.*borderRadius/);
   });
 
-  it('McpInstallForm: no form-input class, uses field-bg + input-stroke, buttons use secondary/accent pattern', () => {
-    const src = readSrc('McpInstallForm.tsx');
-    expect(src).not.toContain('form-input');
-    expect(src).not.toContain('bg-cafe-surface');
-    expect(src).not.toContain('border border-cafe');
-    expect(src).toContain('console-field-bg');
-    expect(src).toContain('console-input-stroke');
-  });
-
   it('InstallPlanDetail: disabled (direct_mcp) button uses neutral secondary, not accent', () => {
     const src = readSrc('marketplace/install-plan-detail.tsx');
     expect(src).toContain('cursor-not-allowed');
@@ -1308,7 +1299,7 @@ describe('#723 round 7 — CVO visual convergence: tabs, search, selects, button
   });
 });
 
-describe('#723 round 8 — CVO: refresh button, ops underline tabs, service toggle state machine', () => {
+describe('#723 round 8 — operator: refresh button, ops underline tabs, service toggle state machine', () => {
   it('HubGovernanceTab refresh: standard secondary pattern (px-3 py-1.5 + transition-colors)', () => {
     const src = readSrc('HubGovernanceTab.tsx');
     const refreshBtn = src.match(/<button[^>]*onClick=\{fetchHealth\}[^>]*>/);
@@ -1417,7 +1408,8 @@ describe('#723 round 9 — install button, error suppression, breadcrumb, tab/ca
   });
 
   it('HubObservabilityTab chart stroke: CSS variable, not raw hex', () => {
-    const src = readSrc('HubObservabilityTab.tsx');
+    // TrendChart extracted to HubObservabilityOverview.tsx in Phase K
+    const src = readSrc('HubObservabilityOverview.tsx');
     expect(src).toContain('var(--dataviz-trend-line)');
     expect(src).not.toMatch(/stroke="#[0-9A-Fa-f]{6}"/);
   });
@@ -1444,6 +1436,51 @@ describe('#723 round 9 — install button, error suppression, breadcrumb, tab/ca
     for (const file of ['settings/InstallPreviewModal.tsx', 'settings/SkillPreviewModal.tsx']) {
       const src = readSrc(file);
       expect(src).toContain('rounded-2xl');
+    }
+  });
+
+  it('console modal scrims consistently blur the page behind them', () => {
+    const modalOverlayFiles = [
+      'Lightbox.tsx',
+      'VoteConfigModal.tsx',
+      'MessageActions.tsx',
+      'UnifiedAuthModal.tsx',
+      'BrakeModal.tsx',
+      'HubListModal.tsx',
+      'memory/CreateCollectionDialog.tsx',
+      'ConfirmDialog.tsx',
+      'mission-control/ImportProjectModal.tsx',
+      'BootcampListModal.tsx',
+      'MobileStatusSheet.tsx',
+      'ChatContainer.tsx',
+      'first-run-quest/BootcampGuideOverlay.tsx',
+      'HubCoCreatorEditor.tsx',
+      'FirstRunQuestWizard.tsx',
+      'settings/InstallPreviewModal.tsx',
+      'settings/SkillPreviewModal.tsx',
+      'guide-overlay/GuideOverlayCompletion.tsx',
+      'HubCatEditor.tsx',
+      'McpConfigModal.tsx',
+      'SteerQueuedEntryModal.tsx',
+      'ThreadSidebar/DirectoryPickerModal.tsx',
+      'ThreadSidebar/ThreadSidebar.tsx',
+      'ThreadSidebar/ThreadOrganizerModal.tsx',
+    ];
+
+    for (const file of modalOverlayFiles) {
+      const src = readSrc(file);
+      const overlayClassNames = [
+        ...src.matchAll(
+          /className=(?:"([^"]*bg-\[var\(--console-overlay-(?:backdrop|medium|light|heavy)\)\][^"]*)"|\{`([^`]*bg-\[var\(--console-overlay-(?:backdrop|medium|light|heavy)\)\][^`]*)`\})/g,
+        ),
+      ]
+        .map((match) => match[1] ?? match[2])
+        .filter((className) => className.includes('inset-0'));
+
+      expect(overlayClassNames, `${file} should declare at least one console overlay scrim`).not.toHaveLength(0);
+      for (const className of overlayClassNames) {
+        expect(className, `${file} overlay scrim should include backdrop-blur-sm`).toContain('backdrop-blur-sm');
+      }
     }
   });
 

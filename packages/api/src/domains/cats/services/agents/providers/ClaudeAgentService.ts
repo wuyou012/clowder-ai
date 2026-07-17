@@ -15,13 +15,23 @@
  *   result/success → 跳过 (done 在循环后 yield)
  */
 
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { type CatId, createCatId } from '@cat-cafe/shared';
+import {
+  CAT_CAFE_SPLIT_ENTRYPOINTS,
+  expandManagedMcpNamesForUserMerge,
+  MCP_CALLBACK_ENV_KEYS,
+  resolveCatCafeNodeCommand,
+  resolvePencilCommand,
+  resolveServersForCat,
+  summarizeMcpInjection,
+} from '../../../../../config/capabilities/capability-orchestrator.js';
 import { getCatEffort } from '../../../../../config/cat-config-loader.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
 import { createModuleLogger } from '../../../../../infrastructure/logger.js';
+import { buildCliDiagnostics, buildSilentCompletionDiagnostic } from '../../../../../utils/cli-diagnostics.js';
 import { formatCliExitError } from '../../../../../utils/cli-format.js';
 import { formatCliNotFoundError, resolveCliCommand } from '../../../../../utils/cli-resolve.js';
 import { isCliError, isCliTimeout, isLivenessWarning, spawnCli } from '../../../../../utils/cli-spawn.js';
@@ -49,6 +59,19 @@ const RESERVED_SYSTEM_PROMPT_FLAGS = new Set([
 // F198: exported so other Claude carriers (e.g. ClaudeBgCarrierService) can
 // reuse the single source of truth for profile mode routing.
 export const ANTHROPIC_PROFILE_MODE_KEY = 'CAT_CAFE_ANTHROPIC_PROFILE_MODE';
+
+// #883: Keys cleared in subscription mode to prevent proxy credentials leaking
+// to api.anthropic.com. Exported so the post-accountEnv merge step and tests
+// can reference the same authoritative list.
+export const SUBSCRIPTION_MODE_DENY_KEYS = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+] as const;
 const ANTHROPIC_PROFILE_API_KEY = 'CAT_CAFE_ANTHROPIC_API_KEY';
 const ANTHROPIC_PROFILE_BASE_URL = 'CAT_CAFE_ANTHROPIC_BASE_URL';
 // F198: exported so ClaudeBgCarrierService and other carriers can reuse the
@@ -133,6 +156,45 @@ function removeL0TempDir(l0Path: string | undefined): void {
 }
 
 /**
+ * #840: write the append-system-prompt payload (pack blocks + briefing) to a
+ * temp file so it can be passed via `--append-system-prompt-file <path>`.
+ *
+ * Root cause: inline `--append-system-prompt <text>` puts the whole payload on
+ * the spawn command line. Windows `CreateProcess` caps the command line at
+ * 32,767 chars; A2A handoffs and large memory briefings exceed it and produce
+ * `spawn ENAMETOOLONG`. Linux ARG_MAX is larger but the same risk class.
+ *
+ * The file is dropped in a fresh `mkdtemp` dir so cleanup can `rmSync` the
+ * whole directory the same way `removeL0TempDir` does for L0.
+ */
+function writeAppendPromptToTempFile(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-append-prompt-'));
+  const path = join(dir, 'append-system-prompt.md');
+  writeFileSync(path, content, 'utf8');
+  return path;
+}
+
+function removeAppendPromptTempDir(path: string | undefined): void {
+  if (!path) return;
+  const promptDir = dirname(path);
+  try {
+    rmSync(promptDir, { recursive: true, force: true });
+  } catch (err) {
+    log.warn({ err, promptDir }, 'Failed to remove Claude append-prompt temp directory');
+  }
+}
+
+function resolveMcpWorkspaceRoot(workingDirectory?: string): string {
+  const explicitAllowed = process.env.ALLOWED_WORKSPACE_DIRS?.trim();
+  if (explicitAllowed) return explicitAllowed;
+  const threadWorkspace = workingDirectory?.trim();
+  if (threadWorkspace) return resolve(threadWorkspace);
+  const explicitWorkspace = process.env.CAT_CAFE_WORKSPACE_ROOT?.trim();
+  if (explicitWorkspace) return explicitWorkspace;
+  return process.cwd();
+}
+
+/**
  * Build env overrides for spawning the `claude` CLI.
  *
  * F198: exported as the single source of truth for Claude carrier env logic.
@@ -186,12 +248,7 @@ export function buildClaudeEnvOverrides(callbackEnv?: Record<string, string>): R
   } else if (mode === 'subscription') {
     // Subscription mode must not inherit shell-level Anthropic credentials.
     // Claude CLI should read auth from ~/.claude/settings.json instead.
-    env.ANTHROPIC_API_KEY = null;
-    env.ANTHROPIC_BASE_URL = null;
-    env.ANTHROPIC_MODEL = null;
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL = null;
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL = null;
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = null;
+    for (const key of SUBSCRIPTION_MODE_DENY_KEYS) env[key] = null;
   }
   return env;
 }
@@ -293,13 +350,29 @@ export class ClaudeAgentService implements AgentService {
     // ClaudeBgCarrierService reuses the same rules (single source of truth).
     const { effectiveModel, useEnvModelOverride } = resolveClaudeModelSelection(options?.callbackEnv, this.model);
     const isApiKeyMode = options?.callbackEnv?.[ANTHROPIC_PROFILE_MODE_KEY] === 'api_key';
+    // #840 R2 (砚砚 review 2026-06-02): the main prompt must NOT ride argv.
+    // A2A briefings + memory + image hints push `effectivePrompt` past the
+    // Windows CreateProcess 32K cap → spawn ENAMETOOLONG. Mirrors the
+    // CodexAgentService pattern (cross-thread-context-contamination incident
+    // 2026-05-29): prompt is streamed via stdin instead. `-p` keeps print
+    // mode; `--input-format text` (Claude's default) reads positional prompt
+    // from stdin when no argv positional is provided.
+    //
+    // Side benefit: also prevents prompt content from leaking via
+    // `ps -o command=` / /proc/<pid>/cmdline like the Codex carrier.
+    // Only pass --model for known Anthropic models. For third-party models
+    // (e.g. glm-5 via BigModel/DashScope), ANTHROPIC_MODEL env var is set in
+    // buildClaudeEnvOverrides() and --model must be omitted so the CLI honours it.
+    // Empty model (OAuth without explicit model) → let CLI use its default.
+    const modelArgs = !useEnvModelOverride && effectiveModel ? ['--model', effectiveModel] : [];
+
     const args: string[] = [
       '-p',
-      effectivePrompt,
       '--output-format',
       'stream-json',
       '--include-partial-messages',
       '--verbose',
+      ...modelArgs,
       '--effort',
       getCatEffort(this.catId as string, undefined, 'anthropic'),
       '--permission-mode',
@@ -312,14 +385,6 @@ export class ClaudeAgentService implements AgentService {
       '--chrome',
     ];
 
-    // Only pass --model for known Anthropic models. For third-party models
-    // (e.g. glm-5 via BigModel/DashScope), ANTHROPIC_MODEL env var is set in
-    // buildClaudeEnvOverrides() and --model must be omitted so the CLI honours it.
-    // Empty model (OAuth without explicit model) → let CLI use its default.
-    if (!useEnvModelOverride && effectiveModel) {
-      args.splice(6, 0, '--model', effectiveModel);
-    }
-
     if (options?.sessionId) {
       args.push('--resume', options.sessionId);
     }
@@ -327,35 +392,143 @@ export class ClaudeAgentService implements AgentService {
       args.push('--add-dir', dir);
     }
 
-    // Add MCP server config when callback env is present
-    // On Windows, Claude CLI treats inline JSON as a file path — write to temp file instead.
-    // The file is cached per-instance so concurrent invocations share one file (no temp spam).
+    // #712: Inject ALL enabled MCP servers from capabilities.json at invoke time.
+    // Built-in cat-cafe servers resolve paths from distDir; externals use descriptor values.
+    // On Windows, Claude CLI treats inline JSON as a file path — write to temp file.
     if (options?.callbackEnv && this.mcpServerPath) {
+      const distDir = dirname(this.mcpServerPath);
+      const binaryProjectRoot = resolve(distDir, '../../..');
+      const capabilitiesProjectRoot = binaryProjectRoot;
+      const catId = options.callbackEnv.CAT_CAFE_CAT_ID;
+
+      const catCafeEnvEntries: Record<string, string> = {
+        ALLOWED_WORKSPACE_DIRS: resolveMcpWorkspaceRoot(options.workingDirectory),
+      };
+      for (const key of MCP_CALLBACK_ENV_KEYS) {
+        const val = options.callbackEnv![key];
+        if (val) catCafeEnvEntries[key] = val;
+      }
+
+      const mcpServers: Record<string, Record<string, unknown>> = {};
+      const managedMcpServerNames = new Set<string>();
+      let resolved = false;
+      try {
+        // F249: Project config is the single truth source for MCP resolution.
+        // Try project first; fall back to global for uninitialized projects.
+        let capConfig = null;
+        let accessScope: 'global' | 'project' = 'global';
+        if (options?.workingDirectory && options.workingDirectory !== capabilitiesProjectRoot) {
+          try {
+            const projectRaw = readFileSync(join(options.workingDirectory, '.cat-cafe', 'capabilities.json'), 'utf-8');
+            const parsed = JSON.parse(projectRaw);
+            if (parsed?.version === 1 || parsed?.version === 2) {
+              capConfig = parsed;
+              accessScope = 'project';
+            }
+          } catch {
+            /* No project config — fall back to global */
+          }
+        }
+        if (!capConfig) {
+          const raw = readFileSync(join(capabilitiesProjectRoot, '.cat-cafe', 'capabilities.json'), 'utf-8');
+          const parsed = JSON.parse(raw);
+          if (parsed?.version === 1 || parsed?.version === 2) capConfig = parsed;
+        }
+        if (capConfig && catId) {
+          for (const s of resolveServersForCat(capConfig, catId, { accessScope })) {
+            managedMcpServerNames.add(s.name);
+            if (!s.enabled) continue;
+            if (s.source === 'cat-cafe' && CAT_CAFE_SPLIT_ENTRYPOINTS.has(s.name)) {
+              const ep = CAT_CAFE_SPLIT_ENTRYPOINTS.get(s.name)!;
+              const epPath = join(distDir, ep);
+              if (existsSync(epPath)) {
+                mcpServers[s.name] = {
+                  command: resolveCatCafeNodeCommand(),
+                  args: [epPath],
+                  env: catCafeEnvEntries,
+                };
+              }
+            } else if (s.resolver === 'pencil') {
+              const pencil = await resolvePencilCommand({ projectRoot: capabilitiesProjectRoot });
+              if (pencil) mcpServers[s.name] = { command: pencil.command, args: pencil.args };
+            } else if (s.transport === 'streamableHttp' && s.url) {
+              const entry: Record<string, unknown> = { type: 'http', url: s.url };
+              if (s.headers && Object.keys(s.headers).length > 0) entry.headers = s.headers;
+              mcpServers[s.name] = entry;
+            } else if (s.command) {
+              const entry: Record<string, unknown> = { command: s.command, args: s.args };
+              if (s.env && Object.keys(s.env).length > 0) entry.env = s.env;
+              if (s.workingDir) entry.cwd = s.workingDir;
+              mcpServers[s.name] = entry;
+            }
+          }
+          resolved = true;
+        }
+      } catch {
+        // best-effort fallback below
+      }
+      if (!resolved) {
+        for (const [name, ep] of CAT_CAFE_SPLIT_ENTRYPOINTS) {
+          const epPath = join(distDir, ep);
+          if (existsSync(epPath)) {
+            mcpServers[name] = {
+              command: resolveCatCafeNodeCommand(),
+              args: [epPath],
+              env: catCafeEnvEntries,
+            };
+          }
+        }
+      }
+      // Merge user project .mcp.json: include user-owned servers (e.g.
+      // `filesystem`) that are NOT managed by capabilities.json. Our managed
+      // entries always take precedence — stale user copies are ignored.
+      // --strict-mcp-config still applies: only the merged set is active.
+      if (options?.workingDirectory) {
+        try {
+          const userMcpPath = join(options.workingDirectory, '.mcp.json');
+          if (existsSync(userMcpPath)) {
+            const userMcp = JSON.parse(readFileSync(userMcpPath, 'utf-8')) as {
+              mcpServers?: Record<string, unknown>;
+            };
+            if (userMcp.mcpServers && typeof userMcp.mcpServers === 'object') {
+              const excludedMcpServerNames = expandManagedMcpNamesForUserMerge([
+                ...managedMcpServerNames,
+                ...Object.keys(mcpServers),
+              ]);
+              for (const [name, entry] of Object.entries(userMcp.mcpServers)) {
+                if (!excludedMcpServerNames.has(name) && !(name in mcpServers) && entry && typeof entry === 'object') {
+                  mcpServers[name] = entry as Record<string, unknown>;
+                }
+              }
+            }
+          }
+        } catch {
+          // best-effort: unreadable user config → capabilities-only
+        }
+      }
+
+      log.debug(
+        summarizeMcpInjection(mcpServers, {
+          catId,
+          resolvedFrom: resolved ? 'capabilities.json' : 'fallback',
+          provider: 'claude',
+        }),
+        '#712: MCP invoke-time injection',
+      );
+      // #712: Always pass --mcp-config + --strict-mcp-config in managed invocations.
+      // --strict-mcp-config ensures only the merged config (capabilities.json +
+      // user project .mcp.json) is active — no auto-discovered entries leak through.
       if (IS_WINDOWS) {
-        if (!this.mcpConfigFilePath || !existsSync(this.mcpConfigFilePath)) {
+        if (!this.mcpConfigFilePath) {
           const dir = mkdtempSync(join(tmpdir(), 'cat-cafe-mcp-'));
           this.mcpConfigFilePath = join(dir, 'mcp-config.json');
-          writeFileSync(
-            this.mcpConfigFilePath,
-            JSON.stringify({
-              mcpServers: {
-                'cat-cafe': { command: 'node', args: [this.mcpServerPath] },
-              },
-            }),
-            'utf-8',
-          );
         }
+        writeFileSync(this.mcpConfigFilePath, JSON.stringify({ mcpServers }), 'utf-8');
         args.push('--mcp-config', this.mcpConfigFilePath);
       } else {
-        args.push(
-          '--mcp-config',
-          JSON.stringify({
-            mcpServers: {
-              'cat-cafe': { command: 'node', args: [this.mcpServerPath] },
-            },
-          }),
-        );
+        args.push('--mcp-config', JSON.stringify({ mcpServers }));
       }
+      args.push('--strict-mcp-config');
     }
 
     const metadata: MessageMetadata = { provider: 'anthropic', model: effectiveModel };
@@ -367,12 +540,18 @@ export class ClaudeAgentService implements AgentService {
     };
 
     let l0Path: string | undefined;
+    let appendPromptPath: string | undefined;
     try {
       l0Path = await this.compileL0ToTempFile();
       args.push('--system-prompt-file', l0Path);
       // Route layer passes pack-only systemPrompt for native-L0 providers.
       // Keep it as an append layer, but never use it as the carrier's L0 source.
-      if (options?.systemPrompt) args.push('--append-system-prompt', options.systemPrompt);
+      // #840: route through file carrier (not inline argv) to avoid ENAMETOOLONG
+      // when A2A briefings push the command line past Windows' 32,767-char cap.
+      if (options?.systemPrompt) {
+        appendPromptPath = writeAppendPromptToTempFile(options.systemPrompt);
+        args.push('--append-system-prompt-file', appendPromptPath);
+      }
 
       // User-defined CLI args from the member editor (#567).
       // User flags win when they overlap with ordinary system-injected flags,
@@ -419,6 +598,12 @@ export class ClaudeAgentService implements AgentService {
       if (options?.accountEnv) {
         for (const [k, v] of Object.entries(options.accountEnv)) envOverrides[k] = v;
       }
+      // #883: Subscription mode deny-list must survive accountEnv merge.
+      // Account-level env (e.g. ANTHROPIC_AUTH_TOKEN from a proxy profile)
+      // could re-introduce the proxy token that buildClaudeEnvOverrides cleared.
+      if (options?.callbackEnv?.[ANTHROPIC_PROFILE_MODE_KEY] === 'subscription') {
+        for (const key of SUBSCRIPTION_MODE_DENY_KEYS) envOverrides[key] = null;
+      }
 
       // Debug: log full invocation details (env values redacted by pino redact paths)
       const safeEnvSummary: Record<string, string> = {};
@@ -445,19 +630,20 @@ export class ClaudeAgentService implements AgentService {
         'Invoking Claude CLI',
       );
 
-      // Issue #116 (extended): signal CLI semantic completion on the terminal
-      // result/success event so spawnCli finalizes via the short grace instead of
-      // waiting for full process exit — which may never come when --chrome / MCP stdio
-      // keep the Claude process alive after the turn, causing a false ~9-min silence
-      // timeout (lastEventType=result + processAlive=true).
-      const semanticCompletion = new AbortController();
+      const successfulExitStderr: { stderrPresent: boolean; stderrExcerpt?: string } = { stderrPresent: false };
+      const onSuccessfulExitStderr = (summary: { stderrPresent: boolean; stderrExcerpt?: string }): void => {
+        successfulExitStderr.stderrPresent = summary.stderrPresent;
+        if (summary.stderrExcerpt) successfulExitStderr.stderrExcerpt = summary.stderrExcerpt;
+      };
 
       const cliOpts = {
         command: claudeCommand,
         args,
+        // #840 R2: main prompt moves off argv to stdin (see args comment above).
+        stdinInput: effectivePrompt,
         ...(options?.workingDirectory ? { cwd: options.workingDirectory } : {}),
         env: envOverrides,
-        semanticCompletionSignal: semanticCompletion.signal,
+        onSuccessfulExitStderr,
         ...(options?.signal ? { signal: options.signal } : {}),
         ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
         ...(options?.cliSessionId ? { cliSessionId: options.cliSessionId } : {}),
@@ -473,6 +659,12 @@ export class ClaudeAgentService implements AgentService {
 
       let eventCount = 0;
       let textEventCount = 0;
+      // F212 Phase G (AC-G4, clowder-ai#875 sibling sweep): track unique event types
+      // so silent_completion diagnostic surfaces them when textEventCount===0.
+      const uniqueEventTypes = new Set<string>();
+      // F212 Phase G: skip silent_completion when any error event already yielded (mirror
+      // OpenCode AC-G3 guard — any real error path carries the actual reason).
+      let errorAlreadyYielded = false;
       // F215: Track assistant event presence and content blocks (reset per assistant event).
       //
       // hasAssistantEvent: model generated a response (needed to distinguish "empty invocation" from "malformed").
@@ -498,6 +690,7 @@ export class ClaudeAgentService implements AgentService {
           typeof event === 'object' && event !== null && 'type' in event
             ? String((event as Record<string, unknown>).type)
             : '__unknown';
+        uniqueEventTypes.add(evtType);
         log.debug({ catId: this.catId, eventIndex: eventCount, type: evtType }, 'CLI event received');
         // F215: Inspect assistant events for content blocks (before transformClaudeEvent runs).
         // Reset per-turn tracking on each new assistant event so multi-turn tool-using sessions are handled
@@ -548,6 +741,7 @@ export class ClaudeAgentService implements AgentService {
             metadata: event.cliDiagnostics ? { ...metadata, cliDiagnostics: event.cliDiagnostics } : metadata,
             timestamp: Date.now(),
           };
+          errorAlreadyYielded = true;
           continue;
         }
         // F118 Phase C: Forward liveness warnings to frontend with catId
@@ -584,6 +778,7 @@ export class ClaudeAgentService implements AgentService {
             metadata: event.cliDiagnostics ? { ...metadata, cliDiagnostics: event.cliDiagnostics } : metadata,
             timestamp: Date.now(),
           };
+          errorAlreadyYielded = true;
           continue;
         }
 
@@ -635,7 +830,28 @@ export class ClaudeAgentService implements AgentService {
           if (result.type === 'text') {
             textEventCount++;
           }
-          yield { ...result, metadata };
+          // F212 Phase G: any yielded error event suppresses subsequent silent_completion
+          const resultErrorText = result.type === 'error' && typeof result.error === 'string' ? result.error : '';
+          const resultMetadata =
+            fromResultError && resultErrorText
+              ? {
+                  ...metadata,
+                  cliDiagnostics: buildCliDiagnostics({
+                    rawText: resultErrorText,
+                    structuredErrorText: resultErrorText,
+                    debugRef: {
+                      command: 'claude',
+                      exitCode: null,
+                      signal: null,
+                      ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+                    },
+                  }),
+                }
+              : metadata;
+          if (result.type === 'error') {
+            errorAlreadyYielded = true;
+          }
+          yield { ...result, metadata: resultMetadata };
         }
       }
 
@@ -685,11 +901,46 @@ export class ClaudeAgentService implements AgentService {
           metadata,
           timestamp: Date.now(),
         };
-      } else if (textEventCount === 0) {
+      } else if (
+        eventCount > 0 &&
+        textEventCount === 0 &&
+        !errorAlreadyYielded &&
+        // F212 Phase G R1 P1 (cloud codex on 1d519e7f2): tool-only turns are valid task
+        // completions per F215 AC-B3 (pure tool_use). When the assistant produced a
+        // tool_use block, there's no "silent" problem — the work happened via tools.
+        // Match isMalformedToolCall's positive-tool-use sense: hasAssistantEvent + has
+        // tool_use block = legitimate, skip silent_completion.
+        !(hasAssistantEvent && lastAssistantHasToolUseBlock)
+      ) {
+        // F212 Phase G (AC-G4, clowder-ai#875 sibling sweep): surface silent_completion
+        // via cliDiagnostics instead of just backend warn. Mirrors OpenCodeAgentService
+        // AC-G3 fix exactly — LL-069 spec-text-driven sweep ensures sibling parity. Guard
+        // mirrors OpenCode: skip when other diagnostic already surfaced (model_not_found,
+        // timeout, etc.) — those carry real reasonCode, silent_completion would be dup.
         log.warn(
-          { catId: this.catId, totalEvents: eventCount },
-          'Claude CLI produced 0 text events — will show as silent_completion',
+          { catId: this.catId, totalEvents: eventCount, eventTypes: Array.from(uniqueEventTypes) },
+          'Claude CLI produced 0 text events — surfacing silent_completion diagnostic',
         );
+        const silentDiag = buildSilentCompletionDiagnostic({
+          command: 'claude',
+          ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+          eventCount,
+          eventTypes: Array.from(uniqueEventTypes),
+          ...(metadata.model ? { model: metadata.model } : {}),
+          ...(metadata.sessionId ? { sessionId: metadata.sessionId } : {}),
+          stderrPresent: successfulExitStderr.stderrPresent,
+          ...(successfulExitStderr.stderrExcerpt ? { stderrExcerpt: successfulExitStderr.stderrExcerpt } : {}),
+        });
+        yield {
+          type: 'system_info',
+          catId: this.catId,
+          content: JSON.stringify({
+            type: 'silent_completion',
+            detail: 'Claude CLI 完成但无文字输出（见 cliDiagnostics 详情）',
+          }),
+          metadata: { ...metadata, cliDiagnostics: silentDiag },
+          timestamp: Date.now(),
+        };
       }
       yield { type: 'done', catId: this.catId, metadata, timestamp: Date.now() };
     } catch (err) {
@@ -704,6 +955,7 @@ export class ClaudeAgentService implements AgentService {
       yield { type: 'done', catId: this.catId, metadata, timestamp: Date.now() };
     } finally {
       removeL0TempDir(l0Path);
+      removeAppendPromptTempDir(appendPromptPath);
     }
   }
 }

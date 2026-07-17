@@ -4,10 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const DEFAULT_FSEVENTSD_RSS_MAX_KB = 4 * 1024 * 1024;
-// 6398=worktree dev / 6399=runtime sanctuary / 6401=user-redis persistent user data.
+// 6099=fork runtime sanctuary / 6398=worktree dev /
+// 6399=runtime sanctuary / 6401=user-redis persistent user data.
 // 6401 must be protected too — flagging it as a killable orphan led to it being murdered
 // alongside 6399 (CAFE-INCIDENT-20260527).
-const PROTECTED_REDIS_PORTS = new Set([6398, 6399, 6401]);
+const PROTECTED_REDIS_PORTS = new Set([6099, 6398, 6399, 6401]);
 const ALLOWED_LOCAL_REDIS_PORTS = new Set([6379, ...PROTECTED_REDIS_PORTS]);
 // Concurrent-gate detection — another gate / pre-merge-check is already running.
 // Downgraded from hard-block to soft-warning (#1912 added this hard-block): gates run in
@@ -109,6 +110,17 @@ function findFseventsdPressure(rows, maxRssKb) {
   return rows.filter((row) => /(^|\/)fseventsd(\s|$)/.test(row.command)).filter((row) => row.rssKb > maxRssKb);
 }
 
+function formatFseventsdPressureFailure(row, maxRssKb) {
+  return [
+    `fseventsd RSS ${row.rssKb}KB exceeds ${maxRssKb}KB (pid ${row.pid}); gate blocked to avoid amplifying macOS file-event pressure.`,
+    `  diagnose stale/no-listener Clowder AI dev/watch process groups: pnpm process:doctor`,
+    `  safe cleanup for Clowder AI-owned stale rows: pnpm process:cleanup`,
+    `  re-check fseventsd RSS: ps -axo pid=,rss=,command= | rg '(^|/)fseventsd'`,
+    `  cleanup can reduce new file-event load but will not necessarily reduce fseventsd RSS once the daemon is inflated; OS-level recovery or reboot may still be required.`,
+    `  Manual gate bypass is a operator override, not a pnpm gate pass.`,
+  ].join('\n');
+}
+
 function readRedisListeners() {
   const text = readFixtureOrCommand('CAT_CAFE_GATE_GUARD_LSOF_FIXTURE', 'lsof', ['-nP', '-iTCP', '-sTCP:LISTEN']);
   return text
@@ -129,7 +141,7 @@ function readRedisListeners() {
 
 // True ownership proof: query Redis-owned filesystem paths via CONFIG GET.
 // Redis 8 can report an empty `dir` while still exposing absolute pidfile/logfile
-// paths, so check the whole read-only CONFIG response for known Cat Cafe test
+// paths, so check the whole read-only CONFIG response for known Clowder AI test
 // tempdir prefixes.
 function isOwnedTestRedis(port) {
   const text = readFixtureOrCommand('CAT_CAFE_GATE_GUARD_REDIS_CONFIG_FIXTURE', 'redis-cli', [
@@ -166,28 +178,7 @@ function findMatchingProcesses(rows, holderPid, patterns) {
   });
 }
 
-function runPressureChecks(holderPid) {
-  if (process.env.CAT_CAFE_GATE_GUARD_SKIP_PRESSURE === '1') {
-    return { failures: [], warnings: [] };
-  }
-
-  const rows = readProcessRows();
-  const maxFseventsdRssKb = Number(process.env.CAT_CAFE_FSEVENTSD_RSS_MAX_KB ?? DEFAULT_FSEVENTSD_RSS_MAX_KB);
-  const failures = [];
-  const warnings = [];
-
-  for (const row of findFseventsdPressure(rows, maxFseventsdRssKb)) {
-    failures.push(
-      `fseventsd RSS ${row.rssKb}KB exceeds ${maxFseventsdRssKb}KB (pid ${row.pid}); reboot or recover before gate`,
-    );
-  }
-
-  // Phase 1: clean orphan Redis with TRUE ownership proof.
-  // Step 1: find candidates (ppid=1 + redis-server proctitle + non-sanctuary port).
-  // Step 2: for each candidate, query read-only CONFIG paths. If dir/pidfile/logfile
-  //   matches a known Cat Cafe test tmpdir prefix, it's ours.
-  // Step 3: port-based shutdown on OWNED instances only.
-  // Non-owned Redis (different datadir) is never touched — fails to manual guidance.
+function shutdownOwnedOrphanRedis(rows) {
   const orphanRedisPattern = /(?:^|\/)redis-server\s+\S*:(\d{2,5})\b/;
   for (const row of rows) {
     if (row.ppid !== 1) continue;
@@ -201,21 +192,47 @@ function runPressureChecks(holderPid) {
       stdio: 'ignore',
     });
   }
+}
 
-  // Phase 2: wait briefly for transient orphans (trap fired, Redis still exiting).
+function collectRedisOrphanFailures() {
   let orphans = findRedisOrphans();
   if (orphans.length > 0) {
     spawnSync('sleep', ['3'], { stdio: 'ignore' });
     orphans = findRedisOrphans();
   }
-  for (const orphan of orphans) {
-    failures.push(
+  return orphans.map(
+    (orphan) =>
       `unmanaged redis-server listener on port ${orphan.port}; ` +
-        `clean stale isolated Redis before gate. ` +
-        `Use 'kill <PID>' after confirming non-sanctuary, or 'pnpm process:cleanup'. ` +
-        `NEVER 'lsof -ti tcp:<range> | kill' — CAFE-INCIDENT-20260527.`,
-    );
+      `clean stale isolated Redis before gate. ` +
+      `Use 'kill <PID>' after confirming non-sanctuary, or 'pnpm process:cleanup'. ` +
+      `NEVER 'lsof -ti tcp:<range> | kill' — CAFE-INCIDENT-20260527.`,
+  );
+}
+
+function runPressureChecks(holderPid) {
+  if (process.env.CAT_CAFE_GATE_GUARD_SKIP_PRESSURE === '1') {
+    return { failures: [], warnings: [] };
   }
+
+  const rows = readProcessRows();
+  const maxFseventsdRssKb = Number(process.env.CAT_CAFE_FSEVENTSD_RSS_MAX_KB ?? DEFAULT_FSEVENTSD_RSS_MAX_KB);
+  const failures = [];
+  const warnings = [];
+
+  for (const row of findFseventsdPressure(rows, maxFseventsdRssKb)) {
+    failures.push(formatFseventsdPressureFailure(row, maxFseventsdRssKb));
+  }
+
+  // Phase 1: clean orphan Redis with TRUE ownership proof.
+  // Step 1: find candidates (ppid=1 + redis-server proctitle + non-sanctuary port).
+  // Step 2: for each candidate, query read-only CONFIG paths. If dir/pidfile/logfile
+  //   matches a known Clowder AI test tmpdir prefix, it's ours.
+  // Step 3: port-based shutdown on OWNED instances only.
+  // Non-owned Redis (different datadir) is never touched — fails to manual guidance.
+  shutdownOwnedOrphanRedis(rows);
+
+  // Phase 2: wait briefly for transient orphans (trap fired, Redis still exiting).
+  failures.push(...collectRedisOrphanFailures());
 
   for (const row of findMatchingProcesses(rows, holderPid, CONCURRENT_GATE_PATTERNS)) {
     warnings.push(

@@ -1,8 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useCatData } from '@/hooks/useCatData';
+import { catDossierCoversStrengths, useDossierProfiles } from '@/hooks/useDossierProfiles';
 import { apiFetch } from '@/utils/api-client';
+import { ConnectorPluginInstallButton } from '../ConnectorPluginInstallButton';
 import { CatOverviewTab, type ConfigData } from '../config-viewer-tabs';
 import { HubAccountsTab } from '../HubAccountsTab';
 import { HubCatEditor } from '../HubCatEditor';
@@ -12,6 +14,8 @@ import { HubEnvFilesTab } from '../HubEnvFilesTab';
 import { PushSettingsPanel } from '../PushSettingsPanel';
 import { useConfirm } from '../useConfirm';
 import { VoiceSettingsPanel } from '../VoiceSettingsPanel';
+import { CatDossierContent } from './CatDossierContent';
+import { ConciergeSettingsContent } from './ConciergeSettingsContent';
 import { MarketplaceContent } from './MarketplaceContent';
 import { McpManageContent } from './McpManageContent';
 import { OpsContent } from './OpsContent';
@@ -38,7 +42,15 @@ export function SettingsContent({ section, initialEditCatId }: SettingsContentPr
   const [createDraft, setCreateDraft] = useState<Parameters<typeof HubCatEditor>[0]['draft']>(null);
   const [togglingCatId, setTogglingCatId] = useState<string | null>(null);
   const [coCreatorEditorOpen, setCoCreatorEditorOpen] = useState(false);
+  const [imRefreshKey, setImRefreshKey] = useState(0);
   const confirm = useConfirm();
+
+  // F208 OQ-9: per-field check — badge only when dossier l0RosterSummary covers teamStrengths (KD-14)
+  const { data: dossierData } = useDossierProfiles();
+  const editingCatHasDossier = useMemo(
+    () => (editingCat ? catDossierCoversStrengths(editingCat.id, dossierData) : false),
+    [editingCat, dossierData],
+  );
 
   const fetchData = useCallback(async () => {
     setFetchError(null);
@@ -133,6 +145,7 @@ export function SettingsContent({ section, initialEditCatId }: SettingsContentPr
 
   if (section === 'marketplace') return <MarketplaceContent />;
   if (section === 'skills') return <SkillsContent />;
+  if (section === 'profiles') return <CatDossierContent />;
 
   const meta = SETTINGS_SECTIONS.find((item) => item.id === section) ?? SETTINGS_SECTIONS[0];
 
@@ -172,7 +185,7 @@ export function SettingsContent({ section, initialEditCatId }: SettingsContentPr
       case 'accounts':
         return <HubAccountsTab />;
       case 'im':
-        return <HubConnectorConfigTab />;
+        return <HubConnectorConfigTab refreshKey={imRefreshKey} />;
       case 'voice':
         return (
           <div className="space-y-6">
@@ -202,6 +215,8 @@ export function SettingsContent({ section, initialEditCatId }: SettingsContentPr
         return <McpManageContent />;
       case 'plugins':
         return <PluginsContent />;
+      case 'concierge':
+        return <ConciergeSettingsContent />;
       default:
         return <SettingsPlaceholder section={meta.label} description="此分区即将上线" />;
     }
@@ -209,13 +224,16 @@ export function SettingsContent({ section, initialEditCatId }: SettingsContentPr
 
   return (
     <>
-      <SettingsPageHeader title={meta.label} subtitle={meta.description} />
+      <SettingsPageHeader title={meta.label} subtitle={meta.description}>
+        {section === 'im' && <ConnectorPluginInstallButton onInstalled={() => setImRefreshKey((k) => k + 1)} />}
+      </SettingsPageHeader>
       {content}
       {editorOpen && (
         <HubCatEditor
           open
           cat={editingCat}
           draft={createDraft}
+          hasDossier={editingCatHasDossier}
           onClose={() => {
             setEditorOpen(false);
             setEditingCat(null);

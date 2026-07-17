@@ -357,6 +357,43 @@ describe('RedisTaskStore unit behavior', () => {
     assert.equal(reopened.status, 'todo');
   });
 
+  it('rejects cross-thread claims of legacy subject tasks when caller has a userId', async () => {
+    const { RedisTaskStore } = await import('../dist/domains/cats/services/stores/redis/RedisTaskStore.js');
+    const redis = new FakeRedisForTaskStore();
+    const store = new RedisTaskStore(redis, { ttlSeconds: 60 });
+
+    const original = await store.create({
+      kind: 'pr_tracking',
+      subjectKey: 'pr:owner/repo#43',
+      threadId: 'thread-owner',
+      title: 'Legacy PR tracking',
+      why: 'legacy task without userId',
+      createdBy: 'opus',
+      ownerCatId: 'opus',
+    });
+
+    await assert.rejects(
+      () =>
+        store.upsertBySubject({
+          kind: 'pr_tracking',
+          subjectKey: 'pr:owner/repo#43',
+          threadId: 'thread-attacker',
+          title: 'Hijacked PR tracking',
+          why: 'take over subject',
+          createdBy: 'codex',
+          ownerCatId: 'codex',
+          userId: 'user-attacker',
+        }),
+      /already owned by another user/,
+    );
+
+    const entry = await store.getBySubject('pr:owner/repo#43');
+    assert.equal(entry.id, original.id);
+    assert.equal(entry.threadId, 'thread-owner');
+    assert.equal(entry.ownerCatId, 'opus');
+    assert.equal(entry.userId, undefined);
+  });
+
   it('does not leave a TTL on the shared thread index when active PR tracking exists', async () => {
     const { RedisTaskStore } = await import('../dist/domains/cats/services/stores/redis/RedisTaskStore.js');
     const { TaskKeys } = await import('../dist/domains/cats/services/stores/redis-keys/task-keys.js');
@@ -615,6 +652,69 @@ describe('RedisTaskStore unit behavior', () => {
     assert.equal(redis.ttls.get(TaskKeys.thread('thread-delete')), 60);
   });
 
+  it('does not conditionally move a task after its thread has changed', async () => {
+    const { RedisTaskStore } = await import('../dist/domains/cats/services/stores/redis/RedisTaskStore.js');
+    const { TaskKeys } = await import('../dist/domains/cats/services/stores/redis-keys/task-keys.js');
+    const redis = new FakeRedisForTaskStore();
+    const store = new RedisTaskStore(redis, { ttlSeconds: 60 });
+
+    const task = await store.create({
+      kind: 'pr_tracking',
+      subjectKey: 'pr:owner/repo#802',
+      threadId: 'thread-old',
+      title: 'PR tracking: owner/repo#802',
+      why: 'track pr',
+      createdBy: 'opus',
+    });
+
+    await store.update(task.id, { threadId: 'thread-new' });
+    const staleMove = await store.updateIfThreadId(task.id, 'thread-old', { threadId: 'thread-repair' });
+
+    assert.equal(staleMove, null);
+    const current = await store.get(task.id);
+    assert.equal(current?.threadId, 'thread-new');
+    assert.deepEqual(await redis.zrange(TaskKeys.thread('thread-repair'), 0, -1), []);
+    assert.deepEqual(await redis.zrange(TaskKeys.thread('thread-new'), 0, -1), [task.id]);
+  });
+
+  it('retries conditional thread moves after a watched hash conflict', async () => {
+    const { RedisTaskStore } = await import('../dist/domains/cats/services/stores/redis/RedisTaskStore.js');
+    const { TaskKeys } = await import('../dist/domains/cats/services/stores/redis-keys/task-keys.js');
+    const redis = new FakeRedisForTaskStore();
+    const store = new RedisTaskStore(redis, { ttlSeconds: 60 });
+
+    const task = await store.create({
+      kind: 'pr_tracking',
+      subjectKey: 'pr:owner/repo#803',
+      threadId: 'thread-old',
+      title: 'PR tracking: owner/repo#803',
+      why: 'track pr',
+      createdBy: 'opus',
+    });
+
+    const originalMulti = redis.multi.bind(redis);
+    let injectedConflict = false;
+    redis.multi = () => {
+      const pipeline = originalMulti();
+      const originalExec = pipeline.exec.bind(pipeline);
+      pipeline.exec = async () => {
+        if (!injectedConflict) {
+          injectedConflict = true;
+          await redis.hset(TaskKeys.detail(task.id), { title: 'concurrent title update' });
+        }
+        return originalExec();
+      };
+      return pipeline;
+    };
+
+    const moved = await store.updateIfThreadId(task.id, 'thread-old', { threadId: 'thread-repair' });
+
+    assert.equal(moved?.threadId, 'thread-repair');
+    assert.equal(moved?.title, 'concurrent title update', 'retry must preserve the concurrently written task hash');
+    assert.deepEqual(await redis.zrange(TaskKeys.thread('thread-old'), 0, -1), []);
+    assert.deepEqual(await redis.zrange(TaskKeys.thread('thread-repair'), 0, -1), [task.id]);
+  });
+
   it('does not delete a repaired subject mapping when deleting a task', async () => {
     const { RedisTaskStore } = await import('../dist/domains/cats/services/stores/redis/RedisTaskStore.js');
     const { TaskKeys } = await import('../dist/domains/cats/services/stores/redis-keys/task-keys.js');
@@ -863,5 +963,56 @@ describe('RedisTaskStore unit behavior', () => {
       'stale claimer must not leave a zombie pr_tracking row behind',
     );
     assert.equal(await store.get(firstClaimedTaskId), null, 'stale claimed task hash must not be persisted');
+  });
+
+  it('upsertBySubject with lower cursor values does not regress existing cursors (I5 — cursor anti-regression)', async () => {
+    // I5 invariant: upsertBySubject on an existing task must never overwrite already-advanced
+    // issue cursors with lower seed values (e.g. from a re-routing event with stale fetchCommentCursor).
+    //
+    // Bug: mergeAutomationState used { ...existing?.issue, ...patch.issue } — since patch.issue
+    // fields come last in the spread, they OVERWRITE existing cursor values even when lower.
+    // A re-routing with fetchCommentCursor=50 on a task with lastCommentCursor=100 would regress.
+    //
+    // Fix: Math.max semantics for lastCommentCursor and lastDeliveredCursor during merge.
+    const { RedisTaskStore } = await import('../dist/domains/cats/services/stores/redis/RedisTaskStore.js');
+    const redis = new FakeRedisForTaskStore();
+    const store = new RedisTaskStore(redis, { ttlSeconds: 0 });
+
+    // First upsert: create task with advanced cursors (simulating a task that has been polling for a while)
+    await store.upsertBySubject({
+      kind: 'issue_tracking',
+      subjectKey: 'issue:owner/repo#900',
+      threadId: 'thread-i5',
+      title: 'Issue tracking: owner/repo#900',
+      why: 'track issue',
+      createdBy: 'system',
+      automationState: { issue: { lastCommentCursor: 100, lastDeliveredCursor: 90 } },
+    });
+
+    // Second upsert: re-routing fires with a stale seed (lower cursor values)
+    // This simulates a duplicate case.routed event where fetchCommentCursor returned a stale value.
+    const result = await store.upsertBySubject({
+      kind: 'issue_tracking',
+      subjectKey: 'issue:owner/repo#900',
+      threadId: 'thread-i5',
+      title: 'Issue tracking: owner/repo#900',
+      why: 'track issue re-routed',
+      createdBy: 'system',
+      automationState: { issue: { lastCommentCursor: 50, lastDeliveredCursor: 50 } },
+    });
+
+    // BUG: without fix, result.automationState.issue.lastCommentCursor would be 50 (regressed)
+    // FIX: cursors must remain at Math.max(existing, patch) = max(100, 50) = 100 and max(90, 50) = 90
+    assert.ok(result.automationState?.issue, 'automationState.issue must be present after re-upsert');
+    assert.strictEqual(
+      result.automationState.issue.lastCommentCursor,
+      100,
+      'lastCommentCursor must NOT be regressed to 50 — existing 100 must be preserved (I5)',
+    );
+    assert.strictEqual(
+      result.automationState.issue.lastDeliveredCursor,
+      90,
+      'lastDeliveredCursor must NOT be regressed to 50 — existing 90 must be preserved (I5)',
+    );
   });
 });

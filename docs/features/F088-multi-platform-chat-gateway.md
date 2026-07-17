@@ -11,9 +11,25 @@ created: 2026-03-09
 > **Status**: in-progress | **Core Completed**: 2026-04-10 | **Owner**: Ragdoll
 > Phase K (Telegram reliability hardening) fully merged 2026-05-07 (community clowder-ai#524/#641/#642)
 
+## User Journey
+
+**Scope unit**: IM 群聊 / DM 用户（飞书、Telegram）
+
+**Flow**:
+1. 用户在飞书群或 Telegram 对话里发消息（文字 / 语音 / 图片）
+2. FeishuAdapter / TelegramAdapter 接收事件 → ConnectorRouter 路由到对应 thread
+3. Cat 处理并生成回复（文字 / 语音 / 图片）
+4. OutboundDeliveryHook 向绑定的外部 chat 投递回复：
+   - 文字 → sendReply / sendRichMessage
+   - 语音 → sendMedia (audio)
+   - 图片（media_gallery block）→ absPath 直接上传，否则 https:// URL 下载后上传；内部 /uploads/ 路径无法解析时 skip（不发 localhost URL）
+5. 用户在原 IM 客户端看到猫的回复（包括图片直接可见，而不是无法打开的路径）
+
+---
+
 ## Why
 
-Cat Café 目前只能通过 Web UI 和猫猫对话。team lead和未来用户希望在**已有的工作聊天工具**中直接与猫猫交互，不用切换窗口。
+Cat Café 目前只能通过 Web UI 和猫猫对话。operator和未来用户希望在**已有的工作聊天工具**中直接与猫猫交互，不用切换窗口。
 
 MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。选型细节见 [平台选型参考](assets/F088/platform-selection.md)。
 
@@ -77,11 +93,11 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 
 ### Phase 8: IM Hub 配置向导 — 平台接入引导 UI
 
-**team lead已确认 Screen C 设计方向（2026-03-23）。**
+**operator已确认 Screen C 设计方向（2026-03-23）。**
 
 设计稿: `designs/f088-im-hub-config-wizard-ux.pen`
 
-**目标**: 在现有 `HubListModal` 中增加 Tab 导航，让team lead可以在 Web UI 中配置平台接入（飞书/Telegram/钉钉），无需手动编辑 `.env` 文件。
+**目标**: 在现有 `HubListModal` 中增加 Tab 导航，让operator可以在 Web UI 中配置平台接入（飞书/Telegram/钉钉），无需手动编辑 `.env` 文件。
 
 #### AC 清单
 
@@ -116,7 +132,7 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 
 ### Phase J: 文档生成 + 文件投递（📋 planned）
 
-**背景**：team lead希望猫能生成 PDF/DOCX/MD 等文档并通过飞书/Telegram 发送给用户。金渐层已在飞书测试 thread 中验证过文件生成能力。飞书 API 原生支持 `file_type: pdf/doc/xls/ppt/stream`，上传限制 30MB。
+**背景**：operator希望猫能生成 PDF/DOCX/MD 等文档并通过飞书/Telegram 发送给用户。金渐层已在飞书测试 thread 中验证过文件生成能力。飞书 API 原生支持 `file_type: pdf/doc/xls/ppt/stream`，上传限制 30MB。
 
 **需求**：
 1. 猫生成文档（PDF/DOCX/MD）→ 保存为本地临时文件
@@ -139,9 +155,9 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 - [x] 前端 FileBlock 渲染器 + 安全 href 校验
 - [x] Telegram adapter 文件发送已有（sendDocument）
 
-**J2 技术决策（team lead 2026-03-23 确认）**：
+**J2 技术决策（operator 2026-03-23 确认）**：
 - **生成工具：Pandoc**（`pandoc` CLI，非 JS 库）— 猫的输出天然是 Markdown，Pandoc 的 `md → pdf` 和 `md → docx` 是一等公民，无需加 npm 依赖
-- **安装由我们搞定，不让用户自己装**（team lead 2026-03-23 明确要求）：启动脚本 / setup 引导自动检测并安装 pandoc（类似 ffmpeg 的处理方式）
+- **安装由我们搞定，不让用户自己装**（operator 2026-03-23 明确要求）：启动脚本 / setup 引导自动检测并安装 pandoc（类似 ffmpeg 的处理方式）
 - macOS: `brew install pandoc`；PDF 额外需要 LaTeX engine（`tectonic` 更轻量，或 `mactex-no-gui`）
 - Docker / CI：Dockerfile 里 `apt-get install pandoc`
 - 运行时仍做 graceful degradation 兜底：万一安装失败 → 降级为发 .md 原文件
@@ -244,7 +260,7 @@ MVP 选型：**飞书**（国内企业）+ **Telegram**（海外开发者）。�
 - **ISSUE-5**: 飞书多猫回复气泡合并无区分度 — 所有猫共用同一 Feishu Bot，plain text 回复被飞书 UI 合并成连续气泡，不同猫的回复视觉上混在一起。**Phase E 修复**：统一走 interactive card，每条消息独立卡片 + 猫名头部。
 - **ISSUE-6**: `/thread` 命令缺失 — 用户发 `/thread <id> <msg>` 想路由消息到指定 thread，但 CommandLayer 不识别，静默 fallthrough 当普通消息投递给当前 session。**✅ PR #542 修复**。
 - **ISSUE-7**: `/threads` 列表 shortId 全部显示 `[thread_m]` — `slice(0,8)` 截断后 `thread_` 前缀相同导致无区分度。**✅ PR #542 修复**。
-- **ISSUE-8**: IM 命令污染对话 thread — `/threads`、`/where` 等元命令的消息存入当前对话 thread，混淆导航和对话内容。**已立项 → Phase G/H/I（三阶段）**：引入 IM Hub thread（控制面/对话面双绑定）。8A 命令隔离（纯控制命令只写 hubThreadId、不触发猫）→ 8B 模糊意图规则分流（无猫，系统卡片让用户选）→ 8C 猫参与 triage（可配置开关，兜底才喊猫）。bindingStore 增加 hubThreadId（懒创建）。**设计修正（team lead 2026-03-19）**：Hub thread **不能隐藏**，必须完全可见——team lead需要在 Web UI 看到所有命令历史，不能有黑盒。Hub thread 需要像猫猫训练营一样有专门入口（侧边栏按钮 + 列表页），不是普通 thread 混在对话列表里。**已确认设计（2026-03-20）**：(1) Thread 标记：`connectorHubState?: ConnectorHubStateV1` — 跟 `bootcampState` 同模式（team lead授权技术自决），含 `{ v: 1, connectorId, externalChatId, createdAt }`。(2) 侧边栏入口：🎓 按钮旁加 📡 Hub 按钮 → `HubListModal`（无 IM 面板，新建）。(3) Hub 列表页：按 connector 分组（飞书 Hub / Telegram Hub），显示绑定外部聊天（`lastCommandAt` 命令时间戳为 Phase G+ follow-up，8A 暂不含）。**✅ 8A merged PR #570**：命令隔离 + Hub thread 懒创建 + ConnectorHubStateV1 + 📡 侧边栏入口 + HubListModal + .strict() schema 防护。
+- **ISSUE-8**: IM 命令污染对话 thread — `/threads`、`/where` 等元命令的消息存入当前对话 thread，混淆导航和对话内容。**已立项 → Phase G/H/I（三阶段）**：引入 IM Hub thread（控制面/对话面双绑定）。8A 命令隔离（纯控制命令只写 hubThreadId、不触发猫）→ 8B 模糊意图规则分流（无猫，系统卡片让用户选）→ 8C 猫参与 triage（可配置开关，兜底才喊猫）。bindingStore 增加 hubThreadId（懒创建）。**设计修正（operator 2026-03-19）**：Hub thread **不能隐藏**，必须完全可见——operator需要在 Web UI 看到所有命令历史，不能有黑盒。Hub thread 需要像猫猫训练营一样有专门入口（侧边栏按钮 + 列表页），不是普通 thread 混在对话列表里。**已确认设计（2026-03-20）**：(1) Thread 标记：`connectorHubState?: ConnectorHubStateV1` — 跟 `bootcampState` 同模式（operator授权技术自决），含 `{ v: 1, connectorId, externalChatId, createdAt }`。(2) 侧边栏入口：🎓 按钮旁加 📡 Hub 按钮 → `HubListModal`（无 IM 面板，新建）。(3) Hub 列表页：按 connector 分组（飞书 Hub / Telegram Hub），显示绑定外部聊天（`lastCommandAt` 命令时间戳为 Phase G+ follow-up，8A 暂不含）。**✅ 8A merged PR #570**：命令隔离 + Hub thread 懒创建 + ConnectorHubStateV1 + 📡 侧边栏入口 + HubListModal + .strict() schema 防护。
 - **ISSUE-9**: 多猫回复只有第一只猫转发到飞书 — ConnectorInvokeTrigger 在 A2A 链完成后只调一次 deliver()，传第一只猫的 catId。**✅ PR #545 + #551 修复**：per-cat outbound delivery → per-turn ordered delivery（outboundTurns[] 替代 perCatContent Map），A→B→A ping-pong 正确分发 3 条独立消息。含 richBlocks-only 支持、deliver timeout、实际 speaker catId 归属、turn boundary 检测。
 - **ISSUE-10**: 飞书流式编辑完全不工作 — `sendPlaceholder` 发 `msg_type: 'text'`，但 `im.message.patch` 只支持编辑 `interactive`（卡片）消息，导致所有 `editMessage` 调用被飞书 API 拒绝（错误被 `.catch()` 静默吞掉）。Phase 4 设计时可能在 Telegram 上测的（Telegram editMessage 支持编辑任何类型），未在飞书验证。**PR #567 修复**：sendPlaceholder 改发 interactive card（`update_multi: true`），editMessage 改发 card JSON，新增 deleteMessage 清理占位卡片避免与 outbound card 重复。
 - **ISSUE-13**: 飞书图片+文字消息静默丢弃 — 飞书发送 text+image 混合消息时 `msg_type` 为 `post`（富文本），`FeishuAdapter.parseEvent()` 无 `case 'post':` handler → `default: return null` → 整条消息静默丢弃（HTTP 200，无日志）。**✅ PR #637 修复**：新增 `case 'post':` handler 遍历 `content[paragraph][node]` 结构，提取 `tag:'text'`/`tag:'a'` 文本和 `tag:'img'` 图片附件，支持 zh_cn/en_us/ja_jp locale fallback。同步增加 webhook diagnostic logging 和 callback vs agent 卡片视觉区分（紫色 `📨 传话` 标识）。

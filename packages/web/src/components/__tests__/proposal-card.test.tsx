@@ -25,9 +25,18 @@ vi.mock('@/components/ThreadSidebar/thread-navigation', () => ({
   pushThreadRouteWithHistory: (...args: unknown[]) => navigateMock(...args),
 }));
 
-const pinMock = vi.fn();
+const chatStoreState = vi.hoisted(() => ({
+  threads: [] as Array<{ id: string; projectPath?: string }>,
+  updateThreadPin: vi.fn(),
+}));
+const pinMock = chatStoreState.updateThreadPin;
 vi.mock('@/stores/chatStore', () => ({
-  useChatStore: { getState: () => ({ updateThreadPin: pinMock }) },
+  useChatStore: Object.assign(
+    (selector?: (state: typeof chatStoreState) => unknown) => (selector ? selector(chatStoreState) : chatStoreState),
+    {
+      getState: () => chatStoreState,
+    },
+  ),
 }));
 
 import { ProposalCard } from '@/components/rich/ProposalCard';
@@ -106,9 +115,14 @@ describe('ProposalCard', () => {
     return button as HTMLButtonElement;
   }
 
+  function readRequestBody(call: unknown[] | undefined): Record<string, unknown> {
+    if (!call) throw new Error('Missing request call');
+    return JSON.parse((call[1] as { body: string }).body) as Record<string, unknown>;
+  }
+
   it('renders title, body, prefilled fields, and pending action buttons', async () => {
     await render();
-    expect(container.textContent).toContain('📥 提议新建 thread：F128 verification');
+    expect(container.textContent).toContain('提议新建 thread：F128 verification');
     expect(container.textContent).toContain('Need a dedicated thread for review.');
     expect(container.textContent).toContain('thread_parent');
     expect(container.textContent).toContain('codex, gemini');
@@ -136,7 +150,7 @@ describe('ProposalCard', () => {
       `/api/proposals/${PROPOSAL_ID}/approve`,
       expect.objectContaining({ method: 'POST' }),
     );
-    expect(container.textContent).toContain('✓ 已批准');
+    expect(container.textContent).toContain('已批准');
     expect(container.textContent).toContain('thread_new');
   });
 
@@ -155,7 +169,7 @@ describe('ProposalCard', () => {
       `/api/proposals/${PROPOSAL_ID}/reject`,
       expect.objectContaining({ method: 'POST' }),
     );
-    expect(container.textContent).toContain('✗ 已驳回');
+    expect(container.textContent).toContain('已驳回');
   });
 
   it('edit mode sends user overrides in approve payload', async () => {
@@ -185,14 +199,13 @@ describe('ProposalCard', () => {
     });
     // The last call must include the edited title in its JSON body
     const approveCall = apiFetchMock.mock.calls.find(([url]) => String(url).endsWith('/approve'));
-    expect(approveCall).toBeTruthy();
-    const sentBody = JSON.parse((approveCall![1] as { body: string }).body);
+    const sentBody = readRequestBody(approveCall);
     expect(sentBody.title).toBe('edited title');
   });
 
   it('cat-cafe:proposal-updated CustomEvent flips status without refetching', async () => {
     await render();
-    expect(container.textContent).not.toContain('✓ 已批准');
+    expect(container.textContent).not.toContain('已批准');
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('cat-cafe:proposal-updated', {
@@ -200,7 +213,7 @@ describe('ProposalCard', () => {
         }),
       );
     });
-    expect(container.textContent).toContain('✓ 已批准');
+    expect(container.textContent).toContain('已批准');
     expect(container.textContent).toContain('thread_socket');
   });
 
@@ -230,8 +243,7 @@ describe('ProposalCard', () => {
       await Promise.resolve();
     });
     const approveCall = apiFetchMock.mock.calls.find(([url]) => String(url).endsWith('/approve'));
-    expect(approveCall).toBeTruthy();
-    const sentBody = JSON.parse((approveCall![1] as { body: string }).body);
+    const sentBody = readRequestBody(approveCall);
     expect(sentBody.pinned).toBeUndefined();
   });
 
@@ -271,8 +283,7 @@ describe('ProposalCard', () => {
       ([url, opts]) =>
         String(url) === '/api/threads/thread_pin_patch' && (opts as { method?: string })?.method === 'PATCH',
     );
-    expect(patchCall).toBeTruthy();
-    const patchBody = JSON.parse((patchCall![1] as { body: string }).body);
+    const patchBody = readRequestBody(patchCall);
     expect(patchBody.pinned).toBe(true);
     // P2 fix: local store must also be updated for immediate sidebar UX
     expect(pinMock).toHaveBeenCalledWith('thread_pin_patch', true);

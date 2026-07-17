@@ -28,7 +28,7 @@ function noopLog() {
  */
 function mockRouter(opts = {}) {
   const calls =
-    /** @type {Array<{userId: string, message: string, threadId: string, userMessageId: string, targetCats: string[], intent: object}>} */ ([]);
+    /** @type {Array<{userId: string, message: string, threadId: string, userMessageId: string, targetCats: string[], intent: object, options?: object}>} */ ([]);
   const ackCalls = /** @type {Array<{userId: string, threadId: string}>} */ ([]);
 
   return {
@@ -37,7 +37,7 @@ function mockRouter(opts = {}) {
     /** @type {any} */
     router: {
       async *routeExecution(userId, message, threadId, userMessageId, targetCats, intent, options) {
-        calls.push({ userId, message, threadId, userMessageId, targetCats, intent });
+        calls.push({ userId, message, threadId, userMessageId, targetCats, intent, options });
 
         if (opts.throwError) throw opts.throwError;
 
@@ -256,6 +256,19 @@ describe('ConnectorInvokeTrigger', () => {
     assert.strictEqual(routerMock.calls[0].threadId, 'thread-1');
     assert.strictEqual(routerMock.calls[0].userMessageId, 'msg-1');
     assert.deepStrictEqual(routerMock.calls[0].targetCats, ['opus']);
+  });
+
+  it('F222 P1: connector direct routeExecution passes frustrationAutoIssueEligible=false', async () => {
+    const trigger = createTrigger();
+    trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-f222');
+    await waitForTrigger();
+
+    assert.strictEqual(routerMock.calls.length, 1);
+    assert.strictEqual(
+      routerMock.calls[0].options?.frustrationAutoIssueEligible,
+      false,
+      'connector direct execution must suppress frustration detection',
+    );
   });
 
   it('broadcasts agent messages to WebSocket room', async () => {
@@ -600,8 +613,9 @@ describe('ConnectorInvokeTrigger', () => {
     assert.deepStrictEqual(deliverOrder, ['opus', 'codex'], 'Should deliver in cat order, not race order');
   });
 
-  it('cloud-P1: does NOT deliver empty reply for silent invocation (no text, no richBlocks)', async () => {
-    // Router yields only 'done' — no text, no richBlocks
+  it('cloud-P1: delivers fallback message for silent invocation (#873)', async () => {
+    // Router yields only 'done' — no text, no richBlocks.
+    // #873 fix: silent path now delivers a fallback so IM users aren't left hanging.
     const silentRouter = /** @type {any} */ ({
       async *routeExecution(userId, message, threadId, userMessageId, targetCats, intent, options) {
         yield {
@@ -626,7 +640,9 @@ describe('ConnectorInvokeTrigger', () => {
     trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'msg', 'msg-1');
     await waitForTrigger();
 
-    assert.strictEqual(deliverCalls.length, 0, 'Should NOT deliver empty reply for silent cat');
+    assert.strictEqual(deliverCalls.length, 1, 'Should deliver fallback for silent invocation');
+    assert.strictEqual(deliverCalls[0].catId, 'opus');
+    assert.ok(deliverCalls[0].content, 'Fallback content should be non-empty');
   });
 
   it('cloud-P1: hanging deliver does not block tracker cleanup', async () => {
@@ -744,6 +760,117 @@ describe('ConnectorInvokeTrigger', () => {
       cleanupCalled,
       false,
       'cleanup must NOT run after hard delivery failure (R5-P1: preserve placeholder)',
+    );
+  });
+
+  it('R7: silent fallback late-success triggers deferred placeholder cleanup', async () => {
+    // Silent invocation (only done, no text) → deliver times out → deliver later succeeds
+    // → cleanupPlaceholders must be called on late-success (R7 fix).
+    const silentRouter = /** @type {any} */ ({
+      async *routeExecution(_u, _m, _t, _mid, targetCats, _i, _o) {
+        yield {
+          type: 'done',
+          catId: targetCats[0],
+          content: '',
+          timestamp: Date.now(),
+          metadata: { usage: { inputTokens: 0, outputTokens: 0 } },
+        };
+      },
+      async ackCollectedCursors() {},
+    });
+
+    /** @type {() => void} */
+    let resolveDeliver = () => {};
+    const deliverPromise = new Promise((r) => {
+      resolveDeliver = r;
+    });
+    const outboundHook = {
+      deliver: async () => {
+        await deliverPromise;
+      },
+    };
+    let cleanupCalled = false;
+    const streamingHook = {
+      async onStreamStart() {},
+      async onStreamChunk() {},
+      async onStreamEnd() {},
+      cleanupPlaceholders: async () => {
+        cleanupCalled = true;
+      },
+    };
+
+    const trigger = createTrigger({
+      router: silentRouter,
+      outboundHook,
+      streamingHook,
+      deliverTimeoutMs: 50,
+    });
+    trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'msg', 'msg-1');
+
+    // Wait for timeout to fire
+    await new Promise((r) => setTimeout(r, 200));
+    assert.strictEqual(cleanupCalled, false, 'cleanup must NOT run immediately after silent timeout');
+
+    // Late-success: deliver finally resolves
+    resolveDeliver();
+    await new Promise((r) => setTimeout(r, 100));
+    assert.strictEqual(cleanupCalled, true, 'cleanup must run after silent late-success delivery (R7)');
+  });
+
+  it('R7: silent fallback late-failure must NOT trigger cleanup (preserve placeholder)', async () => {
+    // Silent invocation → deliver times out → deliver later rejects
+    // → cleanupPlaceholders must NOT be called (thinking card stays as fallback UX).
+    const silentRouter = /** @type {any} */ ({
+      async *routeExecution(_u, _m, _t, _mid, targetCats, _i, _o) {
+        yield {
+          type: 'done',
+          catId: targetCats[0],
+          content: '',
+          timestamp: Date.now(),
+          metadata: { usage: { inputTokens: 0, outputTokens: 0 } },
+        };
+      },
+      async ackCollectedCursors() {},
+    });
+
+    /** @type {(err: Error) => void} */
+    let rejectDeliver = () => {};
+    const deliverPromise = new Promise((_, rej) => {
+      rejectDeliver = rej;
+    });
+    const outboundHook = {
+      deliver: async () => {
+        await deliverPromise;
+      },
+    };
+    let cleanupCalled = false;
+    const streamingHook = {
+      async onStreamStart() {},
+      async onStreamChunk() {},
+      async onStreamEnd() {},
+      cleanupPlaceholders: async () => {
+        cleanupCalled = true;
+      },
+    };
+
+    const trigger = createTrigger({
+      router: silentRouter,
+      outboundHook,
+      streamingHook,
+      deliverTimeoutMs: 50,
+    });
+    trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'msg', 'msg-1');
+
+    await new Promise((r) => setTimeout(r, 200));
+    assert.strictEqual(cleanupCalled, false, 'cleanup must NOT run after silent timeout');
+
+    // Late-failure: deliver rejects
+    rejectDeliver(new Error('connector down'));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.strictEqual(
+      cleanupCalled,
+      false,
+      'cleanup must NOT run after silent hard failure (R7: preserve placeholder)',
     );
   });
 
@@ -1214,7 +1341,7 @@ describe('ConnectorInvokeTrigger', () => {
       const policy = { priority: 'urgent', reason: 'webhook_retry' };
 
       // First trigger — should enqueue
-      const r1 = trigger.trigger(
+      const r1 = await trigger.trigger(
         'thread-1',
         /** @type {any} */ ('opus'),
         'user-1',
@@ -1227,7 +1354,7 @@ describe('ConnectorInvokeTrigger', () => {
       assert.strictEqual(queue.list('thread-1', 'user-1').length, 1);
 
       // Second trigger with same messageId — should be deduped
-      const r2 = trigger.trigger(
+      const r2 = await trigger.trigger(
         'thread-1',
         /** @type {any} */ ('opus'),
         'user-1',
@@ -1240,7 +1367,7 @@ describe('ConnectorInvokeTrigger', () => {
       assert.strictEqual(queue.list('thread-1', 'user-1').length, 1, 'Queue should still have exactly 1 entry');
 
       // Different messageId — should enqueue normally
-      const r3 = trigger.trigger(
+      const r3 = await trigger.trigger(
         'thread-1',
         /** @type {any} */ ('opus'),
         'user-1',
@@ -1304,7 +1431,7 @@ describe('ConnectorInvokeTrigger', () => {
         async onInvocationComplete() {},
       });
       const trigger = createTrigger({ queueProcessor: mockQueueProcessor });
-      const outcome = trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-1');
+      const outcome = await trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-1');
       await waitForTrigger();
 
       assert.strictEqual(outcome, 'enqueued', 'should enqueue when thread is busy');
@@ -1321,7 +1448,7 @@ describe('ConnectorInvokeTrigger', () => {
       // Mock tryStartThread returning null (thread already has active invocation)
       trackerMock.tracker.tryStartThread = (_threadId, _catId) => null;
       const trigger = createTrigger({ queueProcessor: mockQueueProcessor });
-      const outcome = trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-1');
+      const outcome = await trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-1');
       await waitForTrigger();
 
       assert.strictEqual(outcome, 'enqueued', 'should enqueue when tryStartThread fails');
@@ -1337,7 +1464,7 @@ describe('ConnectorInvokeTrigger', () => {
       const acquiredController = new AbortController();
       trackerMock.tracker.tryStartThread = (_threadId, _catId) => acquiredController;
       const trigger = createTrigger({ queueProcessor: mockQueueProcessor });
-      const outcome = trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-1');
+      const outcome = await trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'Review msg', 'msg-1');
       await waitForTrigger();
 
       assert.strictEqual(outcome, 'dispatched', 'should dispatch when tryStartThread succeeds');
@@ -1348,8 +1475,13 @@ describe('ConnectorInvokeTrigger', () => {
       // Scenario: opus is running, connector targets codex — should still queue (thread-level)
       trackerMock.setActive('thread-1', 'user-1');
       const trigger = createTrigger();
-      const outcome = trigger.trigger('thread-1', /** @type {any} */ ('codex'), 'user-1', 'CI notification', 'msg-ci');
-      await waitForTrigger();
+      const outcome = await trigger.trigger(
+        'thread-1',
+        /** @type {any} */ ('codex'),
+        'user-1',
+        'CI notification',
+        'msg-ci',
+      );
 
       assert.strictEqual(outcome, 'enqueued', 'connector must queue when ANY cat is busy in thread');
       assert.strictEqual(routerMock.calls.length, 0, 'should NOT dispatch concurrently');
@@ -1403,8 +1535,7 @@ describe('ConnectorInvokeTrigger', () => {
       });
       trackerMock.setActive('thread-1', 'user-1');
       const trigger = createTrigger({ invocationQueue: mockFullQueue });
-      const outcome = trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'overflow', 'mid-full');
-      await waitForTrigger();
+      const outcome = await trigger.trigger('thread-1', /** @type {any} */ ('opus'), 'user-1', 'overflow', 'mid-full');
 
       assert.strictEqual(outcome, 'full');
       const systemInfoMsgs = socketMock.broadcasts.filter(

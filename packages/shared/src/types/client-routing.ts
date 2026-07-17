@@ -1,7 +1,7 @@
 import type { ClientId } from './cat.js';
 import type { AccountProtocol } from './cat-breed.js';
 
-export type BuiltinAccountClient = Extract<ClientId, 'anthropic' | 'openai' | 'google' | 'kimi' | 'dare' | 'opencode'>;
+export type BuiltinAccountClient = Extract<ClientId, 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode'>;
 export type BuiltinAccountProtocol = Extract<AccountProtocol, 'anthropic' | 'openai' | 'google' | 'kimi'>;
 
 const BUILTIN_ACCOUNT_IDS: Record<BuiltinAccountClient, string> = {
@@ -9,7 +9,6 @@ const BUILTIN_ACCOUNT_IDS: Record<BuiltinAccountClient, string> = {
   openai: 'codex',
   google: 'gemini',
   kimi: 'kimi',
-  dare: 'dare',
   opencode: 'opencode',
 };
 
@@ -19,9 +18,10 @@ export function builtinAccountFamilyForClient(client: ClientId): BuiltinAccountC
     case 'openai':
     case 'google':
     case 'kimi':
-    case 'dare':
     case 'opencode':
       return client;
+    // F161: generic ACP is a transport, not an account family — no synthetic builtin account.
+    // Returning null prevents auto-rebase from rewriting accountRef to non-existent 'acp'.
     case 'catagent':
       return 'anthropic';
     default:
@@ -41,7 +41,6 @@ export function protocolForClient(client: ClientId): BuiltinAccountProtocol | nu
     case 'opencode':
       return 'anthropic';
     case 'openai':
-    case 'dare':
       return 'openai';
     case 'google':
       return 'google';

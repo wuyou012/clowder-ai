@@ -3,7 +3,7 @@
  * Used by GET /api/config/env-summary to report current values to the frontend.
  *
  * ⚠️  ALL CATS: 新增 process.env.XXX → 必须在下方 ENV_VARS 数组注册！
- *    不注册 = 前端「环境 & 文件」页面看不到 = 铲屎官不知道 = 不存在。
+ *    不注册 = 前端「环境 & 文件」页面看不到 = co-creator不知道 = 不存在。
  *    SOP.md「环境变量注册」章节有说明。
  *
  * To add a new env var:
@@ -22,7 +22,6 @@ export type EnvCategory =
   | 'proxy'
   | 'connector'
   | 'codex'
-  | 'dare'
   | 'gemini'
   | 'kimi'
   | 'tts'
@@ -68,7 +67,6 @@ export const ENV_CATEGORIES: Record<EnvCategory, string> = {
   proxy: 'Anthropic 代理网关',
   connector: '平台接入 (Telegram/飞书)',
   codex: '缅因猫 (Codex)',
-  dare: '狸花猫 (Dare)',
   gemini: '暹罗猫 (Gemini)',
   kimi: 'Kimi',
   tts: '语音合成 (TTS)',
@@ -209,6 +207,38 @@ export const ENV_VARS: EnvDefinition[] = [
     runtimeEditable: false,
   },
   {
+    name: 'F233_BALL_CUSTODY_PROBE_INTERVAL_MS',
+    defaultValue: '60000',
+    description: 'F233 ball-custody ProbeScheduler 轮询间隔（毫秒，启动时读取）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'F233_FEAT_TRAJECTORY_COLLECTOR_INTERVAL_MS',
+    defaultValue: '900000',
+    description: 'F233 Phase C feat trajectory collector cron 轮询间隔（毫秒，默认 15 分钟；启动时读取）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_REPO_ROOT',
+    defaultValue: '(进程 CWD)',
+    description: 'F233 Phase C feat trajectory collector 所读 cat-cafe 仓根目录（含 .git）。未设置时用 process.cwd()',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_REPO_FULL_NAME',
+    defaultValue: 'zts212653/cat-cafe',
+    description: 'F233 Phase C feat trajectory collector 调 gh CLI 用的 owner/repo（GitHub PR 元数据查询）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
     name: 'CAT_CAFE_AGENT_KEY_SECRET',
     defaultValue: '(空)',
     description: 'F178 Persistent MCP Agent-Key Auth — 共享密钥（直接环境变量提供）',
@@ -230,6 +260,59 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'F178 Persistent MCP Agent-Key Auth — catId 到密钥文件路径的 JSON 映射（Antigravity variants）',
     category: 'server',
     sensitive: true,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_REMOTE_PORT',
+    defaultValue: '3098',
+    description:
+      'F247 B1a Cloud Cat — remote-spike.ts 监听端口（公网 Remote MCP gateway for cloud cat e.g. ChatGPT Pro 砚砚 Pro）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_REMOTE_TOKEN',
+    defaultValue: '(空)',
+    description:
+      'F247 B1a Cloud Cat — remote-spike.ts ?token= disposable interim guard（B1a 单防线；B1b 升级 verified CF Access OAuth 替换）',
+    category: 'server',
+    sensitive: true,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_DESKTOP_MODE',
+    defaultValue: 'fable-phase0',
+    description:
+      'F247 B1a Cloud Cat — remote-spike.ts 工具白名单 mode 选择（fable-phase0 / cloud-pro-phase0；收窄到 10 项 collab+memory 工具）',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_PROVISION_GLOBAL_SIDECAR',
+    defaultValue: '0',
+    description:
+      'F178 Persistent MCP Agent-Key Auth — 仅全局 sidecar owner（runtime 主实例）设为 1；alpha/dev 不得设置，避免覆盖 ~/.cat-cafe/agent-keys。',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGENT_KEY_ALLOW_MEMORY_SIDECAR',
+    defaultValue: '0',
+    description:
+      'F178 Persistent MCP Agent-Key Auth — 本地降级开发开关；仅在 CAT_CAFE_PROVISION_GLOBAL_SIDECAR=1 且无 Redis 时允许 memory backend 写 sidecar。',
+    category: 'server',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGENT_KEY_SIDECAR_DISABLED',
+    defaultValue: '0',
+    description: 'F178 Persistent MCP Agent-Key Auth — 强制关闭全局 sidecar provisioning，优先级高于 owner 标记。',
+    category: 'server',
+    sensitive: false,
     runtimeEditable: false,
   },
   {
@@ -360,6 +443,30 @@ export const ENV_VARS: EnvDefinition[] = [
     hubVisible: false,
   },
   {
+    name: 'COMMUNITY_PUBLISH_DEFAULT_REPO',
+    defaultValue: 'clowder-ai/cat-cafe',
+    description: 'F235 社区发布默认 GitHub 仓库（owner/repo 格式）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
+    name: 'COMMUNITY_PUBLISH_REPO_ALLOWLIST',
+    defaultValue: 'clowder-ai/cat-cafe',
+    description: 'F235 社区发布允许的 GitHub 仓库列表（逗号分隔 owner/repo）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
+    name: 'COMMUNITY_NARRATOR_THREAD_ID',
+    defaultValue: '(未设置 → 不启用)',
+    description: 'F168 社区 narrator 工作线程 ID（设置后 dispatch 自动 spawn narrator 讲人话）',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
     name: 'WEB_PUBLIC_DIR',
     defaultValue: '../web/public',
     description: 'Web 前端静态文件目录（connector gateway 静态资源服务）',
@@ -377,7 +484,7 @@ export const ENV_VARS: EnvDefinition[] = [
   {
     name: 'CAT_CAFE_GLOBAL_CONFIG_ROOT',
     defaultValue: '(未设置 → homedir())',
-    description: '全局配置根目录（accounts / credentials 查找路径的父目录，实际路径为 ${ROOT}/.cat-cafe/）',
+    description: '全局配置根目录（accounts / credentials 查找路径的父目录，实际路径为 <ROOT>/.cat-cafe/）',
     category: 'server',
     sensitive: false,
     hubVisible: false,
@@ -403,7 +510,7 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'CAT_CAFE_RUNTIME_ROOT',
     defaultValue: '(未设置 → process.cwd())',
     description:
-      'F061: Clowder AI runtime 二进制根目录（runtime startup 自动 export 为 $RUNTIME_DIR），优先级高于 capability orchestrator 的 auto-detection，用于 Antigravity MCP config args 路径',
+      'F061: Cat Café runtime 二进制根目录（runtime startup 自动 export 为 $RUNTIME_DIR），优先级高于 capability orchestrator 的 auto-detection，用于 Antigravity MCP config args 路径',
     category: 'server',
     sensitive: false,
     runtimeEditable: false,
@@ -491,6 +598,13 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'TRANSCRIPT_DATA_DIR',
     defaultValue: './data/transcripts',
     description: 'Session transcript 存储目录',
+    category: 'storage',
+    sensitive: false,
+  },
+  {
+    name: 'ANNOTATION_DATA_DIR',
+    defaultValue: '{repoRoot}/data/stories',
+    description: 'Story annotation + export 存储目录（F252 Phase D）',
     category: 'storage',
     sensitive: false,
   },
@@ -767,6 +881,32 @@ export const ENV_VARS: EnvDefinition[] = [
     hubVisible: false,
   },
   {
+    name: 'CAT_CAFE_CREDENTIAL_FILE',
+    defaultValue: '(运行时注入)',
+    description:
+      "#1092/#1099-P1: MCP credential refresh file path, SESSION-scoped (<threadId>_<catId>_<nonce>.json). The ACP layer injects it into a session's MCP server env at session creation and rewrites the same file with fresh invocationId+callbackToken on each resume; MCP server re-reads it per callback. Superseded processes keep their own file so registry.isLatest() still rejects their late writes.",
+    category: 'cli',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
+    name: 'CAT_CAFE_MCP_CREDS_DIR',
+    defaultValue: '(未设置 → <monorepoRoot>/.cat-cafe/mcp-creds)',
+    description:
+      '#1099-P1: Override directory for session-scoped MCP credential files (primarily for tests — production uses the monorepo-root default).',
+    category: 'server',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
+    name: 'CAT_CAFE_THREAD_ID',
+    defaultValue: '(运行时注入)',
+    description: '当前 thread ID（由 API 进程注入 MCP Server 子进程 env，用于跨线程 affordance 抑制本 thread 提示）',
+    category: 'cli',
+    sensitive: false,
+    hubVisible: false,
+  },
+  {
     name: 'CAT_CAFE_CAT_ID',
     defaultValue: '(运行时注入)',
     description: '当前猫 ID（由 API 进程注入 MCP Server 子进程 env）',
@@ -853,206 +993,80 @@ export const ENV_VARS: EnvDefinition[] = [
     hubVisible: false,
   },
 
-  // --- connector ---
+  // --- connector infrastructure ---
+  // F240: Per-connector config (TELEGRAM_*, FEISHU_*, DINGTALK_*, XIAOYI_*,
+  // WEIXIN_*, WECOM_*) moved to YAML manifests (connector.yaml/plugin.yaml).
+  // Only infrastructure-level and diagnostic vars remain here.
   {
-    name: 'TELEGRAM_BOT_TOKEN',
-    defaultValue: '(未设置 → 不启用)',
-    description: 'Telegram Bot Token',
-    category: 'connector',
-    sensitive: true,
-  },
-  {
-    name: 'FEISHU_APP_ID',
-    defaultValue: '(未设置 → 不启用)',
-    description: '飞书应用 App ID',
+    name: 'CONNECTOR_GATEWAY_AUTOSTART',
+    defaultValue: 'runtime-production-only',
+    description:
+      '预配置 IM connector 自动接入开关：默认仅 runtime production（NODE_ENV=production + CAT_CAFE_RUNTIME_ROOT）启用；start:direct/alpha/dev 默认禁用。需在启动前通过 env/.env 设置，设 1 强制启用，0 强制禁用',
     category: 'connector',
     sensitive: false,
-  },
-  {
-    name: 'FEISHU_APP_SECRET',
-    defaultValue: '(未设置)',
-    description: '飞书应用 App Secret',
-    category: 'connector',
-    sensitive: true,
-  },
-  {
-    name: 'FEISHU_VERIFICATION_TOKEN',
-    defaultValue: '(未设置)',
-    description: '飞书 webhook 验证 token（仅 webhook 模式需要）',
-    category: 'connector',
-    sensitive: true,
-  },
-  {
-    name: 'FEISHU_CONNECTION_MODE',
-    defaultValue: 'webhook',
-    description: '飞书连接模式：webhook（需公网 URL）或 websocket（长连接，无需公网）',
-    category: 'connector',
-    sensitive: false,
-  },
-  {
-    name: 'DINGTALK_APP_KEY',
-    defaultValue: '(未设置 → 不启用)',
-    description: '钉钉应用 AppKey',
-    category: 'connector',
-    sensitive: false,
-  },
-  {
-    name: 'DINGTALK_APP_SECRET',
-    defaultValue: '(未设置)',
-    description: '钉钉应用 AppSecret',
-    category: 'connector',
-    sensitive: true,
-  },
-  {
-    name: 'XIAOYI_AK',
-    defaultValue: '(未设置 → 不启用)',
-    description: '华为小艺 OpenClaw Access Key',
-    category: 'connector',
-    sensitive: false,
-  },
-  {
-    name: 'XIAOYI_SK',
-    defaultValue: '(未设置)',
-    description: '华为小艺 OpenClaw Secret Key',
-    category: 'connector',
-    sensitive: true,
-  },
-  {
-    name: 'XIAOYI_AGENT_ID',
-    defaultValue: '(未设置)',
-    description: '华为小艺 Agent ID',
-    category: 'connector',
-    sensitive: false,
-  },
-  {
-    name: 'FEISHU_BOT_OPEN_ID',
-    defaultValue: '(未设置)',
-    description: '飞书机器人 Open ID（接收消息的 bot 身份标识）',
-    category: 'connector',
-    sensitive: false,
-  },
-  {
-    name: 'FEISHU_ADMIN_OPEN_IDS',
-    defaultValue: '(未设置)',
-    description: '飞书管理员 Open ID 列表（逗号分隔）',
-    category: 'connector',
-    sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'WEIXIN_VOICE_ITEM_MODE',
-    defaultValue: 'minimal',
+    defaultValue: '(未设置)',
     description:
-      '微信语音消息 voice_item 模式（minimal/playtime/playtime-sec，危险实验模式见 WEIXIN_ENABLE_UNSAFE_VOICE_MODES）',
+      '微信原生 voice_item 发送实验模式；未设置时音频按文件附件发送。可选 minimal / playtime / playtime-sec / playtime-encode / metadata',
     category: 'connector',
     sensitive: false,
+    runtimeEditable: true,
+    allowedValues: ['minimal', 'playtime', 'playtime-sec', 'playtime-encode', 'metadata'],
   },
   {
     name: 'WEIXIN_ENABLE_UNSAFE_VOICE_MODES',
     defaultValue: '0',
-    description:
-      '是否允许危险语音实验模式（1=允许 playtime-encode/metadata，0=自动回退 playtime，避免“语音完全收不到”）',
+    description: '设为 1 时允许已知不稳定的微信原生 voice_item 实验模式（playtime-encode / metadata）',
     category: 'connector',
     sensitive: false,
+    runtimeEditable: true,
+    allowedValues: ['0', '1'],
   },
   {
     name: 'WEIXIN_CAPTURE_INBOUND_VOICE_MEDIA',
     defaultValue: '0',
-    description: '是否抓取入站微信语音媒体（1=把 voice media 当文件附件落盘，便于 SILK 二进制对比；0=保持当前行为）',
+    description: '设为 1 时将微信入站语音媒体捕获为文件附件，便于调试语音/媒体链路',
     category: 'connector',
     sensitive: false,
-  },
-  {
-    name: 'WEIXIN_BOT_TOKEN',
-    defaultValue: '(未设置 → 不启用)',
-    description: '微信机器人 Token（F137 微信个人网关）',
-    category: 'connector',
-    sensitive: true,
-  },
-  {
-    name: 'WECOM_BOT_ID',
-    defaultValue: '(未设置 → 不启用智能机器人模式)',
-    description: '企业微信智能机器人 Bot ID（WebSocket 长连接模式）',
-    category: 'connector',
-    sensitive: false,
-    exampleRecommended: true,
-  },
-  {
-    name: 'WECOM_BOT_SECRET',
-    defaultValue: '(未设置)',
-    description: '企业微信智能机器人 Bot Secret',
-    category: 'connector',
-    sensitive: true,
-    exampleRecommended: true,
-  },
-  {
-    name: 'WECOM_CORP_ID',
-    defaultValue: '(未设置 → 不启用自建应用模式)',
-    description: '企业微信企业 ID（自建应用 HTTP 回调模式）',
-    category: 'connector',
-    sensitive: false,
-    exampleRecommended: true,
-  },
-  {
-    name: 'WECOM_AGENT_ID',
-    defaultValue: '(未设置)',
-    description: '企业微信自建应用 AgentId',
-    category: 'connector',
-    sensitive: false,
-    exampleRecommended: true,
-  },
-  {
-    name: 'WECOM_AGENT_SECRET',
-    defaultValue: '(未设置)',
-    description: '企业微信自建应用 Secret',
-    category: 'connector',
-    sensitive: true,
-    exampleRecommended: true,
-  },
-  {
-    name: 'WECOM_TOKEN',
-    defaultValue: '(未设置)',
-    description: '企业微信回调 Token（HTTP 模式验签）',
-    category: 'connector',
-    sensitive: true,
-    exampleRecommended: true,
-  },
-  {
-    name: 'WECOM_ENCODING_AES_KEY',
-    defaultValue: '(未设置)',
-    description: '企业微信回调 EncodingAESKey（43字符，HTTP 模式解密用）',
-    category: 'connector',
-    sensitive: true,
-    exampleRecommended: true,
+    runtimeEditable: true,
+    allowedValues: ['0', '1'],
   },
 
-  // --- GitHub Repo Inbox (F141) ---
+  // --- GitHub Repo Inbox / Review ---
   {
     name: 'GITHUB_WEBHOOK_SECRET',
-    defaultValue: '(未设置 → 不启用)',
-    description: 'GitHub webhook HMAC-SHA256 shared secret（F141 Repo Inbox）',
-    category: 'connector',
+    defaultValue: '(未设置 → Repo Inbox webhook 不启用)',
+    description: 'GitHub Repo Inbox webhook secret（需与 GitHub 仓库 webhook 配置一致）',
+    category: 'github_review',
     sensitive: true,
+    runtimeEditable: true,
+    exampleRecommended: true,
   },
   {
     name: 'GITHUB_REPO_ALLOWLIST',
     defaultValue: '(未设置)',
-    description: '允许的仓库列表，逗号分隔（如 zts212653/clowder-ai）',
-    category: 'connector',
+    description: 'GitHub Repo Inbox 允许接收事件的仓库列表（owner/repo，多个用逗号分隔）',
+    category: 'github_review',
     sensitive: false,
+    exampleRecommended: true,
   },
   {
     name: 'GITHUB_REPO_INBOX_CAT_ID',
     defaultValue: '(未设置)',
-    description: '接收 Repo Inbox 事件的猫 ID',
-    category: 'connector',
+    description: 'GitHub Repo Inbox 默认收件猫 catId',
+    category: 'github_review',
     sensitive: false,
+    exampleRecommended: true,
   },
   {
     name: 'GITHUB_AUTHORITATIVE_REVIEW_LOGINS',
     defaultValue: 'chatgpt-codex-connector[bot]',
     description:
       '[DEPRECATED] F140 Phase E.2 cutover (2026-04-24): Rule B authoritative-source skip removed; this var now only serves as backward-compat fallback for GITHUB_SETUP_NOISE_BOT_LOGINS. Will be removed in a follow-up release.',
-    category: 'connector',
+    category: 'github_review',
     sensitive: false,
   },
   {
@@ -1060,23 +1074,22 @@ export const ENV_VARS: EnvDefinition[] = [
     defaultValue: 'chatgpt-codex-connector[bot]',
     description:
       'Comma-separated GitHub bot logins whose conversation comments may contain Codex setup-only guidance. F140 polling-side setup-noise filter skips those (bot + conversation + setup-only body, no codex review content). Falls back to GITHUB_AUTHORITATIVE_REVIEW_LOGINS for backward compat.',
-    category: 'connector',
+    category: 'github_review',
     sensitive: false,
   },
   {
     name: 'GITHUB_SELF_LOGIN',
-    defaultValue: '(未设置 → gh api /user 自动解析)',
-    description:
-      'F140 echo filter: GitHub 登录名，用于过滤自己发的 PR comment 避免回流消息总线。设置后跳过 gh api /user 解析，适用于 gh CLI 不可用的环境',
-    category: 'connector',
+    defaultValue: '(未设置 → 自动使用 gh api /user 识别)',
+    description: 'GitHub review feedback 自身账号 fallback；当 gh api /user 无法识别时用于防止处理自己发出的评论',
+    category: 'github_review',
     sensitive: false,
-    runtimeEditable: false,
+    runtimeEditable: true,
   },
   {
     name: 'GITHUB_TOKEN',
     defaultValue: '(未设置)',
     description: 'GitHub Personal Access Token（Scheduler 仓库活跃度模板 HTTP 请求鉴权）',
-    category: 'connector',
+    category: 'github_review',
     sensitive: true,
   },
 
@@ -1110,10 +1123,6 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: true,
   },
 
-  // --- dare ---
-  { name: 'DARE_ADAPTER', defaultValue: 'openrouter', description: '狸花猫适配器', category: 'dare', sensitive: false },
-  { name: 'DARE_PATH', defaultValue: '(未设置)', description: 'Dare CLI 路径', category: 'dare', sensitive: false },
-
   // --- gemini ---
   {
     name: 'GOOGLE_API_KEY',
@@ -1134,6 +1143,15 @@ export const ENV_VARS: EnvDefinition[] = [
     name: 'CAT_CAFE_AGY_PROFILE_ROOT',
     defaultValue: '~/.cat-cafe/agy-profiles',
     description: 'F210 Phase G：隔离 AGY profile HOME 根目录；每只 AGY profile 猫会在此目录下创建独立 HOME。',
+    category: 'gemini',
+    sensitive: false,
+    runtimeEditable: false,
+  },
+  {
+    name: 'CAT_CAFE_AGY_CWD_ROOT',
+    defaultValue: '~/.cat-cafe/agy-cwd',
+    description:
+      'F210 cache-leak fix：无 agyProfile 时 AGY spawn cwd sandbox 根目录（每只 AGY 猫在此创建 <catId> 子目录），让 agy cwd-relative cache（cache/projects.json）落 sandbox 而非 repo root。',
     category: 'gemini',
     sensitive: false,
     runtimeEditable: false,
@@ -1508,6 +1526,20 @@ export const ENV_VARS: EnvDefinition[] = [
     sensitive: false,
   },
   {
+    name: 'TASK_OUTCOME_DB',
+    defaultValue: '{repoRoot}/task-outcome-episodes.sqlite',
+    description: 'F192 Phase G Task Outcome Episode SQLite 数据库路径',
+    category: 'evidence',
+    sensitive: false,
+  },
+  {
+    name: 'EVENT_MEMORY_DB',
+    defaultValue: '{repoRoot}/event-memory.sqlite',
+    description: 'F227 Event Memory typed event index SQLite 数据库路径',
+    category: 'evidence',
+    sensitive: false,
+  },
+  {
     name: 'F102_API_BASE',
     defaultValue: '(未设置 → 摘要调度器不启用)',
     description: 'Phase G 摘要调度用的反代 API 地址（不是猫猫自己的 provider profile）',
@@ -1581,6 +1613,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'HMAC salt — 遥测系统 ID 伪名化用。生产环境必设，缺失则禁用 OTel',
     category: 'telemetry',
     sensitive: true,
+    runtimeEditable: false,
   },
   {
     name: 'TELEMETRY_EXPORT_RAW_SYSTEM_IDS',
@@ -1588,6 +1621,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: '设为 1 跳过 HMAC，导出原始系统 ID（仅限自托管受控环境）',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'PROMETHEUS_PORT',
@@ -1595,6 +1629,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'Prometheus /metrics 抓取端口',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'OTEL_EXPORTER_OTLP_ENDPOINT',
@@ -1602,6 +1637,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'OTLP 导出端点（设置后同时推送 traces/metrics/logs 到该端点）',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'OTEL_SDK_DISABLED',
@@ -1609,6 +1645,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: '设为 true 完全禁用 OTel SDK',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'TELEMETRY_ALERT_ERROR_RATE',
@@ -1616,6 +1653,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'Burn-rate 告警：错误率阈值（0-1）',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'TELEMETRY_ALERT_P95_LATENCY_S',
@@ -1623,6 +1661,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'Burn-rate 告警：P95 延迟阈值（秒）',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'TELEMETRY_ALERT_ACTIVE_INVOCATIONS',
@@ -1630,6 +1669,7 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'Burn-rate 告警：活跃 invocation 数阈值',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: false,
   },
   {
     name: 'PROMPT_CAPTURE',
@@ -1637,6 +1677,8 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'Prompt X-Ray 开关（on=启用 canonical prompt 捕获）',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: true,
+    allowedValues: ['off', 'on'],
   },
   {
     name: 'PROMPT_CAPTURE_CATS',
@@ -1644,12 +1686,20 @@ export const ENV_VARS: EnvDefinition[] = [
     description: 'Prompt X-Ray 白名单：逗号分隔 catId（空=全部）',
     category: 'telemetry',
     sensitive: false,
+    runtimeEditable: true,
   },
   // --- antigravity (F061 Bridge) ---
   {
     name: 'ANTIGRAVITY_PORT',
     defaultValue: '(未设置 → 自动发现)',
     description: 'Antigravity Language Server ConnectRPC 端口（覆盖自动发现）',
+    category: 'antigravity',
+    sensitive: false,
+  },
+  {
+    name: 'PINCHTAB_CDP_PORT',
+    defaultValue: '9870',
+    description: 'PinchTab Chrome CDP 调试端口（覆盖默认 remote-debugging-port）',
     category: 'antigravity',
     sensitive: false,
   },

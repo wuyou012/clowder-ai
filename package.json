@@ -2,7 +2,7 @@
   "name": "cat-cafe",
   "version": "0.1.0",
   "private": true,
-  "description": "三只 AI 猫猫的协作空间",
+  "description": "Your AI team collaboration space",
   "scripts": {
     "init": "./scripts/init-cafe.sh",
     "preinstall": "node scripts/check-node-runtime.mjs",
@@ -48,9 +48,14 @@
     "dev": "pnpm -r --parallel run dev",
     "build": "pnpm -r run build",
     "lint": "pnpm -r run lint",
-    "check": "pnpm biome check . --diagnostic-level=error && pnpm check:features && pnpm check:sop-definitions && pnpm check:skills:manifest && pnpm check:env-ports && pnpm check:env-registry && pnpm check:env-example && pnpm check:start-profile-isolation && pnpm check:pre-merge-gate && pnpm check:guides && pnpm check:followup-tails && pnpm check:scripts-ascii-only",
+    "check": "pnpm biome check . --diagnostic-level=error && pnpm check:biome-review-worktrees && pnpm check:features && pnpm check:capability-tips && pnpm check:sop-definitions && pnpm check:skills:manifest && pnpm check:skills:surfaces && pnpm check:env-ports && pnpm check:env-registry && pnpm check:env-example && pnpm check:start-profile-isolation && pnpm check:pre-merge-gate && pnpm check:guides && pnpm check:followup-tails && pnpm check:scripts-ascii-only && pnpm check:whisper-dispatch",
+    "video:new": "node scripts/video-forge/new-project.mjs",
+    "check:biome-review-worktrees": "node --test scripts/biome-review-worktrees-ignore.test.mjs",
+    "check:video-new": "node --test test/scripts/video-new-project.test.mjs",
     "check:scripts-ascii-only": "node scripts/check-scripts-ascii-only.mjs",
+    "check:whisper-dispatch": "node --test scripts/services/whisper-dispatch.test.mjs",
     "check:guides": "node scripts/gen-guide-catalog.mjs",
+    "check:biome-version": "node scripts/check-biome-version.mjs",
     "check:fix": "pnpm biome check --write .",
     "test": "pnpm -r --workspace-concurrency=1 --if-present run test",
     "test:api:redis": "pnpm --filter @cat-cafe/api run test:redis",
@@ -64,20 +69,29 @@
     "check:worktree-port-offset": "node --test scripts/derive-worktree-ports.test.mjs && node scripts/check-worktree-port-offset.mjs",
     "gen:env-reference": "node scripts/gen-env-reference.mjs",
     "check:features": "node scripts/check-feature-truth.mjs",
+    "check:capability-tips": "node --test scripts/check-capability-tips.test.mjs && node scripts/check-capability-tips.mjs",
+    "check:capability-tips:stale": "node --test scripts/check-capability-tips-stale.test.mjs && node scripts/check-capability-tips-stale.mjs",
     "gen:sop-definitions": "node scripts/sop-definitions.mjs",
     "check:sop-definitions": "node --test scripts/sop-definitions.test.mjs && node scripts/sop-definitions.mjs --check",
     "check:followup-tails": "node scripts/check-followup-tails.mjs",
     "audit:feature-docs": "node scripts/audit-feature-doc-template.mjs",
     "check:skills": "bash scripts/check-skills-mount.sh",
     "check:skills:manifest": "node scripts/check-skills-manifest.mjs",
+    "check:skills:surfaces": "node --test scripts/check-skill-first-party-surfaces.test.mjs && node scripts/check-skill-first-party-surfaces.mjs",
     "check:pre-merge-gate": "node --test scripts/pre-merge-check.test.mjs scripts/pre-merge-gate-guard.test.mjs scripts/test-bash-runtime.test.mjs",
     "mcp:doctor": "node scripts/mcp-doctor.mjs",
+    "convention-graph": "pnpm --filter @cat-cafe/convention-graph convention-graph",
+    "convention-graph:index": "pnpm --filter @cat-cafe/convention-graph graph:index",
+    "convention-graph:code-consumers": "pnpm --filter @cat-cafe/convention-graph graph:code-consumers",
     "sync:skills": "bash scripts/sync-skills.sh",
+    "clean:stale-skill-links": "bash scripts/clean-stale-skill-links.sh",
     "rescue:claude:thinking": "node ./scripts/rescue-claude-thinking-signature.mjs",
     "proxy:anthropic": "node ./scripts/anthropic-proxy.mjs",
     "logs:health": "bash ./scripts/logs-health.sh",
     "clean": "pnpm -r run clean && rm -rf node_modules",
-    "check:start-profile-isolation": "node --test scripts/start-dev-profile-isolation.test.mjs"
+    "check:start-profile-isolation": "node --test scripts/start-dev-profile-isolation.test.mjs",
+    "check:brand-dictionary": "node --test scripts/brand-dictionary-helper.test.mjs",
+    "check:brand-guard": "node --test scripts/intake-from-opensource.test.mjs scripts/lib/intake-gh-retry.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.1",
@@ -87,8 +101,13 @@
     "yaml": "^2.8.1"
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=24.0.0",
     "pnpm": ">=8.0.0"
   },
-  "packageManager": "pnpm@9.15.4"
+  "packageManager": "pnpm@9.15.4",
+  "gate": {
+    "autoFixAllowlist": [
+      "biome"
+    ]
+  }
 }

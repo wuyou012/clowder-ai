@@ -25,11 +25,12 @@ NC='\033[0m'
 
 NO_REBASE=false
 SKIP_INSTALL=false
+AUTO_FIX=false
 CAT_CAFE_GATE_TEST_MODE="${CAT_CAFE_GATE_TEST_MODE:-auto}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/pre-merge-check.sh [--no-rebase] [--skip-install]
+Usage: scripts/pre-merge-check.sh [--no-rebase] [--skip-install] [--auto-fix]
 
 Default behavior:
   1. Fail if the worktree is dirty
@@ -40,6 +41,7 @@ Default behavior:
 Flags:
   --no-rebase    Skip fetch + rebase (local verification only)
   --skip-install Skip dependency refresh after rebase
+  --auto-fix     Run allowlisted auto-fix (biome format) before gate, auto-commit changes as [qc-bot]
 EOF
 }
 
@@ -51,6 +53,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-install)
       SKIP_INSTALL=true
+      shift
+      ;;
+    --auto-fix)
+      AUTO_FIX=true
       shift
       ;;
     --help|-h)
@@ -155,6 +161,43 @@ trap 'release_gate_guard; exit 143' TERM
 echo -e "${GREEN}✓ Gate singleflight + system-pressure preflight${NC}"
 echo ""
 
+# ── Step 0.5: Auto-fix (--auto-fix only, F253) ──
+
+if [ "$AUTO_FIX" = "true" ]; then
+  STEP_START=$SECONDS
+  echo "── Step 0.5: Hygiene auto-fix (F253) ──"
+
+  # Snapshot dirty FILENAMES before auto-fix to avoid committing user WIP.
+  # Compare filenames only (strip XY status prefix) so status mutations
+  # like M→MM don't bypass the guard (cloud review P1).
+  DIRTY_BEFORE="$(git status --porcelain | sed 's/^...//' | sort)"
+
+  AUTOFIX_EXIT=0
+  pnpm run check:fix || AUTOFIX_EXIT=$?
+
+  if [ "$AUTOFIX_EXIT" -ne 0 ]; then
+    echo -e "${YELLOW}⚠ auto-fix exited with code $AUTOFIX_EXIT (best-effort, continuing)${NC}"
+  else
+    echo -e "${GREEN}✓ auto-fix 完成${NC}"
+  fi
+
+  # Only stage files newly dirtied by auto-fix, not pre-existing user WIP.
+  DIRTY_AFTER="$(git status --porcelain | sed 's/^...//' | sort)"
+  AUTOFIX_CHANGED="$(comm -13 <(echo "$DIRTY_BEFORE") <(echo "$DIRTY_AFTER"))"
+
+  if [ -n "$AUTOFIX_CHANGED" ]; then
+    echo -e "${YELLOW}  auto-fix 修改了以下文件：${NC}"
+    echo "$AUTOFIX_CHANGED" | head -20
+    echo "$AUTOFIX_CHANGED" | tr '\n' '\0' | xargs -0 git add --
+    git commit -m "style: auto-fix hygiene [qc-bot]"
+    echo -e "${GREEN}✓ auto-fix 已提交 [qc-bot]${NC}"
+  else
+    echo -e "${GREEN}✓ 无需 auto-fix${NC}"
+  fi
+  record_step "auto-fix" "$STEP_START"
+  echo ""
+fi
+
 # ── Step 1: Fetch + Rebase origin/main ──
 
 REBASE_SUMMARY="skipped (--no-rebase)"
@@ -226,7 +269,12 @@ else
     echo -e "${RED}❌ pnpm install --frozen-lockfile 失败${NC}"
     exit 1
   fi
-  echo -e "${GREEN}✓ 依赖刷新通过${NC}"
+  if ! pnpm run check:biome-version; then
+    echo ""
+    echo -e "${RED}❌ Biome 版本与 lockfile 不匹配${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}✓ 依赖刷新 + Biome 工具链校验通过${NC}"
   echo ""
 fi
 record_step "install" "$STEP_START"
@@ -363,4 +411,13 @@ done
 printf "║    %-14s %3ds\n" "TOTAL" "$GATE_TOTAL"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
+# LL-082 hard layer: list dirty worktrees so each uncommitted diff has known provenance
+# before merge (H4 dogfood: an orphaned half-fix in a sibling worktree crossed the gate).
+echo "── LL-082 dirty-worktree ledger（merge 前确认所有 worktree 的 dirty diff 都有 PR/task/comment 归属）──"
+node "$(dirname "$0")/check-worktree-dirty-ledger.mjs" || true
+echo ""
 echo "可以安全执行 merge-gate 的后续步骤了。"
+
+# F253 Phase C (AC-C1): Write gate-last-run sentinel for pre-push Layer 4
+# This timestamp lets check-gate-freshness.sh know gate passed recently.
+bash "$(dirname "$0")/write-gate-last-run.sh" "$REPO_ROOT"

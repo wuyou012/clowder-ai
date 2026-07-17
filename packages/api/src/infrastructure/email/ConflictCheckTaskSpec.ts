@@ -29,6 +29,8 @@ export interface ConflictCheckTaskSpecOptions {
     warn: (...args: unknown[]) => void;
   };
   readonly pollIntervalMs?: number;
+  /** F202-2B: Override task ID for plugin-scoped schedule instances */
+  readonly id?: string;
 }
 
 interface ConflictWorkItem {
@@ -38,7 +40,7 @@ interface ConflictWorkItem {
 
 export function createConflictCheckTaskSpec(opts: ConflictCheckTaskSpecOptions): TaskSpec_P1<ConflictWorkItem> {
   return {
-    id: 'conflict-check',
+    id: opts.id ?? 'conflict-check',
     profile: 'poller',
     trigger: { type: 'interval', ms: opts.pollIntervalMs ?? 5 * 60 * 1000 },
     admission: {
@@ -64,8 +66,11 @@ export function createConflictCheckTaskSpec(opts: ConflictCheckTaskSpecOptions):
               },
               subjectKey: task.subjectKey!,
             });
-          } catch {
-            // fail-open: skip PRs where check fails
+          } catch (err) {
+            opts.log.warn(
+              { err, taskId: task.id, subjectKey: task.subjectKey },
+              '[conflict-check] fail-open: skipping PR where check failed',
+            );
           }
         }
 
@@ -101,15 +106,17 @@ export function createConflictCheckTaskSpec(opts: ConflictCheckTaskSpecOptions):
             reason: 'github_pr_conflict',
             sourceCategory: 'conflict',
           };
-          opts.invokeTrigger.trigger(
-            routeResult.threadId,
-            routeResult.catId as CatId,
-            workItem.task.userId ?? '',
-            routeResult.content,
-            routeResult.messageId,
-            undefined,
-            policy,
-          );
+          void opts.invokeTrigger
+            .trigger(
+              routeResult.threadId,
+              routeResult.catId as CatId,
+              workItem.task.userId ?? '',
+              routeResult.content,
+              routeResult.messageId,
+              undefined,
+              policy,
+            )
+            .catch((err) => opts.log.warn({ err }, '[conflict-check] trigger failed (best-effort)'));
           opts.log.info(`[conflict-check] Triggered ${routeResult.catId} for PR conflict`);
         }
       },

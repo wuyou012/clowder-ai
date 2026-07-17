@@ -45,6 +45,22 @@ export function resolveBuiltinClientForProvider(provider: ClientId): BuiltinAcco
   return builtinAccountFamilyForClient(provider);
 }
 
+/**
+ * Whether a provider's CLI must spawn with a concrete, validated thread workspace (cwd).
+ *
+ * OpenCode resolves project files relative to its working directory and — unlike
+ * Claude/Codex — has no silent fallback: without a validated workspace it inherits the
+ * runtime cwd and goes project-blind (clowder-ai#1000). Returning true makes the
+ * invocation layer fail loud instead of silently inheriting the runtime cwd.
+ *
+ * Provider-level capability (not a per-variant config field): this is a CLI trait, not
+ * per-cat data — every OpenCode variant needs it, and a second workspace-strict CLI only
+ * adds one branch here, keeping the invocation layer a pure reader (no hardcoded check).
+ */
+export function providerRequiresThreadWorkspace(provider: ClientId | undefined): boolean {
+  return provider === 'opencode';
+}
+
 export function resolveAnthropicRuntimeProfile(
   projectRoot: string,
   preferredAccountRef?: string,
@@ -96,8 +112,6 @@ const BUILTIN_ACCOUNT_MAP: Record<string, BuiltinAccountClient> = {
   builtin_google: 'google',
   kimi: 'kimi',
   builtin_kimi: 'kimi',
-  dare: 'dare',
-  builtin_dare: 'dare',
   opencode: 'opencode',
   builtin_opencode: 'opencode',
 };
@@ -221,7 +235,6 @@ function normalizeToClient(clientOrProtocol: string): BuiltinAccountClient | nul
     case 'openai':
     case 'google':
     case 'kimi':
-    case 'dare':
     case 'opencode':
       return clientOrProtocol;
     case 'openai-responses':
@@ -276,6 +289,8 @@ export function validateRuntimeProviderBinding(
     }
     return null;
   }
+  // F161: Generic ACP is a transport, not a provider — any account is valid.
+  if (clientId === 'acp') return null;
   const expectedClient = resolveBuiltinClientForProvider(clientId);
   if (expectedClient && profile.authType === 'oauth' && profile.client && profile.client !== expectedClient) {
     return `bound provider profile "${profile.id}" is incompatible with client "${clientId}"`;

@@ -15,7 +15,7 @@
  * F088 Multi-Platform Chat Gateway
  */
 
-import type { CatId, ConnectorSource, MessageContent } from '@cat-cafe/shared';
+import type { CatId, ConnectorDefinition, ConnectorSource, MessageContent } from '@cat-cafe/shared';
 import { catRegistry, getConnectorDefinition } from '@cat-cafe/shared';
 import type { FastifyBaseLogger } from 'fastify';
 import { findMonorepoRoot } from '../../utils/monorepo-root.js';
@@ -44,6 +44,12 @@ function emitConnectorMessage(
       timestamp: msg.timestamp,
     },
   });
+}
+
+function connectorSourceIcon(def: ConnectorDefinition | undefined): string {
+  if (!def) return 'message';
+  if ('src' in def.icon && def.icon.src) return def.icon.src;
+  return def.icon.type === 'png' ? def.icon.src : def.icon.iconId;
 }
 
 export type RouteResult =
@@ -111,7 +117,7 @@ export interface ConnectorRouterOptions {
       contentBlocks?: readonly MessageContent[],
       policy?: unknown,
       sender?: { id: string; name?: string },
-    ): 'dispatched' | 'enqueued' | 'full';
+    ): Promise<'dispatched' | 'enqueued' | 'full'>;
   };
   readonly socketManager?:
     | {
@@ -119,7 +125,7 @@ export interface ConnectorRouterOptions {
       }
     | undefined;
   readonly defaultUserId: string;
-  readonly defaultCatId: CatId;
+  readonly defaultCatId: CatId | (() => CatId);
   readonly log: FastifyBaseLogger;
   readonly commandLayer?: ConnectorCommandLayer | undefined;
   readonly permissionStore?: IConnectorPermissionStore | undefined;
@@ -149,6 +155,10 @@ export class ConnectorRouter {
   private readonly hubThreadResolvers = new Map<string, Promise<string | undefined>>();
 
   constructor(private readonly opts: ConnectorRouterOptions) {}
+
+  private getDefaultCatId(): CatId {
+    return typeof this.opts.defaultCatId === 'function' ? this.opts.defaultCatId() : this.opts.defaultCatId;
+  }
 
   /** Build @-mention patterns from catRegistry for parseMentions. */
   private getMentionPatterns(): Map<string, string[]> {
@@ -303,10 +313,10 @@ export class ConnectorRouter {
           const fwdSource: ConnectorSource = {
             connector: connectorId,
             label: def2?.displayName ?? connectorId,
-            icon: def2?.icon ?? 'message',
+            icon: connectorSourceIcon(def2),
           };
           const mentionPatterns = this.getMentionPatterns();
-          const { targetCatId } = parseMentions(fwdText, mentionPatterns, this.getValidDefaultCatId());
+          const { targetCatId } = parseMentions(fwdText, mentionPatterns, this.getDefaultCatId());
           const fwdTimestamp = Date.now();
           const fwdStored = await messageStore.append({
             threadId: fwdThreadId,
@@ -323,7 +333,7 @@ export class ConnectorRouter {
             source: fwdSource,
             timestamp: fwdTimestamp,
           });
-          const triggerOutcome = invokeTrigger.trigger(
+          const triggerOutcome = await invokeTrigger.trigger(
             fwdThreadId,
             targetCatId,
             this.opts.defaultUserId,
@@ -356,7 +366,7 @@ export class ConnectorRouter {
             const askSource: ConnectorSource = {
               connector: connectorId,
               label: def2?.displayName ?? connectorId,
-              icon: def2?.icon ?? 'message',
+              icon: connectorSourceIcon(def2),
               ...(sender ? { sender } : {}),
             };
             const askCatId = cmdResult.targetCatId as CatId;
@@ -376,7 +386,7 @@ export class ConnectorRouter {
               source: askSource,
               timestamp: askTimestamp,
             });
-            const triggerOutcome = invokeTrigger.trigger(
+            const triggerOutcome = await invokeTrigger.trigger(
               askThreadId,
               askCatId,
               this.opts.defaultUserId,
@@ -446,13 +456,13 @@ export class ConnectorRouter {
         chatType === 'group'
           ? `${def?.displayName ?? connectorId}群聊 · ${chatName || externalChatId.slice(-8)}`
           : (def?.displayName ?? connectorId),
-      icon: def?.icon ?? 'message',
+      icon: connectorSourceIcon(def),
       ...(sender ? { sender } : {}),
     };
 
     // Parse @-mentions to determine target cat
     const mentionPatterns = this.getMentionPatterns();
-    const mentionResult = parseMentions(resolvedText, mentionPatterns, this.getValidDefaultCatId());
+    const mentionResult = parseMentions(resolvedText, mentionPatterns, this.getDefaultCatId());
     let targetCatId = mentionResult.targetCatId;
     if (!mentionResult.matched && this.opts.threadStore.getParticipantsWithActivity) {
       const participants = await this.opts.threadStore.getParticipantsWithActivity(binding.threadId);
@@ -485,7 +495,7 @@ export class ConnectorRouter {
     });
 
     // 5. Trigger cat invocation (use parsed targetCatId)
-    invokeTrigger.trigger(
+    await invokeTrigger.trigger(
       binding.threadId,
       targetCatId,
       this.opts.defaultUserId,
@@ -544,7 +554,7 @@ export class ConnectorRouter {
           }
         } else if (att.type === 'image') {
           parts.push(`${originalText} ${downloaded.localUrl}`);
-          contentBlocks.push({ type: 'image', url: downloaded.absPath });
+          contentBlocks.push({ type: 'image', url: downloaded.localUrl });
         } else {
           parts.push(`${originalText} ${downloaded.localUrl}`);
         }
@@ -626,7 +636,7 @@ export class ConnectorRouter {
       userId: this.opts.defaultUserId,
       catId: null,
       content: commandText,
-      source: { connector: connectorId, label: def?.displayName ?? connectorId, icon: def?.icon ?? 'message' },
+      source: { connector: connectorId, label: def?.displayName ?? connectorId, icon: connectorSourceIcon(def) },
       mentions: [],
       timestamp: now,
     });
@@ -646,7 +656,7 @@ export class ConnectorRouter {
     emitConnectorMessage(socketManager, threadId, {
       id: cmdMsg.id,
       content: commandText,
-      source: { connector: connectorId, label: def?.displayName ?? connectorId, icon: def?.icon ?? 'message' },
+      source: { connector: connectorId, label: def?.displayName ?? connectorId, icon: connectorSourceIcon(def) },
       timestamp: now,
     });
     emitConnectorMessage(socketManager, threadId, {

@@ -8,7 +8,7 @@
 
 | 类型 | ConnectorSource | 优先级 | 触发条件 |
 |------|----------------|--------|----------|
-| CI/CD 状态 | `github-ci` | fail=urgent, pass=normal | CI checks 完成（F133） |
+| CI/CD 状态 | `github-ci` | fail=urgent（总唤醒）；pass=normal**仅 intent=merge 唤醒**，intent=review 只投消息 | CI checks 完成（F133）。intent 见 cicd-tracking.md / register_pr_tracking |
 | PR 冲突 | `github-conflict` | urgent | `mergeStateStatus` 变为 CONFLICTING（F140） |
 | Review Feedback | `github-review-feedback` | changes_requested=urgent, 其余=normal | 新 comments / review decisions（F140） |
 
@@ -47,7 +47,7 @@ Commit: `abc1234`
 
 1. 在 worktree 中 `git fetch origin main && git rebase origin/main`
 2. 自动解决简单冲突 → push → 等下一轮 CI 通知
-3. 复杂冲突（无法自动 resolve）→ 通知铲屎官
+3. 复杂冲突（无法自动 resolve）→ 通知operator
 
 ### 收到 Review Feedback
 
@@ -78,9 +78,9 @@ Commit: `abc1234`
    git rebase origin/main
    ```
 3. **评估结果**：
-   - **rebase clean**（无冲突）→ `git push --force-with-lease` → 通知铲屎官"已自动 resolve"
+   - **rebase clean**（无冲突）→ `git push --force-with-lease` → 通知operator"已自动 resolve"
    - **冲突 ≤3 个文件 + 非 binary** → 尝试手动解决 → 成功则 push + 通知
-   - **复杂冲突**（>3 文件 / binary / 语义冲突）→ `git rebase --abort` → 通知铲屎官附冲突文件列表
+   - **复杂冲突**（>3 文件 / binary / 语义冲突）→ `git rebase --abort` → 通知operator附冲突文件列表
 
 ### Review Feedback 自动处理（AC-B3）
 
@@ -95,10 +95,13 @@ Commit: `abc1234`
 
 ### 事后通知
 
-所有自动行动完成后，通知铲屎官结果：
+所有自动行动完成后，通知operator结果：
 - 成功: "已自动 rebase 并 push PR #42"
 - 失败: "PR #42 冲突无法自动解决，需要人工介入" + 冲突文件列表
-- Review 处理完: "已按 receive-review 模式处理 PR #42 的 review 意见，@ reviewer 确认"
+- cloud/GitHub review 处理完: "已按 receive-review 模式处理 PR #42 的 cloud review 意见，已重新触发 cloud review，等待 PR tracking"
+- 本地猫 review 处理完: "已按 receive-review 模式处理 PR #42 的本地 review 意见，已 @ local reviewer 确认"
+
+**Source-aware rule**：`github-review-feedback` 来自 cloud / GitHub truth source。处理 cloud P1/P2 后只 re-trigger cloud review，不把旧本地 reviewer 当 Stage ④ 常驻 gate；本地 reviewer 只在非 cloud 行为 delta、scope 扩大、cloud 不可用降级、或其自身 blocking finding 未清时介入。
 
 ## 去重机制
 

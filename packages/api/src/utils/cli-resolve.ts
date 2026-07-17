@@ -6,7 +6,7 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 
 const IS_WINDOWS = process.platform === 'win32';
 
@@ -41,6 +41,32 @@ function collectNvmBinDirs(): string[] {
 
 const resolvedCache = new Map<string, string>();
 
+function normalizeWindowsDir(path: string): string {
+  return win32
+    .dirname(path)
+    .replace(/[\\/]+$/, '')
+    .toLowerCase();
+}
+
+/**
+ * Select the effective Windows PATH hit while preserving directory order.
+ *
+ * `where <command>` can return multiple entries from the same directory
+ * (for example `codex` and `codex.exe` from the Windows Store alias dir).
+ * We only apply `.cmd` / `.exe` preference within the first directory bucket;
+ * later directories must not override an earlier PATH wrapper/version pin.
+ */
+export function selectWindowsPathEntry(lines: readonly string[]): string | null {
+  if (lines.length === 0) return null;
+  const firstDir = normalizeWindowsDir(lines[0]);
+  const firstDirHits = lines.filter((line) => normalizeWindowsDir(line) === firstDir);
+  return (
+    firstDirHits.find((line) => /\.cmd$/i.test(line)) ||
+    firstDirHits.find((line) => /\.exe$/i.test(line)) ||
+    firstDirHits[0]
+  );
+}
+
 /**
  * Drop a cache entry. Accepts EITHER the bare command name (cache key) OR the
  * resolved absolute path (cache value). cli-spawn doesn't see the bare name
@@ -74,7 +100,7 @@ export function invalidateCliCommand(commandOrPath: string): void {
  * fall through to re-probe instead of handing callers a stale path that would
  * spawn ENOENT in a loop until process restart.
  */
-export function resolveCliCommand(command: string): string | null {
+export function resolveCliCommand(command: string, opts?: { skipPathProbe?: boolean }): string | null {
   const cached = resolvedCache.get(command);
   if (cached !== undefined) {
     if (existsSync(cached)) return cached;
@@ -82,21 +108,24 @@ export function resolveCliCommand(command: string): string | null {
   }
 
   // Fast path: already in PATH
-  try {
-    const which = IS_WINDOWS ? `where ${command}` : `which ${command}`;
-    const result = execSync(which, { timeout: 5000, encoding: 'utf-8' }).trim();
-    if (result) {
-      const lines = result
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean);
-      // On Windows, prefer the .cmd shim (more reliable for shim resolution)
-      const resolved = (IS_WINDOWS && lines.find((l) => /\.cmd$/i.test(l))) || lines[0];
-      resolvedCache.set(command, resolved);
-      return resolved;
+  // #894: caller can skip this when PATH was already probed (e.g. client-detection
+  // does its own `command -v`; repeating `which` is redundant + slower).
+  if (!opts?.skipPathProbe) {
+    try {
+      const which = IS_WINDOWS ? `where ${command}` : `which ${command}`;
+      const result = execSync(which, { timeout: 5000, encoding: 'utf-8' }).trim();
+      if (result) {
+        const lines = result
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean);
+        const resolved = (IS_WINDOWS && selectWindowsPathEntry(lines)) || lines[0];
+        resolvedCache.set(command, resolved);
+        return resolved;
+      }
+    } catch {
+      // fall through to manual search
     }
-  } catch {
-    // fall through to manual search
   }
 
   // Search common install directories
@@ -171,7 +200,7 @@ export function formatCliNotFoundError(command: string, platform: NodeJS.Platfor
         ? 'curl.exe -fsSL https://antigravity.google/cli/install.cmd -o install.cmd && install.cmd && del install.cmd'
         : 'curl -fsSL https://antigravity.google/cli/install.sh | bash',
     kimi: 'uv tool install --python 3.13 kimi-cli',
-    opencode: 'npm install -g opencode',
+    opencode: 'npm install -g opencode-ai',
   };
   const hint = installHints[command] ?? `install the "${command}" CLI`;
   return `${command} CLI 未找到。请先运行 \`${hint}\` 安装，再重试。`;

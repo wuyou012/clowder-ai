@@ -213,6 +213,8 @@ describe('ConnectorRouter', () => {
     assert.equal(messageStore.messages.length, 1);
     assert.equal(messageStore.messages[0].source.connector, 'feishu');
     assert.equal(messageStore.messages[0].source.label, '飞书');
+    assert.equal(typeof messageStore.messages[0].source.icon, 'string');
+    assert.equal(messageStore.messages[0].source.icon, '/images/connectors/feishu.png');
   });
 
   it('triggers cat invocation', async () => {
@@ -261,30 +263,31 @@ describe('ConnectorRouter', () => {
     assert.deepEqual(messageStore.messages[0].mentions, ['opus']);
   });
 
-  it('falls back to a registered cat when configured default cat is stale', async () => {
-    catRegistry.reset();
-    registerTestCat('codex', { mentionPatterns: ['@codex'] });
-
-    const staleTrigger = mockTrigger();
-    const staleMessageStore = mockMessageStore();
-    const staleRouter = new ConnectorRouter({
-      bindingStore: new MemoryConnectorThreadBindingStore(),
-      dedup: new InboundMessageDedup(),
-      messageStore: staleMessageStore,
-      threadStore: mockThreadStore(),
-      invokeTrigger: staleTrigger,
-      socketManager: mockSocketManager(),
+  it('resolves default cat getter for each message', async () => {
+    let currentDefault = 'opus';
+    const dynamicRouter = new ConnectorRouter({
+      bindingStore,
+      dedup,
+      messageStore,
+      threadStore,
+      invokeTrigger: trigger,
+      socketManager,
       defaultUserId: 'owner-1',
-      defaultCatId: 'opus',
+      defaultCatId: () => currentDefault,
       log: noopLog(),
     });
+    const thread = threadStore.create('owner-1', 'existing');
+    bindingStore.bind('feishu', 'chat-dynamic-default', thread.id, 'owner-1');
+    threadStore.participantActivity.set(thread.id, []);
 
-    const result = await staleRouter.route('weixin', 'chat-stale-default', 'hello', 'ext-stale-default-1');
+    await dynamicRouter.route('feishu', 'chat-dynamic-default', 'first', 'ext-dynamic-1');
+    currentDefault = 'codex';
+    await dynamicRouter.route('feishu', 'chat-dynamic-default', 'second', 'ext-dynamic-2');
 
-    assert.equal(result.kind, 'routed');
-    assert.equal(staleTrigger.calls.length, 1);
-    assert.equal(staleTrigger.calls[0].catId, 'codex');
-    assert.deepEqual(staleMessageStore.messages[0].mentions, ['codex']);
+    assert.equal(trigger.calls[0].catId, 'opus');
+    assert.equal(trigger.calls[1].catId, 'codex');
+    assert.deepEqual(messageStore.messages[0].mentions, ['opus']);
+    assert.deepEqual(messageStore.messages[1].mentions, ['codex']);
   });
 
   it('skips duplicate messages', async () => {

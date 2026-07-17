@@ -105,14 +105,16 @@ export class PluginRegistry {
 
     if (capEntries.length === 0) return allConfigured ? 'configured' : 'not_configured';
 
-    const allDeclaredEnabled =
-      manifest.resources.length > 0 &&
-      manifest.resources.every((resource) =>
+    // F202 Phase 2 follow-up: optional resources don't block 'enabled' status — only required resources must be active
+    const requiredResources = manifest.resources.filter((r) => !r.optional);
+    const allRequiredEnabled =
+      requiredResources.length > 0 &&
+      requiredResources.every((resource) =>
         declaredEntries.some(
           (c) => normalizeCapId(c.id) === resourceCapId(manifest.id, resource) && c.type === resource.type && c.enabled,
         ),
       );
-    if (allDeclaredEnabled) return allConfigured ? 'enabled' : 'partial';
+    if (allRequiredEnabled) return allConfigured ? 'enabled' : 'partial';
 
     const someRuntimeEnabled = capEntries.some((c) => c.enabled);
     if (someRuntimeEnabled) return 'partial';
@@ -128,9 +130,11 @@ export class PluginRegistry {
     const status = this.deriveStatus(manifest, capabilities, env);
     const allConfigured = manifest.config.filter((f) => f.required).every((f) => !!env[f.envName]);
 
+    const isSensitive = (f: (typeof manifest.config)[number]) => f.type === 'input' && f.sensitive;
     const configWithValues = manifest.config.map((f) => ({
       ...f,
-      currentValue: maskValue(env[f.envName], f.sensitive),
+      sensitive: isSensitive(f),
+      currentValue: maskValue(env[f.envName], isSensitive(f)),
     }));
 
     const resourceStatuses: PluginResourceStatus[] = manifest.resources.map((r) => {

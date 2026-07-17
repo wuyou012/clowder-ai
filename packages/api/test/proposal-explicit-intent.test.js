@@ -64,6 +64,9 @@ describe('F128 explicit intent override (round-5)', () => {
           body: {
             initialMessage: '#ideate 大家分别说说自己的看法',
             preferredCats: ['kimi', 'gemini', 'codex'],
+            // F128: report-back owner is named only for final-only/state-transitions (C-Y6).
+            // This test pins that parallel reporter contract explicitly.
+            reportingMode: 'final-only',
           },
         })
       ).body,
@@ -105,12 +108,9 @@ describe('F128 explicit intent override (round-5)', () => {
       !enqueued.includes('最后一棒猫'),
       'parallel mode must NOT inherit the "last cat reports back" rule — there is no last cat',
     );
-    assert.ok(
-      enqueued.includes('并行模式 report-back owner'),
-      'parallel mode must inject an explicit report-back owner line',
-    );
+    assert.ok(enqueued.includes('report-back owner'), 'parallel mode must inject an explicit report-back owner line');
     // Find the report-back owner line and assert it names preferredCats[0]=kimi.
-    const ownerLineMatch = enqueued.match(/并行模式 report-back owner[^\n]*/);
+    const ownerLineMatch = enqueued.match(/report-back owner[^\n]*/);
     assert.ok(ownerLineMatch, 'must find the report-back owner line');
     assert.ok(
       ownerLineMatch[0].includes('kimi'),

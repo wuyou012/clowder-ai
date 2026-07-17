@@ -81,8 +81,9 @@ your-projects/
 | `pnpm stop` | 停止后台 daemon |
 | `pnpm start:status` | 查看 daemon 是否在运行 |
 | `pnpm runtime:init` | 只创建运行时 worktree（不启动） |
-| `pnpm runtime:sync` | 只同步 worktree 到 origin/main（不启动） |
 | `pnpm runtime:status` | 显示 worktree 路径、分支、HEAD、ahead/behind |
+
+> 运行时契约（ADR-039 被动冻结）：`pnpm start` 是单一入口，sync+build+restart 一次完成。已移除独立 sync 命令以防止 stale-dist 崩溃（详见 ADR-039）。
 
 首次运行自动创建 `../cat-cafe-runtime`。后续运行做 fast-forward 同步后启动。
 
@@ -313,8 +314,9 @@ NEXT_PUBLIC_LLM_POSTPROCESS_URL=http://localhost:9878
 ./scripts/tts-server.sh                    # 默认: Qwen3-TTS（三猫声线）
 TTS_PROVIDER=edge-tts ./scripts/tts-server.sh  # edge-tts 备选（无需 GPU）
 
-# ASR（语音转文字）— 需要 Python 3 + ffmpeg
-./scripts/qwen3-asr-server.sh             # Qwen3-ASR 服务器
+# ASR（语音转文字）— 需要 Python 3 + ffmpeg，统一 whisper-stt 服务
+WHISPER_MODEL=mlx-community/Qwen3-ASR-1.7B-8bit ./scripts/services/whisper-server.sh  # Qwen3-ASR
+WHISPER_MODEL=mlx-community/whisper-large-v3-turbo ./scripts/services/whisper-server.sh # Whisper
 ```
 
 > **系统依赖**：音频处理需要 `ffmpeg`。安装方式：`brew install ffmpeg`（macOS）或 `apt install ffmpeg`（Linux）。
@@ -498,10 +500,9 @@ pnpm stop               # 停止后台 daemon
 pnpm start:status       # 查看 daemon 是否在运行
                         # 查看日志: tail -f cat-cafe-daemon.log
 
-# === 运行时 Worktree ===
+# === 运行时 Worktree (ADR-039 被动冻结) ===
 pnpm runtime:init       # 创建运行时 worktree（仅首次）
-pnpm runtime:sync       # 同步 worktree 到 origin/main
-pnpm runtime:start      # 同步 + 从 worktree 启动
+pnpm runtime:start      # 单一入口：sync + build + start（无独立 sync）
 pnpm runtime:status     # 查看 worktree 状态
 
 # === 构建和测试 ===

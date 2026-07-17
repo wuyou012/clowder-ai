@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import Fastify from 'fastify';
 
 const { connectorHubRoutes } = await import('../dist/routes/connector-hub.js');
+const { configEventBus } = await import('../dist/config/config-event-bus.js');
+const { _clearActiveRootCacheForTest } = await import('../dist/utils/active-project-root.js');
+const { clearConnectorConfigCache, readConnectorConfig, readOperationState, writeConnectorConfig } = await import(
+  '../dist/infrastructure/connectors/im-connector-config-store.js'
+);
 
 const OWNER_ID = 'owner-1';
 const AUTH_HEADERS = { 'x-cat-cafe-user': OWNER_ID, 'x-test-session-user': OWNER_ID };
@@ -64,6 +69,21 @@ async function buildApp(overrides = {}) {
   return { app, listCalls };
 }
 
+function useTemporaryConfigRoot(prefix = 'connector-hub-config-') {
+  const tmpRoot = mkdtempSync(join(os.tmpdir(), prefix));
+  const previousConfigRoot = process.env.CAT_CAFE_CONFIG_ROOT;
+  process.env.CAT_CAFE_CONFIG_ROOT = tmpRoot;
+  _clearActiveRootCacheForTest();
+  clearConnectorConfigCache();
+  return () => {
+    clearConnectorConfigCache();
+    if (previousConfigRoot === undefined) delete process.env.CAT_CAFE_CONFIG_ROOT;
+    else process.env.CAT_CAFE_CONFIG_ROOT = previousConfigRoot;
+    _clearActiveRootCacheForTest();
+    rmSync(tmpRoot, { recursive: true, force: true });
+  };
+}
+
 describe('F134 follow-up — Feishu QR bind routes', () => {
   it('POST /api/connector/feishu/qrcode returns QR payload from bind client', async () => {
     const app = Fastify();
@@ -100,6 +120,7 @@ describe('F134 follow-up — Feishu QR bind routes', () => {
   });
 
   it('GET /api/connector/feishu/qrcode-status persists credentials and auto-switches to websocket when webhook lacks verification token', async () => {
+    const cleanupConfigRoot = useTemporaryConfigRoot('feishu-qr-config-');
     const tmpDir = mkdtempSync(join(os.tmpdir(), 'feishu-qr-bind-'));
     const envFilePath = join(tmpDir, '.env');
     writeFileSync(envFilePath, 'FEISHU_CONNECTION_MODE=webhook\n');
@@ -109,46 +130,50 @@ describe('F134 follow-up — Feishu QR bind routes', () => {
     process.env.FEISHU_CONNECTION_MODE = 'webhook';
 
     const app = Fastify();
-    await registerConnectorHub(app, {
-      threadStore: {
-        async list() {
-          return [];
+    try {
+      await registerConnectorHub(app, {
+        threadStore: {
+          async list() {
+            return [];
+          },
         },
-      },
-      envFilePath,
-      feishuQrBindClient: {
-        async create() {
-          throw new Error('not used');
+        envFilePath,
+        feishuQrBindClient: {
+          async create() {
+            throw new Error('not used');
+          },
+          async poll() {
+            return { status: 'confirmed', appId: 'cli_feishu', appSecret: 'sec_feishu' };
+          },
         },
-        async poll() {
-          return { status: 'confirmed', appId: 'cli_feishu', appSecret: 'sec_feishu' };
-        },
-      },
-    });
-    await app.ready();
+      });
+      await app.ready();
 
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/connector/feishu/qrcode-status?qrPayload=device-123',
-      headers: AUTH_HEADERS,
-    });
-    const body = JSON.parse(res.body);
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/connector/feishu/qrcode-status?qrPayload=device-123',
+        headers: AUTH_HEADERS,
+      });
+      const body = JSON.parse(res.body);
 
-    assert.equal(res.statusCode, 200);
-    assert.equal(body.status, 'confirmed');
-    assert.equal(process.env.FEISHU_APP_ID, 'cli_feishu');
-    assert.equal(process.env.FEISHU_APP_SECRET, 'sec_feishu');
-    assert.equal(process.env.FEISHU_CONNECTION_MODE, 'websocket');
+      assert.equal(res.statusCode, 200);
+      assert.equal(body.status, 'confirmed');
+      assert.equal(process.env.FEISHU_APP_ID, 'cli_feishu');
+      assert.equal(process.env.FEISHU_APP_SECRET, 'sec_feishu');
+      assert.equal(process.env.FEISHU_CONNECTION_MODE, 'websocket');
 
-    const envText = readFileSync(envFilePath, 'utf8');
-    assert.match(envText, /FEISHU_APP_ID=cli_feishu/);
-    assert.match(envText, /FEISHU_APP_SECRET=sec_feishu/);
-    assert.match(envText, /FEISHU_CONNECTION_MODE=websocket/);
-
-    await app.close();
+      const envText = readFileSync(envFilePath, 'utf8');
+      assert.match(envText, /FEISHU_APP_ID=cli_feishu/);
+      assert.match(envText, /FEISHU_APP_SECRET=sec_feishu/);
+      assert.match(envText, /FEISHU_CONNECTION_MODE=websocket/);
+    } finally {
+      await app.close();
+      cleanupConfigRoot();
+    }
   });
 
-  it('GET /api/connector/feishu/qrcode-status preserves explicit webhook mode when verification token exists', async () => {
+  it('GET /api/connector/feishu/qrcode-status always defaults to websocket regardless of verification token', async () => {
+    const cleanupConfigRoot = useTemporaryConfigRoot('feishu-qr-config-');
     const tmpDir = mkdtempSync(join(os.tmpdir(), 'feishu-qr-bind-'));
     const envFilePath = join(tmpDir, '.env');
     writeFileSync(envFilePath, 'FEISHU_CONNECTION_MODE=webhook\nFEISHU_VERIFICATION_TOKEN=vt_123\n');
@@ -158,37 +183,212 @@ describe('F134 follow-up — Feishu QR bind routes', () => {
     process.env.FEISHU_VERIFICATION_TOKEN = 'vt_123';
 
     const app = Fastify();
-    await registerConnectorHub(app, {
-      threadStore: {
-        async list() {
-          return [];
+    try {
+      await registerConnectorHub(app, {
+        threadStore: {
+          async list() {
+            return [];
+          },
         },
-      },
-      envFilePath,
-      feishuQrBindClient: {
-        async create() {
-          throw new Error('not used');
+        envFilePath,
+        feishuQrBindClient: {
+          async create() {
+            throw new Error('not used');
+          },
+          async poll() {
+            return { status: 'confirmed', appId: 'cli_feishu_2', appSecret: 'sec_feishu_2' };
+          },
         },
-        async poll() {
-          return { status: 'confirmed', appId: 'cli_feishu_2', appSecret: 'sec_feishu_2' };
+      });
+      await app.ready();
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/connector/feishu/qrcode-status?qrPayload=device-456',
+        headers: AUTH_HEADERS,
+      });
+      const body = JSON.parse(res.body);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(body.status, 'confirmed');
+      assert.equal(process.env.FEISHU_CONNECTION_MODE, 'websocket');
+      assert.match(readFileSync(envFilePath, 'utf8'), /FEISHU_CONNECTION_MODE=websocket/);
+    } finally {
+      await app.close();
+      cleanupConfigRoot();
+    }
+  });
+});
+
+describe('POST /api/connectors/:connectorId/actions/:operationName/:actionId', () => {
+  it('rolls back action target backfills when activation fails', async () => {
+    const tmpRoot = mkdtempSync(join(os.tmpdir(), 'connector-action-rollback-'));
+    const previousConfigRoot = process.env.CAT_CAFE_CONFIG_ROOT;
+    process.env.CAT_CAFE_CONFIG_ROOT = tmpRoot;
+    _clearActiveRootCacheForTest();
+    clearConnectorConfigCache();
+    writeConnectorConfig(tmpRoot, 'wecom-bot', [
+      { name: 'WECOM_BOT_ID', value: 'old-bot' },
+      { name: 'WECOM_BOT_SECRET', value: 'old-secret' },
+    ]);
+
+    const app = Fastify();
+    const capturedEvents = [];
+    const unsub = configEventBus.onConfigChange((event) => capturedEvents.push(event));
+    try {
+      await registerConnectorHub(app, {
+        threadStore: {
+          async list() {
+            return [];
+          },
         },
-      },
-    });
-    await app.ready();
+        pluginRegistry: new Map([
+          [
+            'wecom-bot',
+            {
+              id: 'wecom-bot',
+              async handleAction(_operationName, _actionId, ctx) {
+                assert.equal(ctx.env.WECOM_BOT_ID, 'new-bot');
+                assert.equal(ctx.env.WECOM_BOT_SECRET, 'new-secret');
+                return {
+                  render: 'status',
+                  data: { status: 'connected' },
+                  targetValues: {
+                    WECOM_BOT_ID: 'new-bot',
+                    WECOM_BOT_SECRET: 'new-secret',
+                  },
+                  activate: true,
+                };
+              },
+            },
+          ],
+        ]),
+        adapterRegistry: new Map(),
+        async activateConnector() {
+          throw new Error('stream failed');
+        },
+      });
+      await app.ready();
 
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/connector/feishu/qrcode-status?qrPayload=device-456',
-      headers: AUTH_HEADERS,
-    });
-    const body = JSON.parse(res.body);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/wecom-bot/actions/wecom_validate/validate',
+        headers: AUTH_HEADERS,
+        payload: {
+          values: {
+            WECOM_BOT_ID: 'new-bot',
+            WECOM_BOT_SECRET: 'new-secret',
+          },
+        },
+      });
+      const body = JSON.parse(res.body);
 
-    assert.equal(res.statusCode, 200);
-    assert.equal(body.status, 'confirmed');
-    assert.equal(process.env.FEISHU_CONNECTION_MODE, 'webhook');
-    assert.doesNotMatch(readFileSync(envFilePath, 'utf8'), /FEISHU_CONNECTION_MODE=websocket/);
+      assert.equal(res.statusCode, 502);
+      assert.equal(body.activationStatus, 'failed');
+      assert.deepEqual(readConnectorConfig(tmpRoot, 'wecom-bot'), {
+        WECOM_BOT_ID: 'old-bot',
+        WECOM_BOT_SECRET: 'old-secret',
+      });
+      const state = readOperationState(tmpRoot, 'wecom-bot', 'wecom_validate');
+      assert.equal(state?.currentAction, 'validate');
+      assert.equal(state?.lastResult?.data?.status, 'activation_failed');
+      assert.ok(
+        capturedEvents.some(
+          (event) =>
+            event.source === 'config-store' &&
+            event.changedKeys.includes('WECOM_BOT_ID') &&
+            event.changedKeys.includes('WECOM_BOT_SECRET'),
+        ),
+        'rollback should notify config listeners so runtime cache does not keep failed credentials',
+      );
+    } finally {
+      unsub();
+      await app.close();
+      clearConnectorConfigCache();
+      if (previousConfigRoot === undefined) delete process.env.CAT_CAFE_CONFIG_ROOT;
+      else process.env.CAT_CAFE_CONFIG_ROOT = previousConfigRoot;
+      _clearActiveRootCacheForTest();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
 
-    await app.close();
+  it('preserves env fallback when activation rollback restores absent stored values', async () => {
+    const tmpRoot = mkdtempSync(join(os.tmpdir(), 'connector-action-env-rollback-'));
+    const previousConfigRoot = process.env.CAT_CAFE_CONFIG_ROOT;
+    const previousBotId = process.env.WECOM_BOT_ID;
+    const previousBotSecret = process.env.WECOM_BOT_SECRET;
+    process.env.CAT_CAFE_CONFIG_ROOT = tmpRoot;
+    process.env.WECOM_BOT_ID = 'env-bot';
+    process.env.WECOM_BOT_SECRET = 'env-secret';
+    _clearActiveRootCacheForTest();
+    clearConnectorConfigCache();
+
+    const app = Fastify();
+    try {
+      await registerConnectorHub(app, {
+        threadStore: {
+          async list() {
+            return [];
+          },
+        },
+        pluginRegistry: new Map([
+          [
+            'wecom-bot',
+            {
+              id: 'wecom-bot',
+              async handleAction(_operationName, _actionId, ctx) {
+                assert.equal(ctx.env.WECOM_BOT_ID, 'new-bot');
+                assert.equal(ctx.env.WECOM_BOT_SECRET, 'new-secret');
+                return {
+                  render: 'status',
+                  data: { status: 'connected' },
+                  targetValues: {
+                    WECOM_BOT_ID: 'new-bot',
+                    WECOM_BOT_SECRET: 'new-secret',
+                  },
+                  activate: true,
+                };
+              },
+            },
+          ],
+        ]),
+        adapterRegistry: new Map(),
+        async activateConnector() {
+          throw new Error('stream failed');
+        },
+      });
+      await app.ready();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/connectors/wecom-bot/actions/wecom_validate/validate',
+        headers: AUTH_HEADERS,
+        payload: {
+          values: {
+            WECOM_BOT_ID: 'new-bot',
+            WECOM_BOT_SECRET: 'new-secret',
+          },
+        },
+      });
+      const rawConfig = JSON.parse(
+        readFileSync(join(tmpRoot, '.cat-cafe', 'im-connector-config', 'wecom-bot.json'), 'utf8'),
+      );
+
+      assert.equal(res.statusCode, 502);
+      assert.equal(Object.hasOwn(rawConfig, 'WECOM_BOT_ID'), false);
+      assert.equal(Object.hasOwn(rawConfig, 'WECOM_BOT_SECRET'), false);
+    } finally {
+      await app.close();
+      clearConnectorConfigCache();
+      if (previousConfigRoot === undefined) delete process.env.CAT_CAFE_CONFIG_ROOT;
+      else process.env.CAT_CAFE_CONFIG_ROOT = previousConfigRoot;
+      if (previousBotId === undefined) delete process.env.WECOM_BOT_ID;
+      else process.env.WECOM_BOT_ID = previousBotId;
+      if (previousBotSecret === undefined) delete process.env.WECOM_BOT_SECRET;
+      else process.env.WECOM_BOT_SECRET = previousBotSecret;
+      _clearActiveRootCacheForTest();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 });
 
@@ -266,7 +466,9 @@ describe('POST /api/connector/feishu/disconnect', () => {
 describe('GET /api/connector/weixin/qrcode-status — adapter not ready', () => {
   it('P1: returns 503 when QR confirms but weixinAdapter is not available (cloud review a312a53f)', async () => {
     // Arrange: inject a mock fetch that makes pollQrCodeStatus return 'confirmed'
-    const { WeixinAdapter: WA } = await import('../dist/infrastructure/connectors/adapters/WeixinAdapter.js');
+    const { WeixinAdapter: WA } = await import(
+      '../dist/infrastructure/connectors/im-connectors/weixin/WeixinAdapter.js'
+    );
     const originalFetch = globalThis.fetch;
     WA._injectStaticFetch(async () => ({
       ok: true,
@@ -305,7 +507,9 @@ describe('GET /api/connector/weixin/qrcode-status — adapter not ready', () => 
   });
 
   it('P1: returns confirmed when adapter IS available and QR confirms', async () => {
-    const { WeixinAdapter: WA } = await import('../dist/infrastructure/connectors/adapters/WeixinAdapter.js');
+    const { WeixinAdapter: WA } = await import(
+      '../dist/infrastructure/connectors/im-connectors/weixin/WeixinAdapter.js'
+    );
     const originalFetch = globalThis.fetch;
     WA._injectStaticFetch(async () => ({
       ok: true,
@@ -357,7 +561,9 @@ describe('GET /api/connector/weixin/qrcode-status — adapter not ready', () => 
   });
 
   it('P1: persists WEIXIN_BOT_TOKEN to .env on QR confirmation so restarts skip re-scan', async () => {
-    const { WeixinAdapter: WA } = await import('../dist/infrastructure/connectors/adapters/WeixinAdapter.js');
+    const { WeixinAdapter: WA } = await import(
+      '../dist/infrastructure/connectors/im-connectors/weixin/WeixinAdapter.js'
+    );
     const originalFetch = globalThis.fetch;
     WA._injectStaticFetch(async () => ({
       ok: true,
@@ -582,7 +788,9 @@ describe('GET /api/connector/hub-threads', () => {
 
 // ── F132 Phase E: WeCom Bot guided setup routes ──
 
-const { WeComBotAdapter } = await import('../dist/infrastructure/connectors/adapters/WeComBotAdapter.js');
+const { WeComBotAdapter } = await import(
+  '../dist/infrastructure/connectors/im-connectors/wecom-bot/WeComBotAdapter.js'
+);
 
 describe('GET /api/connector/status — WeCom Bot live health', () => {
   it('rejects trusted header identity without a real session', async () => {

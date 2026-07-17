@@ -17,11 +17,11 @@ export type ClientId =
   | 'openai'
   | 'google'
   | 'kimi'
-  | 'dare'
   | 'antigravity'
   | 'opencode'
   | 'a2a'
-  | 'catagent';
+  | 'catagent'
+  | 'acp'; // F161: Generic ACP client for unknown/user-provided ACP agents
 
 /** @deprecated clowder-ai#340: Use {@link ClientId} instead. Kept as alias for backward compatibility. */
 export type CatProvider = ClientId;
@@ -59,7 +59,7 @@ export interface CatConfig {
   readonly id: CatId;
   readonly name: string;
   readonly displayName: string;
-  /** Nickname given by 铲屎官 (e.g. 宪宪, 砚砚). See docs/stories/cat-names/ */
+  /** Nickname given by co-creator (e.g. 宪宪, 砚砚). See docs/stories/cat-names/ */
   readonly nickname?: string;
   readonly avatar: string;
   readonly color: CatColor;

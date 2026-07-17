@@ -1,4 +1,5 @@
 import { SCHEDULER_TRIGGER_PREFIX } from '@cat-cafe/shared';
+import { buildHoldExpiredEvent } from '../../../domains/ball-custody/ball-custody-events.js';
 import type { TaskSpec_P1 } from '../types.js';
 import type { DynamicTaskParams, TaskTemplate } from './types.js';
 
@@ -47,6 +48,12 @@ export const reminderTemplate: TaskTemplate = {
           const catId = targetCatId ?? ctx.assignedCatId ?? 'opus';
           const content = `${SCHEDULER_TRIGGER_PREFIX} ${message}`;
 
+          if (instanceId.startsWith('hold-ball-') && p.trigger.type === 'once' && threadId) {
+            ctx.ballCustody
+              ?.record(buildHoldExpiredEvent({ threadId: tid, catId, fireAt: p.trigger.fireAt, at: Date.now() }))
+              .catch(() => {});
+          }
+
           // Store trigger message first → real messageId for InvocationRecord + retry
           const messageId = await ctx.deliver({
             threadId: tid,
@@ -57,9 +64,15 @@ export const reminderTemplate: TaskTemplate = {
 
           // Wake a cat to act on the trigger message
           if (ctx.invokeTrigger) {
-            ctx.invokeTrigger.trigger(tid, catId, triggerUserId, content, messageId, undefined, {
-              sourceCategory: 'scheduled',
-            });
+            try {
+              void Promise.resolve(
+                ctx.invokeTrigger.trigger(tid, catId, triggerUserId, content, messageId, undefined, {
+                  sourceCategory: 'scheduled',
+                }),
+              ).catch(() => {});
+            } catch {
+              // Best-effort: sync trigger throw should not fail the reminder
+            }
           }
         },
       },

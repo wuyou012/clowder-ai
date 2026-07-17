@@ -23,7 +23,7 @@ argument-hint: "[阶段: kickoff|discussion|completion] [F0xx 或主题]"
 
 ## 核心知识
 
-**Feature vs Tech Debt**：铲屎官能感知变化 → Feature；只有开发者知道 → Tech Debt。不确定先记 TD。
+**Feature vs Tech Debt**：operator能感知变化 → Feature；只有开发者知道 → Tech Debt。不确定先记 TD。
 
 **追溯链架构**：`ROADMAP.md`（热层）→ `docs/features/Fxxx.md`（温层，唯一入口）→ feature-discussions/research/plans（冷层）
 
@@ -31,7 +31,7 @@ argument-hint: "[阶段: kickoff|discussion|completion] [F0xx 或主题]"
 
 ## 立项 (Kickoff)
 
-**触发**：铲屎官说"新功能"/"立项"、讨论收敛确认要做。**不触发**：还在探索 → `collaborative-thinking` Mode A；小修补 → TD。
+**触发**：operator说"新功能"/"立项"、讨论收敛确认要做。**不触发**：还在探索 → `collaborative-thinking` Mode A；小修补 → TD。
 
 ### 开工前 Recall（F102 记忆系统）🔴
 
@@ -75,9 +75,14 @@ search_evidence("{topic}", scope="all")  # 找历史讨论 + thread
 
    **从标准模板创建**：复制 `cat-cafe-skills/refs/feature-doc-template.md` 中「模板正文」部分，替换占位符（`{NNN}`/`{Feature Name}`/`{YYYY-MM-DD}` 等）。模板包含 Dashboard parser 所需的全部硬性格式。
 
-   轻量 Feature（≤1 Phase）可省略 Timeline/Review Gate/Links/Key Decisions，但 Frontmatter + Status 行 + Why + What + AC + Dependencies 必须保留。
+   轻量 Feature（≤1 Phase）可省略 Timeline/Review Gate/Links/Key Decisions，但 Frontmatter + Status 行 + Why + Current State + What + User Journey（或 `user_journey_exempt`）+ AC + Dependencies 必须保留（全新能力的 Current State 写 "N/A（无既有基线）"，不是删段）。
 
    并在 spec 中补一节：`## 需求点 Checklist`（模板见 `cat-cafe-skills/refs/requirements-checklist-template.md`）
+
+   **F244 Tips Contribution**：若 feature 有用户可见能力/工作流变化，在 spec 中保留 `## Tips Contribution（F244）`：
+   - 计划新增/更新 1-2 条 tips，指向现有 truth source。
+   - 或写 `tips_exempt: {reason}`（仅纯内部重构/无用户可感知变化）。
+   - 这是贡献门，不是数量门；真正有用性由 reviewer 判断，CI 只守 sourceRef/context/action/anchor。
 
 3. **更新 ROADMAP.md**：末尾加 `| F042 | 名称 | spec | Owner | {source} | [F042](features/...) |`
    - Source 列：`internal`（内部立项）或 `community [#xx](url)`（社区 issue 立项，附链接）
@@ -91,34 +96,69 @@ search_evidence("{topic}", scope="all")  # 找历史讨论 + thread
    - why: 从 spec Why 节摘 1 句核心痛点
    - 不要为 trivial feature（≤1 file 改动、无 Phase 拆分）创建任务
 
-   **Gotcha**: 只在有 threadId 的会话中创建。铲屎官在非 thread 环境立项（如 BACKLOG 批量整理）时跳过此步。
+   **Gotcha**: 只在有 threadId 的会话中创建。operator在非 thread 环境立项（如 BACKLOG 批量整理）时跳过此步。
 
-**检查**：聚合文件创建 ✓ frontmatter 完整 ✓ BACKLOG 索引 ✓ 关联文档双向链接 ✓ 已 commit ✓ 毛线球任务创建 ✓
+### 立项愿景硬度自检（F216→F219 教训）🔴
+
+> **为什么**：F216 立项 Why 写"降 complexity"，AC 却落成"修 bug + 可测性"，两者执行中悄悄分叉，直到 close 前愿景守护才发现 gap。根因是**立项时愿景表述不够硬 + 交接丢上下文**（operator 2026-06-02）。这是 LL-067（后半段被前半段工程量吃）/ LL-069（scope 跟"自我解读"走不跟 spec 走）在**立项时刻**的前置防线——审计时才抓分叉太晚，立项就钉死。
+
+Step 2 写完 spec，Why / 现状 / AC 逐条过这道自检：
+
+| 维度 | 硬要求 | 反模式（F216 踩过） |
+|------|--------|--------------------|
+| **愿景 Why** | 用**价值**语言一句话说清要解决什么 | 用"技术动作"冒充愿景（"重构 X" ❌；"X 每加功能就 7 轮 review" ✅） |
+| **真实现状** | 带**实测证据**（complexity / 行数 / 复现 / hotfix 频次），不美化 | "感觉这块乱"（给数据不给感觉，`feedback_no_classifier`） |
+| **完成判据 AC** | 每条能 **trace 回 Why** + **非作者可复核**（命令/数字/截图） | 重构类 AC 落成"提了可测性就算"（F216 AC-B2：complexity 没降也宣布达成） |
+
+**两条硬规则**：
+1. **AC↔Why 同源**——每条 AC 指得回 Why 的某诉求；指不回 = 删 AC 或补 Why。AC 覆盖不了 Why = 愿景虚高。
+2. **Handoff 重写愿景**——从别的 thread/feat 交接立项时，**用本 feat 自己的语言重写 Why**，不继承上游模糊表述（交接丢上下文是 F216 分叉直接成因）。
+
+承载点：现状写进模板 `## Current State / 现状基线` 段；AC↔Why 自检见模板 `## Acceptance Criteria` 段顶部 comment（均在 feature-doc-template「模板正文」内，随复制进入新 spec）。自检不过 → 回 Step 2 改 spec，不进 Step 3。
+
+**检查**：聚合文件创建 ✓ frontmatter 完整 ✓ BACKLOG 索引 ✓ 关联文档双向链接 ✓ 愿景硬度自检 ✓ 已 commit ✓ 毛线球任务创建 ✓
+
+### 轻量立项（非 F 号：内容生产 / 能力验证项目）
+
+> LL-071 起源：内容生产任务（视频 / PPT / 系列产出）同样有 lifecycle，但不一定进 feat 体系（shared-rules §21）。
+
+**适用**：批量产出消耗显著成本（token / API 抽卡）或铺设技术路线，且 operator 决定不开 F 号（挂 story / IP / 项目目录）。
+
+**锚点形态**：项目目录里的 charter 文档，结构学 feat doc（范例：`docs/videos/cucu-pr-flow/episode-brief.md`）：
+
+- Why（双重目的写清）/ 路线（**引 operator 原话做锚**）/ Scope / **Non-goals（防跑偏的牙齿，最重要的段）** / 预算护栏 / DoD / 分工 / operator signoff（frontmatter `cvo_signoff` 字段记日期与原话）
+- charter 自声明"唯一 scope 真相源"：链上任何一棒发现产出超出 charter scope → 停，回 operator
+- 被取代的外部文档（云端 brief 等）标 `superseded` + 指针，保留为历史不篡改
+
+**与正式 feat 的区别**：无 F 号、无 BACKLOG 索引、无 Design Gate 仪式——但 scope 纪律同强度。
+
+**选型**：改产品代码 / 对外契约 → 正式 feat；内容产出 / 能力验证 → operator 选轻量 charter 或 feat。拿不准 → 问一句，别替 operator 决定。
 
 ## 讨论 (Discussion)
 
 **两种模式**：
 
-- **采访式（默认）**：铲屎官口述 → 一次一问澄清（"为什么要？现在怎么做？做完后怎么用？"）→ 排优先级 → 记开放问题。**Anti-anchor**：先让铲屎官表达完，再分析。
+- **采访式（默认）**：operator口述 → 一次一问澄清（"为什么要？现在怎么做？做完后怎么用？"）→ 排优先级 → 记开放问题。**Anti-anchor**：先让operator表达完，再分析。
 
 - **开放讨论**：多猫协作。结构：背景 + 我的分析（仅供参考，**先自己想再看**）+ 开放问题（按角色分组）+ 我的倾向（透明推理链）。明确标"这是讨论不是任务"，保护观点独立性。
 
 **讨论结束必须做**：
-1. 落盘到 `feature-discussions/YYYY-MM-DD-{topic}/README.md`（含铲屎官原话、决策过程、优先级排序）
-2. ROADMAP.md 该 Feature 行 ref 讨论文档链接
-3. Commit：`docs: {topic} discussion + backlog update [{猫猫签名}]`
+1. 落盘到 `feature-discussions/YYYY-MM-DD-{topic}/README.md`（含operator experience、决策过程、优先级排序）
+2. **回填 User Journey 到 spec**（F252 教训 🔴）：Discussion 中operator口述的用户旅程期望，必须回填到 feature doc 的 `## User Journey` 段。讨论落盘 ≠ spec 记录——reviewer 冷启动读 spec，不读 discussion 记录。
+3. ROADMAP.md 该 Feature 行 ref 讨论文档链接
+4. Commit：`docs: {topic} discussion + backlog update [{猫猫签名}]`
 
 ## Design Gate (设计确认) 🔴
 
-**Discussion → writing-plans 之间的必经关卡。UX 没确认，不准开 worktree。**
+**Discussion → writing-plans 之间的必经关卡。UX 没确认，不准开 worktree。User Journey 没落盘，不准过 Design Gate。**
 
 按功能类型分流确认：
 
 | 类型 | 判断标准 | 确认人 | 方式 |
 |------|---------|--------|------|
-| **前端 UI/UX** | 用户能看到的改动 | **铲屎官** | wireframe → 铲屎官 OK 后继续 |
+| **前端 UI/UX** | 用户能看到的改动 | **operator** | wireframe → operator OK 后继续 |
 | **纯后端** | API/数据模型/内部逻辑 | **其他猫猫** | `collaborative-thinking` 讨论达成共识 |
-| **架构级** | 跨模块、新基础设施 | **猫猫讨论 → 铲屎官拍板** | 先出方案再上报 |
+| **架构级** | 跨模块、新基础设施 | **猫猫讨论 → operator拍板** | 先出方案再上报 |
 | **Trivial** | ≤5 行、纯重构、文档 | 跳过 | 跳过 Design Gate，按 SOP 例外路径判断 |
 
 **前置检查（F086 M2）**：
@@ -129,6 +169,18 @@ search_evidence("{topic}", scope="all")  # 找历史讨论 + thread
 4. 把发现记录到 Design Gate 讨论里（避免重复造轮子）
 
 详见 `shared-rules.md` §13 元思考触发器。先搜现状，再开讨论。
+
+**User Journey 前置门禁（F252 教训）🔴**：
+
+涉及用户可感知变化的 Feature，Design Gate 前 spec 的 `## User Journey` 段必须已落盘，否则 **Design Gate 不放行**。
+
+| 检查项 | 必须 | 说明 |
+|--------|------|------|
+| `## User Journey` 段存在 | ✅ | 非 exempt feature 不能缺段 |
+| Primary Journey 有 `Scope unit` | ✅ | 防 F252 的 session/thread/feature 搞混 |
+| Flow 用用户语言 | ✅ | "点击 thread 标题看回放"，不是"调用 StoryPlayer.replay()" |
+| operator口述期望已回填 | ✅ | Discussion 落盘 ≠ spec 记录（F252 直接原因） |
+| 非用户可感知 | — | 写 `user_journey_exempt: {reason}`，不能靠缺段默认跳过 |
 
 **架构归属一问（F191）🔴**：
 
@@ -186,16 +238,16 @@ harness / skill / MCP / shared-rules 类 feature 的 spec **必须含 `## Eval /
 
 类比范式：memory entity 自带状态、browser-preview 把页面端上桌——entity carries its own state, surface it where it happens。反面：Datadog/前 agent 时代的 stats dashboard，等用户主动切到 tab 才看到数字 +1。
 
-来源：F174 callback auth lifecycle D2b 实战收敛（2026-04-25，铲屎官原话"新时代的明厨亮灶"）。
+来源：F174 callback auth lifecycle D2b 实战收敛（2026-04-25，operator experience"新时代的明厨亮灶"）。
 
 **流程**：
 1. 判断功能类型 → 选择确认路径
-2. 前端：画 wireframe（Pencil / 文字版 ASCII）→ 发铲屎官 → 等 OK
+2. 前端：画 wireframe（Pencil / 文字版 ASCII）→ 发operator → 等 OK
 3. 后端：`collaborative-thinking` → 拉相关猫讨论 API 契约/数据模型
-4. 架构：猫猫讨论 → 结论给铲屎官 → **必须附 Decision Packet**（格式见 `refs/decision-matrix.md`）→ 铲屎官拍板
+4. 架构：猫猫讨论 → 结论给operator → **必须附 Decision Packet**（格式见 `refs/decision-matrix.md`）→ operator拍板
 5. 确认产出归档 `feature-discussions/{date}-{fid}-design/`
 
-**Design Gate OQ 升级规则**：先判断可逆性维度（见 `refs/decision-matrix.md`）——回滚成本低+不碰愿景/安全/外部契约/显著成本 → 猫猫自决，不升级 CVO。需要升级时，OQ 必须用 Decision Packet 格式，不能只列"模糊问题清单"。
+**Design Gate OQ 升级规则**：先判断可逆性维度（见 `refs/decision-matrix.md`）——回滚成本低+不碰愿景/安全/外部契约/显著成本 → 猫猫自决，不升级 operator。需要升级时，OQ 必须用 Decision Packet 格式，不能只列"模糊问题清单"。
 
 **元审美自检**（Design Gate 必问，F163 教训 + F167 Round 4 canon 化）🔴
 
@@ -205,7 +257,7 @@ harness / skill / MCP / shared-rules 类 feature 的 spec **必须含 `## Eval /
 
 ## Phase 碰头（大 Feature 专属，3+ Phase）🔴
 
-大 scope feature **每个 Phase merge 后**，主动和铲屎官碰头（不是问"要不要继续"，是确认方向）：
+大 scope feature **每个 Phase merge 后**，主动和operator碰头（不是问"要不要继续"，是确认方向）：
 
 1. **成果展示**：这个 Phase 做了什么（截图 / 关键改动 / demo）
 2. **愿景进度**：离最终愿景还差什么（哪些 AC ✅，哪些还没）
@@ -216,7 +268,7 @@ harness / skill / MCP / shared-rules 类 feature 的 spec **必须含 `## Eval /
 
 ## 完成 (Completion)
 
-**触发**：AC 全部打勾 + PR 合入 + 云端 review 通过。**不触发**：只是 Phase 完成 / 只是 review 过了。
+**触发**：AC 全部打勾 + PR 合入 + remote review 通过。**不触发**：只是 Phase 完成 / 只是 review 过了。
 
 **⚠️ Phase 级进度由 `merge-gate` Step 7.5 实时同步**：每次 PR merge 后，merge-gate 负责更新 Phase ✅、AC 打勾、Timeline 记录。Completion 阶段不需要补这些——它们应该已经是最新的。如果发现 Phase 状态落后于实际 commit，说明之前 merge 时漏了 Step 7.5。
 
@@ -224,14 +276,31 @@ harness / skill / MCP / shared-rules 类 feature 的 spec **必须含 `## Eval /
 
 **Step 0: 愿景对照（必须先做，不可跳过）🔴**
 
-AC 全打勾 ≠ 完成（F041 教训：12 项 AC ✅ 但 UI 不可用）。先读原始 Discussion/Interview，自问三个问题：① 铲屎官最初要解决的核心问题？② 交付物解决了吗？③ 铲屎官用这个功能体验如何？
+AC 全打勾 ≠ 完成（F041 教训：12 项 AC ✅ 但 UI 不可用）。先读原始 Discussion/Interview，自问三个问题：① operator最初要解决的核心问题？② 交付物解决了吗？③ operator用这个功能体验如何？
+
+**User Journey 逐步验收（F252 教训）🔴**：
+
+涉及用户可感知变化的 Feature，愿景守护时必须**按 spec 的 User Journey 逐步走一遍**：
+1. 按 Primary Journey 的 Flow，从 Entry 开始逐步操作
+2. 每步截图对照 spec 描述（截图放 `project-evidence/`）
+3. Scope unit 是否正确（F252 根因：session vs thread 搞混）
+4. Non-goals 是否被误实现
+5. 任一步走不通 → BLOCKED，踢回修改
+
+User Journey 验收表（守护猫必须输出）：
+
+```markdown
+| Journey | 步骤 | Spec 描述 | 实际行为 | 截图 | 匹配？ |
+|---------|------|-----------|---------|------|--------|
+| Primary | Step 1 | "从 thread 列表点击回放" | [截图] | evidence/... | ✅/❌ |
+```
 
 **愿景守护证物对照表（F114 Gate — 缺表 = BLOCKED）**：
 
 守护猫必须输出以下格式的对照表，否则 **BLOCKED，不放行**：
 
 ```markdown
-| 铲屎官原话（逐字引用） | 当前实际状态（截图/代码/命令输出） | 匹配？ |
+| operator experience（逐字引用） | 当前实际状态（截图/代码/命令输出） | 匹配？ |
 |----------------------|-------------------------------|--------|
 | "把旧 mode 删掉"      | [截图: mode 入口已无旧选项]       | ✅     |
 | "狼人杀加到 mode 里"   | [截图: mode 入口有狼人杀]         | ✅     |
@@ -240,11 +309,11 @@ AC 全打勾 ≠ 完成（F041 教训：12 项 AC ✅ 但 UI 不可用）。先�
 **BLOCKED 条件**（任一触发 → 不放行）：
 - 守护猫输出缺少对照表 → BLOCKED
 - 对照表中有未匹配项（❌）→ BLOCKED，踢回修改
-- 找不到铲屎官原话（Discussion/Interview 缺失）→ BLOCKED，要求补充
+- 找不到operator experience（Discussion/Interview 缺失）→ BLOCKED，要求补充
 
 **跨猫交叉验证（强制，F073 自动化）**：
 
-自己先完成三问 + 对照表 → **自动 @ 其他猫**请求独立愿景守护（不要等铲屎官提醒，直接 @）→ 收到结论 → 对齐 → 填签收表（猫猫 / 读了哪些文档 / 三问结论 / 对照表 / 签收）→ 全部对齐后继续 Step 1。
+自己先完成三问 + 对照表 → **自动 @ 其他猫**请求独立愿景守护（不要等operator提醒，直接 @）→ 收到结论 → 对齐 → 填签收表（猫猫 / 读了哪些文档 / 三问结论 / 对照表 / 签收）→ 全部对齐后继续 Step 1。
 
 **愿景守护猫选择（不能 hardcode！）**：
 ```
@@ -263,41 +332,41 @@ AC 全打勾 ≠ 完成（F041 教训：12 项 AC ✅ 但 UI 不可用）。先�
 
 | Surface | 用户能做什么（达成态） | 用户实际能做什么（本 feat close 时） | 缺失/退化 | 处置 |
 |---------|--------------------|--------------------------|----------|------|
-| 例: 通知页 | 配 VAPID 公私钥 + 一键生成 + 联系信箱 | 看诊断矩阵 + 修复建议（read-only） | 完全丢失写能力 | deferred to Phase D / CVO signoff: thread `...` |
+| 例: 通知页 | 配 VAPID 公私钥 + 一键生成 + 联系信箱 | 看诊断矩阵 + 修复建议（read-only） | 完全丢失写能力 | deferred to Phase D / operator signoff: thread `...` |
 
 - ❌ "Service Manifest deferred" → ✅ "通知页用户看到诊断矩阵，无法在 UI 配置 VAPID"
 - ❌ "Phase C 4/4 ✅" → ✅ "通知页/插件页/MCP 写/Skill 管理 4 个 surface 有用户可感缺失，详见 disclosure 表"
 
 **Inbound intake 类 feature 必须额外含**：开源 vs 本地 visual side-by-side screenshots（每个 settings section / 主要 surface 各一对），不能只看"组件 wire 了没"。
 
-**Deliberate defer 必须 CVO signoff**——CVO 在 thread 里显式确认"接受这个 deferred surface 不在本 feat 内交付"才能 close；否则按"漏"处置，必须实做或开 follow-up F 号继续。
+**Deliberate defer 必须 operator signoff**——operator 在 thread 里显式确认"接受这个 deferred surface 不在本 feat 内交付"才能 close；否则按"漏"处置，必须实做或开 follow-up F 号继续。
 
-守护猫先审 Disclosure 才能做愿景三问。看到 deferred 字样直接拷问："这个 deferred 用户能感知到吗？CVO signoff 在哪？"
+守护猫先审 Disclosure 才能做愿景三问。看到 deferred 字样直接拷问："这个 deferred 用户能感知到吗？operator signoff 在哪？"
 
-事故来源：F190 close 时 settings/ 缺 7 个开源 components，CVO 完全不知道"通知页变成诊断矩阵"——技术决策语言"deferred"没有映射到用户可见性。详见 *(internal reference removed)*。
+事故来源：F190 close 时 settings/ 缺 7 个开源 components，operator 完全不知道"通知页变成诊断矩阵"——技术决策语言"deferred"没有映射到用户可见性。详见 *(internal reference removed)*。
 
 **🔴 守护猫提的 P1 = blocker，作者不能 self-resolve（2026-04-26 教训）**
 
 历史踩坑：F173 close 时把没完成的 AC-B2 (handler unification) 抽出去开 F177 stub spec 当作"follow-up anchor"应付守护猫的 P1，本质是把"没完成"藏进新文件后宣布闭环（debt = never，TD = never，stub = never，都是话术包装）。
 
-**反 anti-pattern 检查**（守护猫和作者都要查，铲屎官最终把关）：
+**反 anti-pattern 检查**（守护猫和作者都要查，operator最终把关）：
 
 - ❌ "deferred → 单独立项" / "follow-up 接棒" / "已记入 TD list" — 全部禁止作为闭环路径
 - ❌ 新建 stub spec / TD 条目当作"已 truth-sync"凭证
 - ✅ **闭环只有两条路径**：
   - **(A) 实做**：守护猫提的 P1 必须实做完成（哪怕大改动），改完重审
-  - **(B) 联合签字降级**：守护猫 + 铲屎官在 thread 里**显式签字**"接受不做 / 不属于本 feat 范围 / 已重新评估"，并写明降级理由
+  - **(B) 联合签字降级**：守护猫 + operator在 thread 里**显式签字**"接受不做 / 不属于本 feat 范围 / 已重新评估"，并写明降级理由
 
 **作者反问自己（close 前必查）**：
-1. 所有 deferred AC 是哪类：(a) 真做了 (b) 铲屎官签字降级 (c) 我自己想藏起来？
-2. 如果是 (c) → 不能 close，必须二选一：实做 OR 显式向铲屎官请求降级
+1. 所有 deferred AC 是哪类：(a) 真做了 (b) operator签字降级 (c) 我自己想藏起来？
+2. 如果是 (c) → 不能 close，必须二选一：实做 OR 显式向operator请求降级
 
 **守护猫反问作者**（看到 deferred / follow-up / stub anchor 字样直接拷问）：
 - 这件事**需要做还是可有可无**？
 - 如果需要做，**为什么不现在做**？
 - 如果可有可无，**为什么留 spec/TD 占资源**？
 
-不能给"几个选项让铲屎官选"——这是反问式 ping，把判断推回去。作者必须先有立场再 @ 铲屎官。
+不能给"几个选项让operator选"——这是反问式 ping，把判断推回去。作者必须先有立场再 @ operator。
 
 前端 UI/UX 额外要求：≤3 张截图 + 15s 录屏 + "需求→截图"映射表。
 
@@ -321,7 +390,7 @@ AC 全打勾 ≠ 完成（F041 教训：12 项 AC ✅ 但 UI 不可用）。先�
 | 触发 | 说明 |
 |------|------|
 | Harness / skill / MCP feature close | harness 自身变化必须评估 fit |
-| CVO 不满意 / "不是我要的" | 需要分清 vision gap / translation gap / harness misfit |
+| operator 不满意 / "不是我要的" | 需要分清 vision gap / translation gap / harness misfit |
 | Trace anomaly（重复 tool call、handoff 断链、长时间无 tool call） | trace 只能给 what，猫解释 why |
 | 抽样（normal feature close） | 防止只看失败样本 |
 
@@ -349,7 +418,7 @@ AC-A5 ❌ unmet → delete(why: 经评估不属于 MVP scope)
 **unmet AC 只有三条路，没有第四选项**：
 1. **immediate**：当前 session 做完，做完后改为 met + 补 evidence
 2. **delete(why)**：从 AC 删除，写清为什么不需要
-3. **cvo_signoff**：CVO 自然语言表态同意降级，录入四件套（proposal_message_id + cvo_message_id + cvo_quote + accepted_scope）
+3. **cvo_signoff**：operator 自然语言表态同意降级，录入四件套（proposal_message_id + cvo_message_id + cvo_quote + accepted_scope）
 
 **以下不是合法路径**：follow-up / deferred / next phase / P2 / stub / TD / 后续 / 留个尾巴 / 先这样 / 下次一定 / 回头 / 以后再 / next PR / will address later
 
@@ -363,7 +432,25 @@ AC-A5 ❌ unmet → delete(why: 经评估不属于 MVP scope)
 
 **Step 5**: 真相源同步 — 所有关联文档 `feature_ids` 正确；Links 章节无遗漏
 
-**Step 6**: Commit：`docs(Fxxx): mark feature as done [{猫猫签名}]`，body 含 What/Why/Evolved from
+**Step 5.5: Feature truth close evidence（F253 教训）🔴**
+
+在 Status→done、BACKLOG 移除、README completed、reflection、CloseGateReport 全部写完后，必须运行：
+
+```bash
+pnpm check:features
+```
+
+`PASS check-feature-truth` 是 feature close 的硬证据；失败则不能 close，先修真相源再提交。尤其要防：
+
+- `[backlog-active] BACKLOG contains Fxxx, but all records are done`：Step 4 漏移除 BACKLOG
+- `[backlog-missing] Active feature Fxxx is missing from BACKLOG`：active/done 状态和热层不一致
+- `[doc-status-drift]`：Status 行和 Timeline merged 记录互相打架
+
+**不要自动改 BACKLOG**：BACKLOG 是手写策展热层，机器只能报错，不能替猫判断 done/active。`check-feature-truth` 已经每次从 feature docs fresh-generate index 到 tempdir；不需要额外"自动重生成 index"兜底。
+
+**暂不做 diff-scope 降级**：feature truth 红灯代表共享真相源会误导所有猫，优先全局修正；若未来 unrelated blocker 成本持续过高，再单独评估 per-feature close checker 或 owner 指针，不在 close 流程里静默放过红灯。
+
+**Step 6**: Commit：`docs(Fxxx): mark feature as done [{猫猫签名}]`，body 含 What/Why/Evolved from + `pnpm check:features` PASS 摘要
 
 ## Quick Reference
 
@@ -371,8 +458,8 @@ AC-A5 ❌ unmet → delete(why: 经评估不属于 MVP scope)
 |------|---------|------|
 | Kickoff | 分 ID → 聚合文件 → BACKLOG → 双向链接 | `docs/features/Fxxx.md` |
 | Discussion | 采访/开放 → 落盘 → BACKLOG ref | `feature-discussions/` |
-| **Design Gate** | **分流 → 确认（UX→铲屎官/后端→猫猫/架构→两边）** | `feature-discussions/{date}-{fid}-design/` |
-| Completion | 愿景对照 → 跨猫验证 → 更新状态 → 移出 BACKLOG | `docs/features/Fxxx.md` |
+| **Design Gate** | **分流 → 确认（UX→operator/后端→猫猫/架构→两边）** | `feature-discussions/{date}-{fid}-design/` |
+| Completion | 愿景对照 → 跨猫验证 → 更新状态 → 移出 BACKLOG → `pnpm check:features` PASS | `docs/features/Fxxx.md` |
 
 ## Common Mistakes
 
@@ -384,18 +471,19 @@ AC-A5 ❌ unmet → delete(why: 经评估不属于 MVP scope)
 | 删了聚合文件 | 只从 BACKLOG 移除，聚合文件永久保留 |
 | 不记录演化关系 | Completion Step 3 必须思考 |
 | 讨论完不落盘 | 讨论结束写入 `feature-discussions/` |
-| 等铲屎官手动协调跨猫守护 | 自己 @ 其他猫发起守护（F073） |
-| 每步停下来问铲屎官"可以继续吗？" | 全链路自驱，只在阻塞/close 时通知铲屎官 |
+| 等operator手动协调跨猫守护 | 自己 @ 其他猫发起守护（F073） |
+| 每步停下来问operator"可以继续吗？" | 全链路自驱，只在阻塞/close 时通知operator |
 | 只看 spec checkbox 就声称完成/未完成 | 核实 git log + PR 状态 + 实际 commit（LL-029）|
 | UX 没确认就开 worktree 写代码 | 先过 Design Gate 再动手 |
 | 后端 API 自己拍板不跟其他猫讨论 | 纯后端走 `collaborative-thinking` 拉猫讨论 |
 | 等 feat close 才补 Phase 进度 | merge-gate Step 7.5 每次 merge 实时同步（Phase ✅ + AC + Timeline） |
 | 社区 issue 批量打 feature 标签不逐个审核 | 每个 issue 必须过 Step 0 关联检测（F114/F115/F116 教训） |
 | 社区 feature 只在开源仓打标签，BACKLOG 不同步 | ROADMAP.md 必须同步加 Source=community 条目 |
+| Status 标 done 后没跑 feature truth gate | close 前必须跑 `pnpm check:features`，PASS 才能提交 |
 
 ## 下一步
 
 - Kickoff 后 → **Design Gate**（按类型分流确认）→ `writing-plans`
-- 开发完成后 → `quality-gate` → `request-review`
+- 开发完成后 → `quality-gate` → [`fresh-context-review`] → `request-review`
 - Review 通过后 → `merge-gate`（合入）→ 回来用 completion 闭环
 - 讨论收敛后 → `collaborative-thinking` Mode C（沉淀 ADR/规则/教训）

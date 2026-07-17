@@ -602,11 +602,19 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
     // F128: proposal status changed (approved/rejected/etc) — broadcast to interested cards.
     // ProposalCard listens via CustomEvent('cat-cafe:proposal-updated'); we don't push into a
     // global store because proposal state is card-local and only mounted cards need to react.
-    socket.on('proposal_updated', (proposal: { proposalId: string; status: string; createdThreadId?: string }) => {
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('cat-cafe:proposal-updated', { detail: proposal }));
-      }
-    });
+    socket.on(
+      'proposal_updated',
+      (proposal: {
+        proposalId: string;
+        status: string;
+        createdThreadId?: string;
+        reportingMode?: 'none' | 'final-only' | 'state-transitions' | 'blocking-ack';
+      }) => {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('cat-cafe:proposal-updated', { detail: proposal }));
+        }
+      },
+    );
     socket.on('proposal_created', (proposal: { proposalId: string; status: string }) => {
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('cat-cafe:proposal-created', { detail: proposal }));
@@ -863,6 +871,8 @@ export function useSocket(callbacks: SocketCallbacks, threadId?: string) {
 
     socket.on('connector_message', (data: ConnectorMessageEvent) => {
       if (!data?.threadId || !data?.message?.id) return;
+      // Suppress internal routing diagnostics from user timeline
+      if (data.message.source?.connector === 'routing-guard-failure') return;
       const toast = data.message.extra?.scheduler?.toast;
       if (data.message.source?.connector === 'scheduler' && toast) {
         useToastStore.getState().addToast({

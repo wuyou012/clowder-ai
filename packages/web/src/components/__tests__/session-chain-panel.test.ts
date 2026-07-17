@@ -36,7 +36,6 @@ const MOCK_CATS: Record<string, { id: string; displayName: string; color: { prim
   codex: { id: 'codex', displayName: '缅因猫', color: { primary: '#5B8C5A', secondary: '#D4E6D3' } },
   gemini: { id: 'gemini', displayName: '暹罗猫', color: { primary: '#4A90E2', secondary: '#D8E6F8' } },
   kimi: { id: 'kimi', displayName: '梵花猫', color: { primary: '#4B5563', secondary: '#E5E7EB' } },
-  dare: { id: 'dare', displayName: '狸花猫', color: { primary: '#FFB300', secondary: '#FFE082' } },
   gpt52: { id: 'gpt52', displayName: '缅因猫', color: { primary: '#66BB6A', secondary: '#C8E6C9' } },
   'opus-45': { id: 'opus-45', displayName: '布偶猫', color: { primary: '#7E57C2', secondary: '#E1D5F0' } },
   'opus-47': { id: 'opus-47', displayName: '布偶猫', color: { primary: '#7B1FA2', secondary: '#E1BEE7' } },
@@ -56,6 +55,12 @@ vi.mock('@/hooks/useCatData', () => ({
 
 vi.mock('../status-helpers', () => ({
   truncateId: (id: string, len: number) => (id.length > len ? `${id.slice(0, len)}…` : id),
+}));
+
+// Stub next/link — render as <a> so we can assert href
+vi.mock('next/link', () => ({
+  default: (props: { href: string; className?: string; children: React.ReactNode }) =>
+    React.createElement('a', { href: props.href, className: props.className }, props.children),
 }));
 
 const origCreateElement = document.createElement.bind(document);
@@ -94,6 +99,16 @@ function mockSessionsResponse(sessions: unknown[]) {
   });
 }
 
+/** Sealed section is default-collapsed; click the toggle to expand it. */
+function expandSealed() {
+  const toggle = container.querySelector('[data-testid="sealed-toggle"]') as HTMLElement | null;
+  if (toggle) {
+    act(() => {
+      toggle.click();
+    });
+  }
+}
+
 describe('F24: SessionChainPanel', () => {
   it('renders panel with bind section even when API returns empty sessions (F33)', async () => {
     mockSessionsResponse([]);
@@ -102,7 +117,7 @@ describe('F24: SessionChainPanel', () => {
     // Panel should render (F33: always visible for external session binding)
     expect(container.querySelector('section')).not.toBeNull();
     // No session cards, but bind section available
-    expect(container.textContent).toContain('0 sessions');
+    expect(container.textContent).toContain('0 total');
     expect(container.textContent).toContain('绑定外部 Session');
   });
 
@@ -121,7 +136,8 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-1');
     await flushFetch();
-    expect(container.textContent).toContain('2 sessions');
+    expect(container.textContent).toContain('1 active');
+    expect(container.textContent).toContain('2 total');
   });
 
   it('collapses repeated 0-msg tool_conflict retry corpses into one summary (F201-churn)', async () => {
@@ -153,6 +169,7 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-1');
     await flushFetch();
+    expandSealed();
     // F201-churn: 4 empty (0-msg) tool_conflict retry corpses collapse into ONE summary,
     // leaving only the real sealed session as a full card. Transparency preserved via the
     // summary's visible count; the UI no longer litters one corpse card per F201 retry.
@@ -190,6 +207,7 @@ describe('F24: SessionChainPanel', () => {
     mockSessionsResponse([fragment(1), fragment(2), fragment(3)]);
     renderPanel('thread-1');
     await flushFetch();
+    expandSealed();
     expect(container.querySelectorAll('[data-testid="session-card-sealed"]').length).toBe(0);
     const summary = container.querySelector('[data-testid="session-card-retry-collapsed"]');
     expect(summary).not.toBeNull();
@@ -224,6 +242,7 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-1');
     await flushFetch();
+    expandSealed();
     expect(container.querySelectorAll('[data-testid="session-card-sealed"]').length).toBe(0);
     const summary = container.querySelector('[data-testid="session-card-retry-collapsed"]');
     expect(summary).not.toBeNull();
@@ -246,6 +265,7 @@ describe('F24: SessionChainPanel', () => {
     mockSessionsResponse([sealingCorpseLike(1), sealingCorpseLike(2)]);
     renderPanel('thread-1');
     await flushFetch();
+    expandSealed();
     expect(container.querySelector('[data-testid="session-card-retry-collapsed"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="session-card-sealed"]').length).toBe(2);
   });
@@ -376,11 +396,12 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-1');
     await flushFetch();
+    expect(container.textContent).toContain('Sealed');
+    expandSealed();
     expect(container.textContent).toContain('Session #1');
     expect(container.textContent).toContain('Session #2');
     expect(container.textContent).toContain('compact');
     expect(container.textContent).toContain('threshold');
-    expect(container.textContent).toContain('Sealed');
     // Both sealed sessions should have clickable ID buttons
     expect(container.querySelector('button[title*="seal_aaa111"]')).not.toBeNull();
     expect(container.querySelector('button[title*="seal_bbb222"]')).not.toBeNull();
@@ -392,6 +413,7 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-1');
     await flushFetch();
+    expandSealed();
     expect(container.textContent).toContain('sealing');
   });
 
@@ -590,18 +612,18 @@ describe('F24: SessionChainPanel', () => {
     renderPanel('thread-1');
     await flushFetch();
     // Should not crash; panel still renders (F33: bind section always present)
-    expect(container.textContent).toContain('0 sessions');
+    expect(container.textContent).toContain('0 total');
     expect(container.textContent).not.toContain('Session #');
   });
 
-  it('renders singular "session" for count of 1', async () => {
+  it('renders active and total counts in header', async () => {
     mockSessionsResponse([
       { id: 's1', catId: 'opus', seq: 0, status: 'active', messageCount: 1, createdAt: Date.now() },
     ]);
     renderPanel('thread-1');
     await flushFetch();
-    expect(container.textContent).toContain('1 session');
-    expect(container.textContent).not.toContain('1 sessions');
+    expect(container.textContent).toContain('1 active');
+    expect(container.textContent).toContain('1 total');
   });
 
   it('keeps stale data visible on thread switch when fetch fails (stale-while-revalidate)', async () => {
@@ -636,6 +658,7 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-A');
     await flushFetch();
+    expandSealed();
     expect(container.textContent).toContain('Session #1');
 
     // Switch to thread-B, but fetch throws — stale data stays visible
@@ -662,6 +685,7 @@ describe('F24: SessionChainPanel', () => {
     ]);
     renderPanel('thread-1');
     await flushFetch();
+    expandSealed();
 
     const findUnsealBtn = () => {
       const buttons = Array.from(container.querySelectorAll('button'));
@@ -704,7 +728,7 @@ describe('F24: SessionChainPanel', () => {
 
     // New data visible, old data gone
     expect(container.textContent).toContain('缅因猫');
-    expect(container.textContent).toContain('1 session');
+    expect(container.textContent).toContain('1 total');
   });
 
   it('reuses per-thread session cache immediately when revisiting a thread during revalidate', async () => {
@@ -790,20 +814,6 @@ describe('F24: SessionChainPanel', () => {
     ) as HTMLElement | null;
     expect(card).not.toBeNull();
     expect(card!.style.boxShadow).toMatch(/rgba?\(74,\s*144,\s*226/);
-  });
-
-  it('applies dare colors from cat.color', async () => {
-    // dare primary #FFB300 → 255,179,0
-    mockSessionsResponse([
-      { id: 's1', catId: 'dare', seq: 0, status: 'active', messageCount: 2, createdAt: Date.now() },
-    ]);
-    renderPanel('thread-1');
-    await flushFetch();
-    const card = container.querySelector(
-      '[data-testid="session-card-active"][data-cat-id="dare"]',
-    ) as HTMLElement | null;
-    expect(card).not.toBeNull();
-    expect(card!.style.boxShadow).toMatch(/rgba?\(255,\s*179,\s*0/);
   });
 
   it('applies gpt52 (maine-coon variant) colors from cat.color', async () => {
@@ -963,6 +973,7 @@ describe('F24: SessionChainPanel', () => {
       ]);
       renderPanel('thread-1');
       await flushFetch();
+      expandSealed();
       const card = container.querySelector(
         '[data-testid="session-card-sealed"][data-cat-id="opus-47"]',
       ) as HTMLElement | null;
@@ -998,7 +1009,7 @@ describe('F24: SessionChainPanel', () => {
       expect(html).not.toContain('bg-codex-light');
       expect(html).not.toContain('text-codex-dark');
       expect(html).not.toContain('border-gemini-primary');
-      expect(html).not.toContain('border-dare-primary');
+      expect(html).not.toContain('border-opus-45-primary');
       expect(html).not.toContain('border-kimi-primary');
       expect(html).not.toContain('border-opus-primary');
       // Legacy arbitrary hex tokens for gpt52 / opus-45 / sonnet
@@ -1189,6 +1200,115 @@ describe('F24: SessionChainPanel', () => {
       await flushFetch();
 
       expect(container.textContent).toContain('err');
+    });
+  });
+
+  describe('collapse toggle', () => {
+    it('active Session Chain: click header hides active cards, click again restores', async () => {
+      mockSessionsResponse([
+        { id: 's1', catId: 'opus', seq: 0, status: 'active', messageCount: 5, createdAt: Date.now() },
+      ]);
+      renderPanel('thread-1');
+      await flushFetch();
+
+      // Default: expanded — active card visible
+      expect(container.querySelector('[data-testid="session-card-active"]')).not.toBeNull();
+      expect(container.textContent).toContain('Session #1');
+      // Header shows counts
+      expect(container.textContent).toContain('1 active');
+
+      // Click Session Chain header to collapse
+      const chainHeader = Array.from(container.querySelectorAll('button')).find((b) =>
+        b.textContent?.includes('Session Chain'),
+      );
+      expect(chainHeader).toBeTruthy();
+      act(() => {
+        chainHeader?.click();
+      });
+
+      // Collapsed: active card hidden, but header/count still visible
+      expect(container.querySelector('[data-testid="session-card-active"]')).toBeNull();
+      expect(container.textContent).toContain('1 active');
+      expect(container.textContent).toContain('Session Chain');
+
+      // Click again to expand
+      act(() => {
+        chainHeader?.click();
+      });
+
+      // Restored: active card visible again
+      expect(container.querySelector('[data-testid="session-card-active"]')).not.toBeNull();
+      expect(container.textContent).toContain('Session #1');
+    });
+
+    it('Sealed section: default collapsed, click expands, click collapses', async () => {
+      mockSessionsResponse([
+        {
+          id: 'seal1',
+          catId: 'opus',
+          seq: 0,
+          status: 'sealed',
+          messageCount: 10,
+          createdAt: Date.now() - 60000,
+          sealedAt: Date.now(),
+          sealReason: 'compact',
+        },
+      ]);
+      renderPanel('thread-1');
+      await flushFetch();
+
+      // Default: collapsed — sealed card hidden, but toggle visible
+      expect(container.querySelector('[data-testid="session-card-sealed"]')).toBeNull();
+      expect(container.textContent).toContain('Sealed');
+
+      // Click to expand
+      expandSealed();
+
+      // Expanded: sealed card visible
+      expect(container.querySelector('[data-testid="session-card-sealed"]')).not.toBeNull();
+      expect(container.textContent).toContain('Session #1');
+      expect(container.textContent).toContain('compact');
+
+      // Click to collapse again
+      expandSealed(); // toggles back
+
+      // Collapsed again
+      expect(container.querySelector('[data-testid="session-card-sealed"]')).toBeNull();
+    });
+  });
+
+  describe('F252: Story Player entry point', () => {
+    it('does NOT render standalone replay link for sealed sessions (AC-E1 sunset)', async () => {
+      mockSessionsResponse([
+        {
+          id: 'ses_sealed_replay',
+          catId: 'opus',
+          seq: 0,
+          status: 'sealed',
+          messageCount: 10,
+          createdAt: Date.now() - 60000,
+          sealedAt: Date.now() - 30000,
+        },
+      ]);
+      renderPanel('thread-1');
+      await flushFetch();
+      expandSealed();
+
+      // AC-E1: standalone session replay route is sunset — canonical entry
+      // is Theater Overlay via ThreadItem, not a per-session link here
+      const replayLink = container.querySelector('a[href="/story/session:ses_sealed_replay"]');
+      expect(replayLink).toBeNull();
+    });
+
+    it('does NOT render replay link for active sessions', async () => {
+      mockSessionsResponse([
+        { id: 'ses_active_no_replay', catId: 'opus', seq: 0, status: 'active', messageCount: 5, createdAt: Date.now() },
+      ]);
+      renderPanel('thread-1');
+      await flushFetch();
+
+      const replayLink = container.querySelector('a[href*="/story/session:"]');
+      expect(replayLink).toBeNull();
     });
   });
 });

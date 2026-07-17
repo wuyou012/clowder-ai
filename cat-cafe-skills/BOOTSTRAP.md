@@ -3,12 +3,12 @@
 <EXTREMELY_IMPORTANT>
 你已加载 Cat Café Skills。路由规则定义在 `cat-cafe-skills/manifest.yaml`。
 
-## Skills 列表（41 个）
+## Skills 列表（按 manifest 路由）
 
 ### 开发流程链
 ```
 feat-lifecycle → Design Gate(设计确认) → writing-plans → worktree → tdd
-    → quality-gate → request-review → receive-review
+    → quality-gate → [fresh-context-review] → request-review → receive-review
     → merge-gate → feat-lifecycle(完成)
 ```
 
@@ -22,16 +22,19 @@ feat-lifecycle → Design Gate(设计确认) → writing-plans → worktree → 
 | `writing-plans` | 写实施计划 | ① impl |
 | `worktree` | 创建隔离开发环境 | ① impl |
 | `tdd` | 写测试+实现（红绿重构） | ① impl |
+| `code-as-harness` | 重复摩擦/陌生任务→搜证据→诊断→代码修/建 harness | — |
 | `debugging` | 遇到 bug（系统化定位） | — |
 | `quality-gate` | 开发完了自检（愿景+spec+验证） | ② |
+| `fresh-context-review` | *（可选）* Author-triggered pre-review scan（finding generator, not approval） | ②½ |
 | `request-review` | 发 review 请求给 reviewer | ③ |
 | `receive-review` | 处理 review 反馈（Red→Green） | ③ |
-| `merge-gate` | 门禁→PR→云端 review→merge→清理 | ④⑤⑥ |
+| `merge-gate` | 门禁→PR→remote review→merge→清理 | ④⑤⑥ |
 | `open-source-teardown` | 热门开源项目/竞品 agent/runtime 的源码拆解、算法剥皮、营销水分和 tradeoff 判断 | — |
 | `cross-cat-handoff` | 跨猫交接/传话（五件套） | — |
 | `deep-research` | 多源深度调研 | — |
 | `source-audit` | 外部数字/benchmark/因果/趋势等高风险 claim 的信源审计与 provenance | — |
 | `ttfund-skills` | 天天基金官方 Skills 网关：基金搜索/净值/持仓/经理/指数/黄金/债市/活期宝事实数据 | — |
+| `convention-graph-discovery` | 进入陌生 repo / F242 约定图工作：定义 domain、extractor、gap/freshness/provenance 报告 | — |
 | `knowledge-engineering` | 外部项目文档重构/冷启动知识注入 | — |
 | `memory-navigation` | 项目记忆三入口路由（graph / recent / search） | — |
 | `memory-search-best-practices` | 记忆系统多刀检索 + recall coverage 策略（8 类题型 recipe） | — |
@@ -40,20 +43,21 @@ feat-lifecycle → Design Gate(设计确认) → writing-plans → worktree → 
 | `rich-messaging` | 发语音/发图/发卡片/富媒体 | — |
 | `enterprise-workflow` | 企微/飞书文档、表格、待办、会议、日程一键创建 | — |
 | `schedule-tasks` | 定时任务/周期提醒/延迟执行 | — |
-| `hyperfocus-brake` | 铲屎官健康提醒/三猫撒娇打断 | — |
+| `hyperfocus-brake` | operator健康提醒/三猫撒娇打断 | — |
 | `incident-response` | 闯祸了/不可挽回/人很难过 | — |
 | `image-generation` | 生成图片/画头像/AI 画图 | — |
 | `self-evolution` | scope 守护/流程改进/知识沉淀 | — |
 | `vision-rescue` | 任务绝境/反复摆动/投降修辞/放弃愿景 | — |
-| `bootcamp-guide` | CVO 新手训练营引导 | — |
+| `bootcamp-guide` | operator 新手训练营引导 | — |
 | `cross-thread-sync` | 跨 thread 协同/通知/争用协调 | — |
 | `browser-preview` | 写前端/跑 dev server/看页面效果 | — |
 | `console-dev` | Console 前端开发的入口、设计体系、实现和验证门禁 | — |
 | `browser-automation` | 外部网站浏览/登录态流程/浏览器工具路由 | — |
 | `organize-threads` | 整理未分类 thread，建议合适标签 | — |
-| `workspace-navigator` | 铲屎官说"打开日志/看代码/打开设计图"等模糊指令 → 猫猫自己找路径 → API 导航 | — |
+| `workspace-navigator` | operator说"打开日志/看代码/打开设计图"等模糊指令 → 猫猫自己找路径 → API 导航 | — |
 | `ppt-forge` | 做 PPT/演示文稿/视觉审查（三猫流水线） | — |
 | `video-forge` | 做视频/showcase/教程视频/视频审查 | — |
+| `anime-forge` | 做动画短剧/角色 IP 短片/图生视频管线（素材是生成的不是录的） | — |
 
 ### 参考文件（refs/，按需读取）
 
@@ -62,12 +66,12 @@ feat-lifecycle → Design Gate(设计确认) → writing-plans → worktree → 
 | `refs/shared-rules.md` | 三猫共用协作规则（单一真相源） |
 | `refs/decision-matrix.md` | 决策权漏斗矩阵 |
 | `refs/commit-signatures.md` | 猫猫签名表 + @ 句柄 |
-| `refs/pr-template.md` | PR 模板 + 云端 review 触发模板 |
+| `refs/pr-template.md` | PR 模板 + remote review 触发模板 |
 | `refs/review-request-template.md` | Review 请求信模板 |
 | `refs/vision-evidence-workflow.md` | 前端截图/录屏证据流程（B1） |
 | `refs/requirements-checklist-template.md` | 需求点 checklist 模板（B3） |
 | `refs/f190-frontend-lessons.md` | F190 Console intake 的前端案例与红区教训 |
-| `refs/mcp-callbacks.md` | HTTP callback API 参考 |
+| `refs/mcp-callbacks.md` | MCP callback surface 映射与 legacy HTTP fallback 边界 |
 | `refs/rich-blocks.md` | Rich block 创建指南 |
 | `refs/ppt-density-playbook.md` | PPT 密度填充手法（9 种手段 + 量化门禁） |
 | `refs/ppt-visual-review.md` | PPT 视觉审查 Gate（D1 布局+D2 审美） |

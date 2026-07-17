@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { evalDomainIdSchema } from './domain/eval-domain-registry.js';
 
 const stringRefArray = z.array(z.string().min(1));
 const nonEmptyStringArray = stringRefArray.min(1);
@@ -7,7 +8,7 @@ const isoDateTime = z.string().datetime({ offset: true });
 const verdictHandoffPacketSchema = z
   .object({
     id: z.string().min(1),
-    domainId: z.enum(['eval:a2a', 'eval:memory', 'eval:sop', 'eval:capability-wakeup']),
+    domainId: evalDomainIdSchema,
     createdAt: isoDateTime,
     phenomenon: z.string().min(1),
     harnessUnderEval: z.object({
@@ -55,7 +56,7 @@ const verdictHandoffPacketSchema = z
     if (packet.governance?.cvoAcceptRequired !== true) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'delete_sunset verdict requires structured CVO accept gate',
+        message: 'delete_sunset verdict requires structured operator accept gate',
         path: ['governance', 'cvoAcceptRequired'],
       });
     }

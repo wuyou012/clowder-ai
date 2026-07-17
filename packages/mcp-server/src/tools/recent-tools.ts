@@ -41,6 +41,7 @@ interface RecentItem {
   filesRead?: number;
   filesModified?: number;
   verified?: boolean;
+  suggestedAction?: { type: string; threadId?: string; reason?: string; source?: string };
 }
 
 interface SelectionGroup {
@@ -68,6 +69,8 @@ export async function handleListRecent(input: {
   if (input.since) params.set('since', input.since);
   if (input.limit != null) params.set('limit', String(input.limit));
   if (input.kinds && input.kinds.length > 0) params.set('kinds', input.kinds.join(','));
+  const currentThreadId = process.env['CAT_CAFE_THREAD_ID']?.trim();
+  if (currentThreadId) params.set('currentThreadId', currentThreadId);
 
   const qs = params.toString();
   const url = `${API_URL}/api/library/recent${qs ? `?${qs}` : ''}`;
@@ -98,6 +101,7 @@ function formatRecent(data: RecentResponse, since: string): string {
   } else if (data.items.length === 0) {
     // nudge already shown above
   } else {
+    let hasCrossPostItems = false;
     for (const item of data.items) {
       const date = item.updatedAt.slice(0, 10);
       let line = `  ${date} | ${item.anchor} — ${item.title} (${item.kind}) [source: ${item.source}]`;
@@ -108,7 +112,17 @@ function formatRecent(data: RecentResponse, since: string): string {
         if (item.filesModified != null) parts.push(`${item.filesModified} modified`);
         if (parts.length > 0) line += ` {${parts.join(', ')}}`;
       }
+      if (item.suggestedAction?.type === 'cross_post' && item.suggestedAction.threadId) {
+        hasCrossPostItems = true;
+        line += ` → cross-post: ${item.suggestedAction.threadId}`;
+      }
       lines.push(line);
+    }
+    if (hasCrossPostItems) {
+      lines.push('');
+      lines.push(
+        '  Tip: use cat_cafe_cross_post_message(threadId, targetCats, content) — targetCats or a line-start @mention in content required.',
+      );
     }
   }
   if (data.groups && data.groups.length > 1) {

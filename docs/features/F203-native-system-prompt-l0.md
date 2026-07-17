@@ -4,15 +4,25 @@ related_features: [F086, F167, F198, F210, F211, F061]
 topics: [system-prompt, governance, prompt-engineering, compression-immunity, l0-injection]
 doc_kind: spec
 created: 2026-05-15
+updated: 2026-06-19
 ---
 
 # F203: Native System Prompt L0 — 压缩免疫核心规则注入
 
-> **Status**: in-progress | **Owner**: Ragdoll Opus 4.7 | **Priority**: P1
+> **Status**: done（operator 签字降级 2026-06-19，AC-I8 deferred）| **Owner**: Ragdoll Opus 4.7 | **Priority**: P1
+
+## Current State Snapshot（2026-06-19）
+
+- **Codex**: done. `CodexAgentService` 走 per-invocation `-c developer_instructions=<compiled L0>`；`~/.codex/AGENTS.md` user-layer 双注入已按 KD-14 退役，Codex CLI 版本 drift 归 Phase E audit SOP。
+- **AGY CLI**: native L0 channel **not reachable** via public interface（2026-06-19 复核 agy 1.0.9 公开面：`--add-dir` / `-c` / `--continue` / `--conversation` / `--dangerously-skip-permissions` / `-i` / `--log-file` / `--model` / `-p/--print` / `--prompt` / `--prompt-interactive` / `--sandbox` + subcommands `changelog/help/install/models/plugin/update`——无 `--agent` / `--system` / root agent override，retraction conditions 未触发）。S6 已合入（PR #2036）：主 agent 只能走 prompt-level fallback。F236 拆形态细化：Siamese = AGY CLI / `agy --print`（`@gemini-25`）；hook 能力 F236 Phase C 单独实测。
+- **Antigravity Desktop / IDE**: native L0 channel **not reachable** via current bridge. S7 已合入（PR #2036）：`StartCascade` / `SendUserCascadeMessage` payload 无 system/preamble 字段，身份仍是 `AntigravityAgentService` first-prompt prepend + Rules fallback。F236 拆形态细化：Bengal = Antigravity IDE/LS（`@antig-opus`），F061 实测 view_file 自闭环不走 bridge = observe-only。
+- **OpenCode 金渐层**: implementation done, runtime validation **deferred — operator signed 2026-06-19**. Phase I 已合入（PR #2069）：`opencode.json` `instructions` 注入 compiled L0 + `OPENCODE.md`，全链守护测试 139/139。AC-I8 alpha runtime 体感验收 deferred 原因：**家里 runtime 没接入 OpenCode invocation flow（无 API/subscription）**——本地 opencode v1.2.27 已装但不在产线 carrier。retraction condition：OpenCode API/subscription 接入产线 carrier flow 时重开。
+
+F203 整体 **close（带 deferred AC-I8）**。BACKLOG 状态从 `runtime-validation` → `done`；OpenCode runtime 验收等 API/subscription 接入再开新 mini-spec（不留 stub 尾巴，retraction condition 写明）。
 
 ## Why
 
-### 最终目标（team lead 2026-05-15 原话版本）
+### 最终目标（operator 2026-05-15 原话版本）
 
 > "F203 的最终目标就是优化重构现在的系统提示词，让Ragdoll和Maine Coon不要受到太多原本不合理的系统提示词的影响，把我们自己原本应该构建在系统提示词但是没能进去的进入系统提示词。Claude Code 也好 Codex 也好那些客观性的系统提示词不能丢。"
 
@@ -22,7 +32,7 @@ created: 2026-05-15
 
 2. **把家规从 user message 切到 system role**——Magic Words / Rule 0 / P1-P5 / 球权三选一 / 五条铁律 / WORKFLOW_TRIGGERS / 协作哲学这些 P0 级规则当前通过 user message prepend 注入，每次压缩丢失需要重教（"10 轮对话教 10 次传球"）。切到 system role 后压缩免疫。
 
-3. **保留默认系统提示词里的"客观性"内容**——team lead明确约束。
+3. **保留默认系统提示词里的"客观性"内容**——operator明确约束。
 
 ### 客观性指令保留清单（不能丢）🔴
 
@@ -60,7 +70,8 @@ created: 2026-05-15
 按 ADR-030 §10.2 14 项 L0 清单切换到 native system role 通道：
 - **Claude 猫**：`ClaudeAgentService(-p)` 与 `ClaudeBgCarrierService(--bg)` 都走 `--system-prompt-file <compiled L0>`；carrier 选择只控制执行模式，不控制 F203 是否生效
 - **Codex 猫**：`codex exec -c 'developer_instructions="<compiled L0>"'`（S4 实测 per-call 注入 ✅）
-- **Gemini / Antigravity 猫**：2026-05-31 重新评估后拆线处理（KD-20/KD-21）：`gemini --acp` / Gemini CLI 不再作为 F203 主线；只保留 enterprise/API-key fallback。后续 native L0 重点转为两个 Antigravity spike：AGY CLI（headless Google carrier）与 Antigravity Desktop/IDE（Bengal）。
+- **Gemini / Antigravity 猫**：2026-05-31 重新评估后拆线处理（KD-20/KD-21）：`gemini --acp` / Gemini CLI 不再作为 F203 主线；只保留 enterprise/API-key fallback。AGY CLI（headless Google carrier）与 Antigravity Desktop/IDE（Bengal）两个 native L0 spike 已在 2026-06-01 收敛：当前公开接口均不可达，统一转 prompt-level fallback（KD-22）。
+- **OpenCode 金渐层**：`opencode.json` `instructions` 字段注入 compiled L0 文件路径；runtime config 通过 `writeOpenCodeRuntimeConfig` 传入 instructions（KD-23，S8 源码验证 compression-immune）
 
 ### Phase A: Baseline + 扩展 spike（无风险前置）
 
@@ -76,14 +87,14 @@ S0-S5 spike 全部完成再进 Phase B。详见 Spike Log。
 
 ### Phase C: 实施 + runtime 重启验证（直接切，不灰度）
 
-team lead 2026-05-15 directive："如果不好我们都有 git log 能恢复——不搞灰度，那些太麻烦了 我们也不现实。"
+operator 2026-05-15 directive："如果不好我们都有 git log 能恢复——不搞灰度，那些太麻烦了 我们也不现实。"
 
 - Claude carrier argv 加 `--system-prompt-file <compiled L0>`：`ClaudeAgentService(-p)` 与 `ClaudeBgCarrierService(--bg)` 行为一致（直接替换，不留 feature flag）
 - `CodexAgentService.spawn` argv 加 `-c 'developer_instructions=<compiled L0>'`
 - `effectivePrompt` 拼装逻辑：删除 `params.systemPrompt + promptWithMission` prepend 路径（system prompt 已在 argv 里，user message 只剩 prompt 本身）
 - F-BLOAT 测试保护：resume 时 system prompt 不重复（spawn argv 每次新传，session 内不累积——靠 daemon/Codex 自身管理）
-- 验证：runtime 重启后 47 + 46 + Maine Coon各跑一轮 + team lead跑 10 轮含压缩对话——直接观察行为变化
-- **回滚机制**：出问题team lead说一声 → `git revert <commit>` + runtime 重启，3 分钟回滚
+- 验证：runtime 重启后 47 + 46 + Maine Coon各跑一轮 + operator跑 10 轮含压缩对话——直接观察行为变化
+- **回滚机制**：出问题operator说一声 → `git revert <commit>` + runtime 重启，3 分钟回滚
 
 ### Phase D: Root md 瘦身
 
@@ -94,7 +105,7 @@ team lead 2026-05-15 directive："如果不好我们都有 git log 能恢复—�
 
 ### Phase E: CC 版本升级拆解 SOP（重要远见）
 
-team lead 2026-05-15 原话："我估计每个 claude code 大版本更新我们需要拆一次 cc 的系统提示词，比如他添加了新的功能性系统提示词我们得补"。
+operator 2026-05-15 原话："我估计每个 claude code 大版本更新我们需要拆一次 cc 的系统提示词，比如他添加了新的功能性系统提示词我们得补"。
 
 落地：
 - 写 `scripts/audit-claude-code-system-prompt.mjs`：`strings $(which claude) | grep -E '<patterns>'` 提取最新 system prompt 关键段
@@ -103,11 +114,11 @@ team lead 2026-05-15 原话："我估计每个 claude code 大版本更新我们
 - 在 `cat-cafe-skills/refs/cc-system-prompt-audit-sop.md` 写 SOP：每次 CC 大版本（minor 及以上）必跑 audit
 - 同款 SOP 对 Codex CLI 适用：`strings $(which codex)` audit + 归档
 
-### Phase F: 配置栏 系统提示词可见化（team lead 2026-05-16 提醒）
+### Phase F: 配置栏 系统提示词可见化（operator 2026-05-16 提醒）
 
-team lead 2026-05-16 原话："我们的配置栏有个叫规则与SOP 我建议这里需要把我们替换的系统提示词和其他那样可见！这样方便人去看现在的系统提示词到底是什么？如果别人要定制修改也知道要去修改什么？"
+operator 2026-05-16 原话："我们的配置栏有个叫规则与SOP 我建议这里需要把我们替换的系统提示词和其他那样可见！这样方便人去看现在的系统提示词到底是什么？如果别人要定制修改也知道要去修改什么？"
 
-**Why 现在补**：Phase C 把 L0 切到 native system role 后，L0 内容只在 `assets/system-prompts/system-prompt-l0.md` + compile 渲染时存在——team lead（和其他人）没有可见入口看"当前注入到猫的系统提示词到底长什么样"。`packages/web/src/components/settings/settings-nav-config.ts:74-78` 已有 `id: 'rules'` 配置栏「规则与 SOP」（描述含"模型提示词入口"），但目前只展示家规/SOP 不展示 L0。
+**Why 现在补**：Phase C 把 L0 切到 native system role 后，L0 内容只在 `assets/system-prompts/system-prompt-l0.md` + compile 渲染时存在——operator（和其他人）没有可见入口看"当前注入到猫的系统提示词到底长什么样"。`packages/web/src/components/settings/settings-nav-config.ts:74-78` 已有 `id: 'rules'` 配置栏「规则与 SOP」（描述含"模型提示词入口"），但目前只展示家规/SOP 不展示 L0。
 
 落地（待 Design Gate）：
 - 配置栏「规则与 SOP」加 L0 系统提示词查看区：
@@ -120,13 +131,13 @@ team lead 2026-05-16 原话："我们的配置栏有个叫规则与SOP 我建议
   - 改完 → `pnpm gate` + runtime 重启验收（KD-5 git revert 回滚通道）
 - read-only 还是可编辑？→ Design Gate 决定（read-only 安全简单；可编辑要 + dirty/save/reload + 影响范围警告）
 
-**Design Gate 决定（AC-F1，2026-05-16 opus-47，autonomous）**：**read-only**（做 AC-F2/F3/F4，**defer AC-F5 可编辑**）。依据：① team experience是"**可见**/看...**到底是什么**/知道要去**修改什么**"——诉求是可见性 + 修改入口指引，非 in-app 编辑器；② AC-F5 spec 明标"（可选）"；③ L0 治理全猫 identity/家规/safety，web-editable = P0 风险面，而 file+git+`pnpm gate`+restart 已是 KD-5 文档化回滚通道，可编辑 marginal gain ≪ risk（YAGNI/P-value）。read-only 100% 覆盖team lead诉求。AC-F5 additive，team lead日后要 in-app 编辑可低成本重启。剩余 Design Gate（template/compiled 切换形态 + per-cat 切换 UX）走 console-dev 前端交付范式（Design gate 由设计/Siamese审，非逐步team lead）。
+**Design Gate 决定（AC-F1，2026-05-16 opus-47，autonomous）**：**read-only**（做 AC-F2/F3/F4，**defer AC-F5 可编辑**）。依据：① operator experience是"**可见**/看...**到底是什么**/知道要去**修改什么**"——诉求是可见性 + 修改入口指引，非 in-app 编辑器；② AC-F5 spec 明标"（可选）"；③ L0 治理全猫 identity/家规/safety，web-editable = P0 风险面，而 file+git+`pnpm gate`+restart 已是 KD-5 文档化回滚通道，可编辑 marginal gain ≪ risk（YAGNI/P-value）。read-only 100% 覆盖operator诉求。AC-F5 additive，operator日后要 in-app 编辑可低成本重启。剩余 Design Gate（template/compiled 切换形态 + per-cat 切换 UX）走 console-dev 前端交付范式（Design gate 由设计/Siamese审，非逐步operator）。
 
 依赖：Phase C 合入 main（L0 注入通道稳定后才有意义可见化）✅ 已合入。建议作为独立 PR / 独立 thread 跟进。
 
 ### Phase G: Governance L0 单源编译 + 消费链可见化（#747 / #749）
 
-team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂不动。
+operator 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂不动。
 
 **#747 问题**：`shared-rules.md` / `system-prompt-l0.md` §3 / `SystemPromptBuilder` fallback digest 曾是多份物理表示；`.local-override` 只挂在 fallback 路径。结果是同一套家规可能漂移，native L0 和 fallback 看到的治理内容不一定同源。
 
@@ -146,7 +157,7 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
   - **只是参考**：`docs/SOP.md` 等人工流程文档，不直接进入 native L0。
   - **skill 按需加载**：`SKILL.md` 仅在 skill 被选择/调用时读取。
 
-**#748**（SOP vocabulary / `sop_navigation` 分散）：#747/#749 已合入；2026-05-22 社区（terrenceeLeung / 天一）提交设计提案（第三选项——新建 `SopDefinition` 单一源、`sop_navigation` 并入），方向对齐 green light。CVO 决策：归 F203、不新开 F 号，作为 Phase G 之后的独立 work item；实现路径同 #747（Cat Café 上游实现 + 同步）。**2026-05-23 design pivot**（CVO 反思 "skill = 软约束需硬约束兜底"）：① `hard_rules / pitfalls` **keep + 加 machine-checkable predicate 字段**（不 drop 不 park）——它们是 `eval:sop` domain 的 ground truth，feeds F192 Phase E-sop；② schema **domain-generic from day 1**——`development` 只是第一个 domain，未来 video-cocreation / tech-article / family-office 同 schema 不同实例（消除当前 video-forge / ppt-forge / tech-writing / expert-panel 等多阶段 skill = SOP 错位写进 skill body 的归位错位）；③ `sopDefinitionId` seam 定位重新校准——不是 "YAGNI future-proofing"，是多 domain 装载入口（§6.2 的真正价值）。**2026-05-23 implementation merged**（PR #1868, squash `3d5c76772`）：`sop-definitions/development.yaml` 成为 development SOP stage 单一机器可读源，`manifest.yaml:sop_navigation` 删除；schema/codegen/check 生成 runtime `SopStage` / `SOP_DEFINITIONS` catalog，API + Mission Control 面板改读 definition-derived suggested skill，`nextSkill` 明确为 override；18 条 hard rules / pitfalls 迁入 predicate-backed ground truth，cross-domain stubs 只参与 schema 校验不进 runtime union；F192 `eval:sop` runtime evaluator 仍按计划 out of scope。详见 Timeline 2026-05-22 / 2026-05-23 + clowder-ai#748 + F192 Phase E-sop。
+**#748**（SOP vocabulary / `sop_navigation` 分散）：#747/#749 已合入；2026-05-22 社区（terrenceeLeung / 天一）提交设计提案（第三选项——新建 `SopDefinition` 单一源、`sop_navigation` 并入），方向对齐 green light。operator 决策：归 F203、不新开 F 号，作为 Phase G 之后的独立 work item；实现路径同 #747（Cat Café 上游实现 + 同步）。**2026-05-23 design pivot**（operator 反思 "skill = 软约束需硬约束兜底"）：① `hard_rules / pitfalls` **keep + 加 machine-checkable predicate 字段**（不 drop 不 park）——它们是 `eval:sop` domain 的 ground truth，feeds F192 Phase E-sop；② schema **domain-generic from day 1**——`development` 只是第一个 domain，未来 video-cocreation / tech-article / family-office 同 schema 不同实例（消除当前 video-forge / ppt-forge / tech-writing / expert-panel 等多阶段 skill = SOP 错位写进 skill body 的归位错位）；③ `sopDefinitionId` seam 定位重新校准——不是 "YAGNI future-proofing"，是多 domain 装载入口（§6.2 的真正价值）。**2026-05-23 implementation merged**（PR #1868, squash `3d5c76772`）：`sop-definitions/development.yaml` 成为 development SOP stage 单一机器可读源，`manifest.yaml:sop_navigation` 删除；schema/codegen/check 生成 runtime `SopStage` / `SOP_DEFINITIONS` catalog，API + Mission Control 面板改读 definition-derived suggested skill，`nextSkill` 明确为 override；18 条 hard rules / pitfalls 迁入 predicate-backed ground truth，cross-domain stubs 只参与 schema 校验不进 runtime union；F192 `eval:sop` runtime evaluator 仍按计划 out of scope。详见 Timeline 2026-05-22 / 2026-05-23 + clowder-ai#748 + F192 Phase E-sop。
 
 ## Acceptance Criteria
 
@@ -163,7 +174,7 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
 
 - [x] AC-B1: `assets/system-prompts/system-prompt-l0.md` 包含 14 项全部内容 ✅（branch `9105d184f`，测试 `14 L0 governance items coverage` 全覆盖）
 - [x] AC-B2: `scripts/compile-system-prompt-l0.mjs` 输出 per-cat 编译结果 ✅（6 catId 测试覆盖 + per-cat overlay 替换 + 36 测试全绿）
-- [x] AC-B3: 编译 token 总量 ≤ **5,500** ✅（**两次上移**：4,500→5,000 见 KD-9；5,000→5,500 见 KD-14——codex user-layer strip 把 Codex CLI 专属「长任务纪律」迁入 maine-coon native overlay，maine-coon 实测 5,154-5,155t。5,500 仍在 Claude 4.x prompt cache 单 breakpoint 内 + 占 200k context 2.75%）
+- [x] AC-B3: 编译 token 总量 ≤ **6,000** ✅（**三次上移**：4,500→5,000 见 KD-9；5,000→5,500 见 KD-14；5,600→6,000 见决策漏斗注入 PR #2040——§17 决策漏斗投影 + §4 默认自决反射，四猫讨论收敛 2026-06-01。6,000 占 200k context 3%）
 - [x] AC-B4: per-breed cache key 稳定 ✅（same catId byte-identical 测试通过）
 
 ### Phase C（dual-path 落地）
@@ -172,7 +183,7 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
 - [x] AC-C2: `CodexAgentService` argv 加 `-c developer_instructions=<compileL0>` ✅（Task 4，commit `ebe904529`；per-call argv 不污染 `~/.codex/config.toml`，@codex/@gpt52/@spark cat-scoped；codex-agent-service-l0.test.js 3 tests，S4 Maine Coon `62b9255e2` 对齐）
 - [x] AC-C3: 剥离 `params.systemPrompt` 非 pack prepend ✅（Task 2，commit `5305d08c4`；新增 `buildStaticIdentityPackOnly`，route-serial / route-parallel 通过 `injectsL0Natively()` 切 pack-only，非 pack 走 native system role；system-prompt-builder 113/113 守护零回归）
 - [x] AC-C4: F-BLOAT resume 不累积 ✅（native `--system-prompt-file` replace-mode 天然免疫；pack-only 走未改的先验 new-session gate invoke-single-cat:1079-1088，invoke-single-cat-resume-health 覆盖）
-- [x] AC-C5（merge-gate 部分）✅：PR #1709 squash-merged 2026-05-16T08:26Z（commit `d55cb688e`）；`pnpm gate` ✅（3070 tests），Maine Coon本地×2 round APPROVE（P1 cliConfigArgs + P1-cloud 修复），云端 round-1 抓 2 P1 全修，round-2 push back 1 P1（无现实复现，按 merge-gate 表降 P3-comment-pass）。2026-05-24 alpha probe 暴露 production default `ClaudeAgentService(-p)` 仍走 pre-F203 prompt path，本 fix 补齐两 Claude carriers 注入一致。**仍待**：runtime pull + restart 后，default `-p` 与 `bg_daemon` carrier 均需通过 behavioral probe，再跑 47/46/Maine Coon 各一轮 + team lead 10 轮压缩对话客观性终验。
+- [x] AC-C5（merge-gate 部分）✅：PR #1709 squash-merged 2026-05-16T08:26Z（commit `d55cb688e`）；`pnpm gate` ✅（3070 tests），Maine Coon本地×2 round APPROVE（P1 cliConfigArgs + P1-cloud 修复），云端 round-1 抓 2 P1 全修，round-2 push back 1 P1（无现实复现，按 merge-gate 表降 P3-comment-pass）。2026-05-24 alpha probe 暴露 production default `ClaudeAgentService(-p)` 仍走 pre-F203 prompt path，本 fix 补齐两 Claude carriers 注入一致。**仍待**：runtime pull + restart 后，default `-p` 与 `bg_daemon` carrier 均需通过 behavioral probe，再跑 47/46/Maine Coon 各一轮 + operator 10 轮压缩对话客观性终验。
 
 > Phase C 实施前置（执行顺序，防回归窗口）：Task 0 spike（`ca3efead7`）→ Task 1 A8 gap（`fd4e634ca`）→ Task 3a 共享 l0-compiler helper（`24dd15541`）→ Task 3/4 接通 → Task 2 删重复。终态：L0（非 pack 身份/家规/MCP）在压缩免疫 native system role，user message 仅 pack blocks + invocationContext + prompt。
 
@@ -195,11 +206,11 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
 
 ### Phase F（系统提示词可见化）
 
-- [x] AC-F1: Design Gate ✅ — read-only（defer AC-F5）+ template/compiled+per-cat UX 走同 RulesPromptsContent Section/Card/Modal pattern（team lead"和其他那样"）
+- [x] AC-F1: Design Gate ✅ — read-only（defer AC-F5）+ template/compiled+per-cat UX 走同 RulesPromptsContent Section/Card/Modal pattern（operator"和其他那样"）
 - [x] AC-F2: 「规则与 SOP」配置栏加 L0 查看区 ✅ — `RulesPromptsContent` 加第 3 个 `<Section>`，对接 `assets/system-prompts/system-prompt-l0.md` template
 - [x] AC-F3: per-cat compiled L0 渲染查看 ✅ — `loadAvailableCatsForL0()`（no-arg loader，template+catalog merge）+ `compileL0ViaSubprocess` Promise.all（13 cats，实测 ~243-438ms 端到端）
 - [x] AC-F4: 修改路径明示 ✅ — `l0Prompts.customization` API 字段（templatePath + compileScript + verifyCommand `pnpm gate + restart`）+ 前端 info row 渲染
-- [⊘] AC-F5（可选）：可编辑（dirty/save/reload + 影响范围警告 + 写回）—— **Design Gate 决定 DEFER（不做）**：team lead诉求是可见性非编辑器，web-editable 治理 prompt = P0 风险面，KD-5 file+git+gate+restart 已是回滚通道。additive，日后需要可低成本重启
+- [⊘] AC-F5（可选）：可编辑（dirty/save/reload + 影响范围警告 + 写回）—— **Design Gate 决定 DEFER（不做）**：operator诉求是可见性非编辑器，web-editable 治理 prompt = P0 风险面，KD-5 file+git+gate+restart 已是回滚通道。additive，日后需要可低成本重启
 
 ### Phase G（Governance L0 单源编译 + 消费链）
 
@@ -211,9 +222,21 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
 
 ### Phase H（Google / Antigravity carrier native L0 follow-up）
 
-- [ ] AC-H1: AGY CLI native-L0 feasibility spike — 证明 `agy` 是否有 supported system/preamble channel；若没有，明确 `agy --print` prompt-level fallback 边界。必须同时覆盖 model/profile isolation、permission sandbox、structured local API send/stream/cancel/model-select 可行性。
-- [ ] AC-H2: Antigravity Desktop/IDE native-L0 feasibility spike — 在 F211 bridge 上确认 `StartCascade` / `SendUserCascadeMessage` 是否存在 system/preamble config；若只剩 Rules / first-prompt prepend，必须标注为 prompt-level fallback，不得宣称 F203 native。
-- [ ] AC-H3: Gemini CLI/ACP fallback policy — `gemini-cli` / `gemini --acp` 仅为 enterprise / Google Cloud / paid API-key 用户保留；consumer/free/Pro/Ultra/Code Assist individuals 不再作为 F203 投入主线。
+- [x] AC-H0: Gemini home-file + repo-root `GEMINI.md` 身份污染收口（native L0 spike 前置卫生）✅ 2026-06-01 — `renderForGemini` 退役为空（照 KD-14 `renderForCodex`：`~/.gemini/GEMINI.md` 由 `--apply` 清空 + `checkDrift` 守护），删随之 dead 的 renderer helper 链（interfaces / dynamic-roster / collab-rules 渲染）；repo-root `GEMINI.md` 化石身份（2026-02-28 Siamese / 4 猫 / stale model 标注 `gpt-5.3-codex`·`gpt-5.2`）改为 provider-neutral 指针并纳入 `root-md-slim.test.js` ≤65 行 + 无化石身份守护。**根因**：home `~/.gemini/GEMINI.md` 被 Antigravity IDE Global Rules + AGY CLI global context + Gemini carrier 读，repo-root `GEMINI.md` 被 Gemini CLI + AGY CLI workspace context 读（**非** IDE Global Rules——官方 IDE 只有 Workspace Rules 读 `.agents/rules`）；两处旧内容都把任意模型（含 opus）灌成"Siamese"。Siamese身份本由 runtime prompt-prepend 提供（`GeminiAgentService` 416/697），home-file 是冗余双注入（同 Codex KD-14）。**边界**：repo-root `AGENTS.md`（Codex harness 入口）对 AGY 也是 workspace 污染，但有 harness 依赖，AGY-safe 拆分留 AC-H1/H2 spike 设计，本轮不动。
+- [x] AC-H1: AGY CLI native-L0 feasibility spike ✅ 2026-06-01 — 结论 **not reachable via public interface**（详见 Spike Log S6 + KD-22）：agy 1.0.4 公开面无 default/root agent override（CLI 无 `--agent`/`--system`、`settings.json` 无 agent field、Plugins/Hooks 只暴露 subagent 层 `define_subagent` + `agents/`）；binary 有 `agent_script`/`GetMainAgent`/`CustomAgentSpec` proto 但无公开提供入口。subagent `system_prompt` 是 reachable candidate 但**非 main-cat L0 carrier**（主 agent 仍裸 + 路由靠自觉 invoke）。**AGY 转 prompt-level fallback 做扎实**（profile 隔离 + context 污染收口 AC-H0 + 每轮 prepend + drift/版本守护）。POC 不做（边际价值 < 成本）。retraction：官方未来出 custom root agent / default-agent override / `--agent` flag 才重开。
+- [x] AC-H2: Antigravity Desktop/IDE native-L0 feasibility spike ✅ 2026-06-01 — 结论 **not reachable via bridge**（重核当前 AntigravityBridge 代码，非沿用 F211 旧结论）：bridge 无 system/preamble channel——所有具名 `rpcSafe` 调用（`StartCascade` 只 `source`、`SendUserCascadeMessage` 只 `items.text`/`media`/`cascadeConfig`(planner+model)、`GetCascade*` 查询 + `Resolve`/`Acknowledge`/`Handle`/`Cancel` 控制）均无 system 字段；`callRpc` 公开泛型入口仅被 `RunCommandExecutor` 用于 shell pre-exec（非 prompt/config 注入，Maine Coon复核漏网点）；全文 grep `systemPrompt`/`preamble` 零匹配。身份注入路径 = `AntigravityAgentService` 把 `options.systemPrompt` prepend 进 `effectivePrompt`（first-prompt prepend）= prompt-level；IDE Global Rules(home `~/.gemini/GEMINI.md`)/Workspace Rules(`.agents/`) 也是 prompt-level（S6 Maine Coon确认非 native system role）。**Antigravity Desktop 转 prompt-level fallback**（同 AGY）。retraction：Antigravity bridge 协议未来新增 system/preamble cascade config 才重开。
+- [x] AC-H3: Gemini CLI/ACP fallback policy ✅ — KD-20/KD-21 已落档：`gemini-cli` / `gemini --acp` 仅为 enterprise / Google Cloud / paid API-key 用户保留；consumer/free/Pro/Ultra/Code Assist individuals 不再作为 F203 投入主线。AGY CLI / Antigravity Desktop native L0 spike 已按 AC-H1/H2 收敛为 prompt-level fallback。
+
+### Phase I（OpenCode 金渐层 native L0 注入）
+
+- [x] AC-I1: S8 spike 完成——OpenCode `instructions` 压缩免疫性验证（源码验证，非运行时实验；证据 pin 到 `sst/opencode@v1.15.13` tag commit `385cb69`）
+- [x] AC-I2: `opencode-config-template.ts` `generateOpenCodeRuntimeConfig()` 支持 `instructions` 字段 ✅（PR #2069）
+- [x] AC-I3: `OpenCodeAgentService` `injectsL0Natively() → true` + `L0InjectableAgentService` typed seam ✅（PR #2069，方案①：invoke-single-cat 全路径生成含 instructions 的 runtime config + instructions-only fallback）
+- [x] AC-I4: `invoke-single-cat.ts` 三路径守护 ✅（API-key/custom + subscription/unresolved + known-model/no-mcp，全 96 tests 覆盖）
+- [x] AC-I5: `golden-chinchilla` workflow triggers ✅（developer flow + OMOC boundary + question deny）
+- [x] AC-I6: `OPENCODE.md` 保留 + `permission.question=deny` / OMOC / compaction 不破坏 ✅（18 守护测试）
+- [x] AC-I7: 全链守护测试 ✅（f203 18/18 + opencode-service 25/25 + invoke-single-cat 96/96 = 0 regressions）
+- [~] AC-I8: runtime 验收 **deferred** ✋ — operator 签字降级 2026-06-19。原因：家里 runtime 没接入 OpenCode invocation flow（无 API/subscription），跑不了 alpha 体感测试。Retraction condition：OpenCode API/subscription 接入产线 carrier flow 时重开（开新 mini-spec 或 reopen issue，不留 stub 尾巴）
 
 ## Dependencies
 
@@ -242,30 +265,34 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
 |---|------|------|------|
 | KD-1 | Claude 走 `--system-prompt` 替换式而非 `--append-system-prompt` | spike S0 + ADR-030 §9.4 实测——替换式清除默认糊弄哲学，append 会和默认共存 | 2026-05-15 |
 | KD-2 | Codex 走 argv `-c developer_instructions=...` 而非 `~/.codex/config.toml` 写入 | S4 验证（Maine Coon `62b9255e2`）——argv per-call 注入，多猫并发安全 | 2026-05-15 |
-| KD-3 | Gemini 推迟到 Codex + Claude 跑通后 | team lead directive 2026-05-15——Gemini 用量低，优先级 P2 | 2026-05-15 |
+| KD-3 | Gemini 推迟到 Codex + Claude 跑通后 | operator directive 2026-05-15——Gemini 用量低，优先级 P2 | 2026-05-15 |
 | KD-4 | Spike-first 路径：S0-S5 全部完成再进 Phase B | 47/Maine Coon ADR review 共识——避免 Phase 2 严重低估 | 2026-05-15 |
-| KD-5 | 直接切替换式，不灰度不留 feature flag | team lead directive 2026-05-15：「git log 能恢复就别搞灰度，那些太麻烦了我们也不现实」——`git revert` + runtime 重启 3 分钟回滚足够 | 2026-05-15 |
-| KD-6 | Phase E 写 CC 版本升级 SOP | team lead 2026-05-15 远见——每次 CC 大版本可能新增功能性指令我们要补 | 2026-05-15 |
-| KD-7 | L0 必须含**客观性 carry-over 段**：工具能力 / 并行调用 / safety 反射 / 压缩感知 / Skill+TaskCreate+Schedule / Git 模板 | team lead directive 2026-05-15：「Claude Code 也好 Codex 也好那些客观性的系统提示词不能丢」——替换式会丢 Anthropic 训练对齐的功能性指令，必须在我们 L0 重写 | 2026-05-15 |
+| KD-5 | 直接切替换式，不灰度不留 feature flag | operator directive 2026-05-15：「git log 能恢复就别搞灰度，那些太麻烦了我们也不现实」——`git revert` + runtime 重启 3 分钟回滚足够 | 2026-05-15 |
+| KD-6 | Phase E 写 CC 版本升级 SOP | operator 2026-05-15 远见——每次 CC 大版本可能新增功能性指令我们要补 | 2026-05-15 |
+| KD-7 | L0 必须含**客观性 carry-over 段**：工具能力 / 并行调用 / safety 反射 / 压缩感知 / Skill+TaskCreate+Schedule / Git 模板 | operator directive 2026-05-15：「Claude Code 也好 Codex 也好那些客观性的系统提示词不能丢」——替换式会丢 Anthropic 训练对齐的功能性指令，必须在我们 L0 重写 | 2026-05-15 |
 | KD-7b | 客观性 carry-over 段降级为 ≤100t placeholder | S2 实测 partial L0 下 0 项功能性能力退化（safety/并行/工具发现/schema/Skill/Schedule/压缩感知）——模型内置 + 工具 description + 家规已覆盖。强制重写功能性指令是过度工程；未来 CC 升级 audit 出新指令再按需补 | 2026-05-15 |
 | KD-8 | compile 脚本加 displayName→breed fallback 修 opus-47 无 workflow gap | opus-47 breedId='opus-47' 不在 {ragdoll,maine-coon,siamese}，现有 SystemPromptBuilder.ts:554 对其无 workflow（S1 实测 opus-47 workflow=0t）。F203 愿景"把该进的进去"——Ragdoll家族共享 ragdoll workflow。**行为变更**，Phase B review 需 reviewer 知悉 | 2026-05-15 |
 | KD-9 | AC-B3 token 上限 4,500→5,000 | S1 baseline 实测 static 2,684-3,060t（高于立项前估算），14 项完整 L0 + 47 review 补 6 项物理下限 ~4,600t；per-family 治理已下沉 overlay 去重；5,000 仍在 prompt cache 单 breakpoint 内 | 2026-05-15 |
-| KD-10 | L0 完全替换走 `--system-prompt-file` 从文件读，不硬编码 ts/js | team lead directive 2026-05-15：「不能在 ts/js 里硬编码替换后的是什么，应该 --system-prompt-file 从文件读，单独 md 方便维护」。compile 渲染 per-cat L0 → 写文件 → Phase C spawn 引用文件路径；内容真相源始终是 `system-prompt-l0.md`。compile 脚本加 `writeL0File()` + CLI `--out` | 2026-05-15 |
+| KD-10 | L0 完全替换走 `--system-prompt-file` 从文件读，不硬编码 ts/js | operator directive 2026-05-15：「不能在 ts/js 里硬编码替换后的是什么，应该 --system-prompt-file 从文件读，单独 md 方便维护」。compile 渲染 per-cat L0 → 写文件 → Phase C spawn 引用文件路径；内容真相源始终是 `system-prompt-l0.md`。compile 脚本加 `writeL0File()` + CLI `--out` | 2026-05-15 |
 | KD-11 | 仓库门禁必须 `pnpm biome` / `pnpm check`，禁止 `npx biome` | Maine Coon Phase B review P1 教训：`npx biome` 解析到 0.3.3，项目实际 `pnpm biome` 2.4.1，`npx` 证据绕过项目门禁=假绿。沉淀到 [[feedback_verify_with_repo_toolchain]] | 2026-05-15 |
-| KD-12 | compile 脚本可测性重构：CLI 入口 + roster 过滤抽纯函数 | 云端 review P1（CLI entrypoint `file://${argv1}` POSIX-only，Windows broken）→ 抽 `isCliEntrypoint(metaUrl,argv1)` 用 fileURLToPath+resolve 跨平台；P2（roster 未过滤 available，disabled 猫进 L0 = dead-end @ 路由）→ 抽 `filterAvailableTeammates` + `isCatAvailable(id,config)` 过滤，对齐 SystemPromptBuilder:417。纯函数化使两者可单测（Red→Green，44 tests） | 2026-05-15 |
+| KD-12 | compile 脚本可测性重构：CLI 入口 + roster 过滤抽纯函数 | remote review P1（CLI entrypoint `file://${argv1}` POSIX-only，Windows broken）→ 抽 `isCliEntrypoint(metaUrl,argv1)` 用 fileURLToPath+resolve 跨平台；P2（roster 未过滤 available，disabled 猫进 L0 = dead-end @ 路由）→ 抽 `filterAvailableTeammates` + `isCatAvailable(id,config)` 过滤，对齐 SystemPromptBuilder:417。纯函数化使两者可单测（Red→Green，44 tests） | 2026-05-15 |
 | KD-13 | compile bootstrap 必须 no-arg `loadCatConfig()` + roster model 用 `getCatModel` | 云端 round-2 抓到 KD-12 P2 连环 bug：`loadCatConfig(PATH)` 显式 path 跳过 `.cat-cafe/cat-catalog.json` overlay（cat-config-loader.ts:307-327）→ isCatAvailable 基于 stale template → P2 dead-end 防护失效。根治：no-arg `loadCatConfig()`（catalog overlay = runtime 真相）+ `resolveModel`→`getCatModel`（env override > registry）。**根治原则：compile 编译器必须复用 SystemPromptBuilder 既定 runtime 入口（catalog-aware loadCatConfig + getCatModel），不自造静态读取路径** | 2026-05-15 |
 | KD-14 | codex user-layer strip：`~/.codex/AGENTS.md` 退役 + 「长任务纪律」迁入 native overlay + AC-B3 上限 5,000→5,500 | Maine Coon production 观察（cross-thread）：Codex invocation 的 developer 层已有 native L0，但 user 层仍被 Codex CLI 默认 prepend `~/.codex/AGENTS.md`（F050 sync-system-prompts.ts 渲染的 179 行静态身份/家规/队友/Magic Words）= 双重注入。根因：Phase C「精确剥离重复」只 strip 了 wrapper 的 user-message inline prepend，没收口 F050 home-file 路径。修复：`renderForCodex` 退役为空（`--apply` 清空文件，drift 守护）；Codex CLI 专属「长任务纪律」（exec_command session_id / 伪后台陷阱 / detached spawn 探针，L0 §6 maine-coon overlay 原本没有）迁入 native overlay。maine-coon 实测升至 5,154-5,155t，KD-9 的 5,000 buffer 耗尽 → AC-B3 上移到 5,500（物理下限随必要内容上移=真实测量，同 KD-9 逻辑，非脚手架；5,500 仍在 prompt cache 单 breakpoint 内 + 占 context 2.75%）。Gemini 路径（`renderForGemini`）暂留——Siamese未切 native L0 | 2026-05-20 |
 | KD-15 | `shared-rules.md` 是 governance L0 唯一真相源；native + fallback 必须共用编译产物 | #747：手写 `system-prompt-l0.md` §3 + `SystemPromptBuilder` fallback digest + `shared-rules.md` 三份物理表示会漂移，且 `.local-override` 只影响 fallback。修复：`governance-l0.ts` deterministic compiler 读取 `shared-rules.md`，native L0 通过 `{{GOVERNANCE_L0}}` 注入，fallback 同读 `loadCompiledGovernanceL0*`；`.local.md` append / `.local-override.md` replace 在编译层统一处理。 | 2026-05-21 |
-| KD-16 | Rules & SOP 面板必须展示 prompt 消费链，而不只是文件列表 | #749：team lead需要知道“实际进 prompt / 只是参考 / skill 按需加载”。`/api/rules` 增 `consumption` 元数据，前端用四类标签显式展示 shared-rules→governance L0→native/fallback、root provider project-doc 的 harness 注入、SOP 参考文档、SKILL.md 按需加载。#748 词汇收敛 deferred，不抢跑。 | 2026-05-21 |
+| KD-16 | Rules & SOP 面板必须展示 prompt 消费链，而不只是文件列表 | #749：operator需要知道“实际进 prompt / 只是参考 / skill 按需加载”。`/api/rules` 增 `consumption` 元数据，前端用四类标签显式展示 shared-rules→governance L0→native/fallback、root provider project-doc 的 harness 注入、SOP 参考文档、SKILL.md 按需加载。#748 词汇收敛 deferred，不抢跑。 | 2026-05-21 |
 | KD-17 | Governance L0 compiler anchors must be sanitizer-invariant | Outbound sync public gate exposed a cross-repo drift: `_sanitize-rules.pl` rewrites family names in `cat-cafe-skills/refs/shared-rules.md`（`Maine Coon`→`Maine Coon`、`Siamese`→`Siamese`），but `packages/api/.../governance-l0.ts` was not sanitized and asserted exact localized headings. Result: exported public API startup failed before touching clowder-ai. Fix: assert stable protocol core anchors（`fallback 层数检测协议` / `创意-实现解耦协议`）and derive output labels from the actual heading, so internal output keeps localized labels and public output follows sanitized `Maine Coon` / `Siamese`. Do not sanitize `packages/` code to avoid rewriting runtime identifiers. | 2026-05-21 |
 | KD-18 | Claude carrier 选择正交于 F203 native L0 注入 | AC-C5 alpha probe 发现 runtime default 仍走 `ClaudeAgentService(-p)`，而 Phase C 只在 opt-in `ClaudeBgCarrierService(--bg)` 接了 compiled L0。正确 invariant：`-p` vs `--bg` 只决定执行/会话模式，不能决定身份/家规是否进压缩免疫层；两条 Claude carrier 都必须用 `--system-prompt-file <compiled L0>`，且用户 `cliConfigArgs` 不得覆盖该保留 flag。 | 2026-05-24 |
-| KD-19 | L0 必须把"家里独有能力 trigger reflex"显式注入认知路径，软提示发现率由 eval 数据驱动 iterate | team lead观察："家里做了 browser-preview / rich-messaging / propose_thread 等很多功能猫猫竟然不知道可以用"——skills 在 manifest ≠ 在认知路径。猜测式选 Tier 1 不够；需 eval 跟测掉球率数据驱动 iterate。三猫盘点（47 6 self-check + Siamese 10 UX trigger + Maine Coon 8 backend trigger，合并去重 → 13 条 Tier 1）→ L0 §8 "Cat Café 家里独有能力唤醒指南（场景→skill 触发反射）"+ `cat-cafe-skills/refs/capability-wakeup-index.md` ref doc。Path C double-track：ship v1 不阻塞 + 并行 F192 reopen Phase F `eval:capability-wakeup`（per-cat per-scenario weekly miss rate verdict）→ N 周后数据驱动 §8 v2 iterate。CVO 2026-05-27 sign-off Path C.1 + F192 reopen。 | 2026-05-27 |
+| KD-19 | L0 必须把"家里独有能力 trigger reflex"显式注入认知路径，软提示发现率由 eval 数据驱动 iterate | operator观察："家里做了 browser-preview / rich-messaging / propose_thread 等很多功能猫猫竟然不知道可以用"——skills 在 manifest ≠ 在认知路径。猜测式选 Tier 1 不够；需 eval 跟测掉球率数据驱动 iterate。三猫盘点（47 6 self-check + Siamese 10 UX trigger + Maine Coon 8 backend trigger，合并去重 → 13 条 Tier 1）→ L0 §8 "Cat Café 家里独有能力唤醒指南（场景→skill 触发反射）"+ `cat-cafe-skills/refs/capability-wakeup-index.md` ref doc。Path C double-track：ship v1 不阻塞 + 并行 F192 reopen Phase F `eval:capability-wakeup`（per-cat per-scenario weekly miss rate verdict）→ N 周后数据驱动 §8 v2 iterate。operator 2026-05-27 sign-off Path C.1 + F192 reopen。 | 2026-05-27 |
 | KD-20 | Gemini CLI / `gemini --acp` 不再作为 F203 native L0 主线，只保留 enterprise/API-key fallback | Google 2026-05-19 官方公告：consumer Gemini CLI / Gemini Code Assist IDE / GitHub requests for free, Google AI Pro, Ultra, and individuals stop being served on 2026-06-18；Standard/Enterprise、Google Cloud、paid Gemini / Gemini Enterprise Agent Platform API keys 继续。`gemini --acp` 是 Gemini CLI 的 ACP mode，不是独立免疫路线。家里 F210 已把非 ACP Google route 默认迁到 `GEMINI_ADAPTER=antigravity-cli`，但 catalog ACP entries 仍优先走 `gemini --acp`。因此 F203 不应继续把 S5 当主线投入。 | 2026-05-31 |
-| KD-21 | Antigravity native L0 后续必须拆成两个 spike：AGY CLI 与 Antigravity Desktop/IDE | 两者不是同一个 carrier：AGY CLI 是 F210 headless Google successor，目标是替代 consumer Gemini CLI/ACP；Antigravity Desktop/IDE 是 F061/F211 Bengal bridge，目标是让孟加拉猫获得 F203 native L0。当前 `agy 1.0.3` help 无 `--acp` / `--model` / `--system`；Desktop `SendUserCascadeMessage` payload 只有 text/media/model/cascadeConfig，无 system/preamble 字段。Rules / first-prompt prepend 只能算 prompt-level fallback。 | 2026-05-31 |
+| KD-21 | Antigravity native L0 后续必须拆成两个 spike：AGY CLI 与 Antigravity Desktop/IDE | 两者不是同一个 carrier：AGY CLI 是 F210 headless Google successor，目标是替代 consumer Gemini CLI/ACP；Antigravity Desktop/IDE 是 F061/F211 Bengal bridge，目标是让Bengal获得 F203 native L0。当前 `agy 1.0.3` help 无 `--acp` / `--model` / `--system`；Desktop `SendUserCascadeMessage` payload 只有 text/media/model/cascadeConfig，无 system/preamble 字段。Rules / first-prompt prepend 只能算 prompt-level fallback。 | 2026-05-31 |
+| KD-22 | AGY CLI native L0 不可达 → 转 prompt-level fallback | S6 spike（47 binary 深挖 + Maine Coon公开文档侦察协作）：agy 1.0.4 公开面无 default/root agent override（CLI 无 `--agent`/`--system`、`settings.json` 无 agent field、Plugins/Hooks 只暴露 subagent 层 `define_subagent` + `agents/`）；binary 有 `agent_script`/`GetMainAgent`/`CustomAgentSpec` proto 但无公开提供入口。subagent `system_prompt` 是 reachable candidate 但非 main-cat L0 carrier（主 agent 仍裸 + 路由靠自觉 invoke）。POC 边际价值 < 成本（不改"root agent 无 override"主结论）故不做。AGY 身份注入维持 prompt-level（profile 隔离 + 污染收口 AC-H0 + 每轮 prepend + drift/版本守护）。retraction：官方未来出 custom root agent / default-agent override / `--agent` flag 重开。 | 2026-06-01 |
+| KD-23 | OpenCode `instructions` 是 native L0 可达通道——压缩免疫 by design | S8 源码验证（Ragdoll 46，pin `sst/opencode@v1.15.13` commit `385cb69`）：OpenCode 的 `opencode.json` `instructions` 数组指向的文件**每轮 fresh 读取**（`instruction.ts` `system()`）→ 注入为 `role: "system"` messages（`request.ts` `prepare()`，非 OpenAI-OAuth provider）→ **不进对话历史**（`compaction.ts` 只压缩 user/assistant turns）→ **功能等价 Claude `--system-prompt-file`**。Cat Café 的 `OpenCodeAgentService` 当前不调用 `compileL0`、不声明 `injectsL0Natively()`，route 层对金渐层走 full `buildStaticIdentity` prepend = 可被 compaction 吃。修复路径：runtime config `instructions` 注入 compiled L0 temp file + `injectsL0Natively() → true`。golden-chinchilla 需独立 workflow triggers（评估复用 ragdoll 或独立定义，因 model 是 opus-4-6 但 family 不同）。 | 2026-06-03 |
+| KD-24 | AGY 1.0.9 复核 retraction 条件 = 仍不触发 | 47 2026-06-19 复核 `agy --help` 公开面（从 1.0.4 跳到 1.0.9，5 个 minor 版本）：flags 仍只有 `--add-dir` / `-c` / `--continue` / `--conversation` / `--dangerously-skip-permissions` / `-i/--prompt-interactive` / `--log-file` / `--model` / `-p/--print` / `--prompt` / `--sandbox`；subcommands 只有 `changelog/help/install/models/plugin/update`。**没有 `--agent` flag / `--system` / root agent override / system channel**。KD-22 "AGY CLI native L0 不可达"主结论维持 valid；prompt-level fallback 维持。retraction trigger 重申：官方 CLI 出现 `--agent` / `--system-prompt` / root-agent override / system prompt config field 之一时重开 spike。 | 2026-06-19 |
+| KD-25 | OpenCode AC-I8 runtime 验收 deferred — operator 签字降级 | operator 2026-06-19 directive："opencode 这个我们没有 api 哈哈哈 那我们标记一下？"。家里 runtime carrier flow 不接入 OpenCode invocation（无 API/subscription），AC-I8 alpha 体感测试无 production 路径可跑。Phase I 已合入的 implementation（PR #2069）+ S8 源码验证（KD-23）证明 OpenCode `instructions` 通道 by-design compression-immune；运行时验收只是体感确认（identity/governance compaction 后不丢）。**Retraction condition**：OpenCode API/subscription 接入产线 carrier flow（OpenCodeAgentService 实际承载 invocation）时，开 mini-spec 或 reopen issue 重跑 AC-I8 alpha smoke。**不留 stub 尾巴**：F203 整体 close，未来重开走新单据，不挂虚 follow-up。 | 2026-06-19 |
 
 ## Spike Log
 
-> team lead directive 2026-05-15：每次 spike 结果记录到本 feat md。
+> operator directive 2026-05-15：每次 spike 结果记录到本 feat md。
 
 | # | Spike | Owner | 状态 | 证据 | 结论 |
 |---|-------|-------|------|------|------|
@@ -275,21 +302,22 @@ team lead 2026-05-21 指令：先做 #747，再做 #749；#748 先讨论、暂�
 | S3 | F-BLOAT 两失败模式复现 | 47 | 🟡 S3-a ✅ S3-b 推迟 | 同上 audit | S3-a `--append-system-prompt` bg 模式可传内容（推翻 invoke-single-cat:1086 注释）；S3-b resume 累积推迟到 Phase C 实施前跑 |
 | S4 | Codex `developer_instructions` per-call | Maine Coon | ✅ 2026-05-15 | commit `62b9255e2` + ADR-030 §10.4:429-434 | `codex exec -c 'developer_instructions=...'` 高于 user prompt，不污染 config.toml |
 | S5 | Gemini `GEMINI_SYSTEM_MD` 替换式 | 待定 | ⊘ 不做主线 | Google 2026-05-19 官方公告 + F210 Phase F/G + 本机 `gemini 0.42.0` help | KD-20：只保留 enterprise/API-key fallback；consumer path 不再投入 F203 native 主线 |
-| S6 | AGY CLI native L0 / structured carrier feasibility | 待定 | ⬜ 待 spike | F210 Phase G；本机 `agy 1.0.3` help 无 `--acp` / `--model` / `--system` | 先证明 supported system/preamble channel 或 structured local API；否则只能标 prompt-level fallback |
-| S7 | Antigravity Desktop/IDE native L0 feasibility | 待定 | ⬜ 待 spike | F211；`AntigravityBridge.sendMessage()` payload 无 system/preamble 字段 | 先证明 bridge/API 有 privileged system/preamble config；Rules / first prompt prepend 不算 F203 native |
+| S6 | AGY CLI native L0 / structured carrier feasibility | 47+Maine Coon | ✅ 2026-06-01 not reachable | agy 1.0.4 binary strings（`agent_script`/`GetMainAgent`/`CustomAgentSpec`/`SubagentName` proto 均内部无公开入口）+ CLI help 无 `--agent`/`--system` + `settings.json` 无 agent field + Maine Coon公开文档（Hooks `define_subagent` / Plugins `agents/` = subagent 层）三线对齐 | **AGY root native L0 = not reachable via public interface**；subagent `system_prompt` = reachable candidate 但非 main-cat L0 carrier（无 default-agent override，主 agent 裸 + 路由靠自觉）；POC 边际价值 < 成本故不做；AGY 转 prompt-level fallback（profile 隔离 + 污染收口 AC-H0 + prepend + drift 守护）|
+| S7 | Antigravity Desktop/IDE native L0 feasibility | 47+Maine Coon(F211) | ✅ 2026-06-01 not reachable | 重核当前 AntigravityBridge：所有具名 rpcSafe 调用（StartCascade 只 source + SendUserCascadeMessage 只 items.text/media/model + GetCascade* 查询 + Resolve/Acknowledge/Handle/Cancel 控制）均无 system；callRpc 泛型入口仅 RunCommandExecutor 用于 shell pre-exec（非注入）；全文 grep systemPrompt/preamble 零匹配 | **bridge 无 native system channel** → 身份走 `AntigravityAgentService` prepend(options.systemPrompt→effectivePrompt)=prompt-level；IDE Rules 也 prompt-level；Antigravity Desktop 转 prompt-level fallback（同 AGY）|
+| S8 | OpenCode `instructions` 压缩免疫性源码验证 | 46 (Ragdoll) | ✅ 2026-06-03 reachable + immune | 浅克隆 `sst/opencode`，证据 pin 到 **`v1.15.13` tag**（commit `385cb694419f98103af0e8fc6187ddcbcbb6eecb`），trace 三关键文件：① [`instruction.ts`](https://github.com/sst/opencode/blob/v1.15.13/packages/opencode/src/session/instruction.ts) `system()` — `config.instructions` 每轮 fresh 读取文件内容 ② [`request.ts`](https://github.com/sst/opencode/blob/v1.15.13/packages/opencode/src/session/llm/request.ts) `prepare()` — 非 OpenAI-OAuth provider（含 Anthropic）注入为 `role: "system"` messages ③ [`compaction.ts`](https://github.com/sst/opencode/blob/v1.15.13/packages/opencode/src/session/compaction.ts) — compaction 只压缩 user/assistant 轮次，system prompt 每轮从文件重建不受影响 | **OpenCode `instructions` = compression-immune by design**：文件内容每轮 fresh 读 → `role: "system"` 注入 → 不进对话历史 → 不被 compaction 吃。功能等价于 Claude `--system-prompt-file` / Codex `-c developer_instructions`。实现路径：`opencode-config-template.ts` 加 `instructions` 字段 + `OpenCodeAgentService` 加 `compileL0ViaSubprocess` + `injectsL0Natively() → true` + 加 golden-chinchilla workflow triggers。**实现风险**（Maine Coon P1）：`injectsL0Natively()=true` 后 route 层走 pack-only，但 `invoke-single-cat.ts:1326` 的 `OPENCODE_CONFIG` 有条件守卫——需确保所有 OpenCode invocation 路径都有 native L0 覆盖 |
 
 ## Review Gate
 
 - Phase A: spike 结果由本人 + 跨族猫审视（47 跑 S1-S3 → Maine Coon review，Maine Coon S4 已交叉验证）
 - Phase B: 跨族猫审 L0 编译脚本（架构 + 安全 + 客观性 carry-over 覆盖完整性）
-- Phase C: 跨族猫审实施代码 + F-BLOAT 防御；runtime 重启后team lead直接体感判断（10 轮对话 + 压缩）
+- Phase C: 跨族猫审实施代码 + F-BLOAT 防御；runtime 重启后operator直接体感判断（10 轮对话 + 压缩）
 - Phase D: 跨族猫审 root md 瘦身 diff
 - Phase E: SOP 文档 review + cron 注册 review
 
 ## 需求点 Checklist
 
 - [x] 关联检测完成（BACKLOG grep + features/ 扫描，无重复）
-- [x] CVO 立项 signoff（team lead 2026-05-15 directive "我感觉好像需要立项"）
+- [x] operator 立项 signoff（operator 2026-05-15 directive "我感觉好像需要立项"）
 - [x] Architecture cell 归属（harness/system-prompt-injection，map delta: update required）
 - [x] Eval Contract 4 项（Primary Users + Activation: 全猫每次 invocation；Friction: token 总量 + 压缩后规则保留率 + 客观性能力覆盖；Regression Fixture: SystemPromptBuilder 80+ test + S2 6 项功能性 spike；Sunset Signal: Phase E cleanup + cron audit ≥ 3 个 CC 版本无新增遗漏）
 - [x] Design Gate 元审美自检（这是坐标变换——把 L0 从可压缩通道切到压缩免疫通道是结构改变，不是多项式堆补丁）

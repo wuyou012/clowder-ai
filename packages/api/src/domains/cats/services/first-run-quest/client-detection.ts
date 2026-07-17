@@ -12,14 +12,15 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolveCliCommand } from '../../../../utils/cli-resolve.js';
 
 const execFileAsync = promisify(execFile);
 
 export interface DetectedClient {
-  /** Client ID — the CLI tool identity (claude, codex, gemini, opencode, dare, kimi) */
-  client: 'claude' | 'codex' | 'gemini' | 'opencode' | 'dare' | 'kimi';
+  /** Client ID — the CLI tool identity (claude, codex, gemini, opencode, kimi) */
+  client: 'claude' | 'codex' | 'gemini' | 'opencode' | 'kimi';
   /** Provider key matching ClientValue in hub-cat-editor (anthropic, openai, etc.) */
-  provider: 'anthropic' | 'openai' | 'google' | 'opencode' | 'dare' | 'kimi';
+  provider: 'anthropic' | 'openai' | 'google' | 'opencode' | 'kimi';
   /** Human-readable label */
   label: string;
   /** CLI binary name */
@@ -50,7 +51,6 @@ const CLI_SPECS: CliSpec[] = [
   { client: 'codex', provider: 'openai', label: 'Codex', cli: 'codex', envKey: 'OPENAI_API_KEY' },
   { client: 'opencode', provider: 'opencode', label: 'OpenCode', cli: 'opencode', envKey: 'ANTHROPIC_API_KEY' },
   { client: 'gemini', provider: 'google', label: 'Gemini', cli: 'gemini', envKey: 'GOOGLE_API_KEY' },
-  { client: 'dare', provider: 'dare', label: 'Dare', cli: 'dare', envKey: '' },
   { client: 'kimi', provider: 'kimi', label: 'Kimi', cli: 'kimi', envKey: 'MOONSHOT_API_KEY' },
 ];
 
@@ -81,7 +81,10 @@ const defaultExistsOnPath: ExistsOnPath = async (cli) => {
     }
     return true;
   } catch {
-    return false;
+    // PATH probe failed — fall back to well-known directory search (macOS GUI
+    // apps / Electron don't inherit the user's shell PATH).
+    // #894: skipPathProbe since we already probed PATH above; only scan fallback dirs.
+    return resolveCliCommand(cli, { skipPathProbe: true }) !== null;
   }
 };
 

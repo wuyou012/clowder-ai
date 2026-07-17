@@ -23,9 +23,13 @@ export interface BubbleIdentityDescriptor {
  *
  * Why: same parent A2A chain `opus → codex → opus` 共用 `extra.stream.invocationId=parentId`，
  * 如果 bubble identity 用 parent id，第 1 个和第 3 个 opus turn 会被 reducer/merge 视为同一气泡 →
- * cancel 按钮消失 + 第 3 个 opus 失踪（铲屎官 catch 2026-05-09 17:32, 砚砚 root cause analysis）。
+ * cancel 按钮消失 + 第 3 个 opus 失踪（co-creator catch 2026-05-09 17:32, 砚砚 root cause analysis）。
  */
 export function getBubbleInvocationId(msg: ChatMessage): string | undefined {
+  // #814: explicit post_message is a standalone bubble. It may preserve
+  // extra.stream for correlation/hydration metadata, but it must not expose a
+  // stable stream identity to merge, projection, or invariant code.
+  if (msg.extra?.isExplicitPost) return undefined;
   if (msg.extra?.stream?.turnInvocationId) return msg.extra.stream.turnInvocationId;
   if (msg.extra?.stream?.invocationId) return msg.extra.stream.invocationId;
   if (msg.id.startsWith('draft-')) return msg.id.slice('draft-'.length);

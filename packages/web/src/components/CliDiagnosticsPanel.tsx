@@ -24,7 +24,7 @@ import {
  * Renders structured `cliDiagnostics` payload built by Phase A:
  *  - Always-visible banner with reasonCode-driven icon + publicSummary + publicHint
  *  - Collapsible safeExcerpt (only if Phase A populated it — KD-1 white-list admission)
- *  - debugRef metadata strip (command / exit / signal / invocationId)
+ *  - debugRef metadata strip (command / exit / signal / invocationId / path-safe provider context)
  *
  * Visual contract mirrors `TimeoutDiagnosticsPanel` (F118 AC-C3) — same error-banner +
  * collapsible-detail pattern, but per-reasonCode palette + icon for at-a-glance scan.
@@ -90,12 +90,22 @@ const REASON_PALETTE: Record<CliErrorReasonCode, Palette> = {
   // Tier 3 — system / environment
   spawn_failed: { ...PALETTE_SYSTEM, Icon: TerminalIcon },
   missing_rollout: { ...PALETTE_SYSTEM, Icon: FileXIcon },
+  // clowder-ai#1038: opencode resumed a stale --session (session DB rebuilt/cleared while
+  // Redis held the old cliSessionId). Same system tier as missing_rollout — session-side
+  // issue, auto-self-healed by the backend (Path A drops + retries fresh).
+  session_not_found: { ...PALETTE_SYSTEM, Icon: FileXIcon },
   // Tier 4 — cognitive / context limit
   context_window_exceeded: { ...PALETTE_COGNITIVE, Icon: TextQuoteIcon },
   invalid_thinking_signature: { ...PALETTE_COGNITIVE, Icon: BrainIcon },
   // F212 Phase D: model emitted an unparseable tool call (opus-4.8 decoder drift) — CC/model-side,
   // not a Clowder AI config issue. Cognitive tier (violet), same family as thinking-signature.
   tool_call_parse_failed: { ...PALETTE_COGNITIVE, Icon: WrenchIcon },
+  // F212 Phase G (clowder-ai#875): CLI exited cleanly but no text event was produced
+  // (e.g. OpenCode + DeepSeek step_start-only stream). NOT a hard error — surface
+  // structured evidence (event count/types/model/session prefix) so the user can act
+  // (换猫 / 换 model / 直接跑 CLI). System tier (slate, calm) — reasonCode lives here so
+  // the panel renders consistently even though the underlying CLI exit code is 0.
+  silent_completion: { ...PALETTE_SYSTEM, Icon: UnknownReasonIcon },
 };
 
 const UNKNOWN_PALETTE: Palette = { ...PALETTE_SYSTEM, Icon: UnknownReasonIcon };
@@ -109,7 +119,14 @@ const UNKNOWN_PALETTE: Palette = { ...PALETTE_SYSTEM, Icon: UnknownReasonIcon };
  * no excerptSource and (b) forward-compat: any future api source value the current web
  * doesn't recognize yet (e.g. a hypothetical 'pii_redacted') is treated as untrusted.
  */
-const KNOWN_EXCERPT_SOURCES: ReadonlySet<string> = new Set(['classifier', 'cc_structured']);
+const KNOWN_EXCERPT_SOURCES: ReadonlySet<string> = new Set(['classifier', 'cc_structured', 'unknown_raw']);
+
+const DEBUG_REF_CONTEXT_FIELDS = [
+  ['homeMode', 'homeMode'],
+  ['spawnCwdMode', 'spawnCwdMode'],
+  ['spawnCwdKey', 'spawnCwdKey'],
+  ['profileId', 'profileId'],
+] as const satisfies readonly [keyof CliDiagnostics['debugRef'], string][];
 
 /**
  * 云端 codex P2 (2026-05-27): persisted/hydrated `cliDiagnostics.reasonCode` may carry
@@ -138,7 +155,7 @@ function truncateMiddle(s: string, max = 32): string {
 
 /**
  * 云端 codex P2-5 (2026-05-27): backend `resolveCliCommand()` may resolve to an
- * absolute path (e.g. `/home/user/codex` from `which` fallback), and
+ * absolute path (e.g. `/home/user/.npm/bin/codex` from `which` fallback), and
  * the api-side sanitizer redacts HOME/USERPROFILE only inside stderr — not the
  * structured `debugRef.command`. Mirror the same redaction on the frontend before
  * rendering so the debug strip can't leak host install paths.
@@ -282,6 +299,14 @@ export function CliDiagnosticsPanel({ errorMessage, diagnostics, dedupCount }: C
             <span className="font-medium">invocationId:</span> {truncateMiddle(diagnostics.debugRef.invocationId, 32)}
           </span>
         )}
+        {DEBUG_REF_CONTEXT_FIELDS.map(([key, label]) => {
+          const value = diagnostics.debugRef[key];
+          return value ? (
+            <span key={key}>
+              <span className="font-medium">{label}:</span> {String(value)}
+            </span>
+          ) : null;
+        })}
       </div>
     </div>
   );

@@ -22,7 +22,7 @@ assert_contains() {
 test_usage_includes_alpha_commands() {
   local output
   output="$(usage)"
-  assert_contains "$output" "Cat Cafe Alpha Worktree Manager" "usage should describe alpha manager"
+  assert_contains "$output" "Clowder AI Alpha Worktree Manager" "usage should describe alpha manager"
   assert_contains "$output" "./scripts/alpha-worktree.sh start" "usage should include start command"
   assert_contains "$output" "../cat-cafe-alpha" "usage should mention default alpha dir"
   assert_contains "$output" "alpha/main-sync" "usage should mention default alpha branch"
@@ -40,6 +40,7 @@ test_print_alpha_env_exports() {
   assert_contains "$output" "export ASR_ENABLED=0" "should disable ASR sidecar"
   assert_contains "$output" "export TTS_ENABLED=0" "should disable TTS sidecar"
   assert_contains "$output" "export LLM_POSTPROCESS_ENABLED=0" "should disable LLM postprocess sidecar"
+  assert_contains "$output" "export CONNECTOR_GATEWAY_AUTOSTART=0" "should disable preconfigured IM connector autostart"
   echo "PASS: alpha env exports are fixed to isolated defaults"
 }
 
@@ -222,6 +223,184 @@ test_is_api_running_checks_alpha_api_port() {
   echo "PASS: is_api_running checks the configured alpha api port"
 }
 
+test_build_alpha_stale_packages_rebuilds_missing_dist() {
+  local tmp_root origin_dir src_dir alpha_dir
+  tmp_root="$(mktemp -d)"
+  trap 'rm -rf "$tmp_root"' RETURN
+
+  origin_dir="$tmp_root/origin.git"
+  src_dir="$tmp_root/src"
+  alpha_dir="$tmp_root/cat-cafe-alpha"
+
+  git init --bare "$origin_dir" >/dev/null 2>&1
+  git clone "$origin_dir" "$src_dir" >/dev/null 2>&1
+  git -C "$src_dir" config user.name "Alpha Test"
+  git -C "$src_dir" config user.email "alpha-test@example.com"
+  echo "one" > "$src_dir/README.md"
+  git -C "$src_dir" add README.md
+  git -C "$src_dir" commit -m "init" >/dev/null
+  git -C "$src_dir" branch -M main
+  git -C "$src_dir" push -u origin main >/dev/null 2>&1
+
+  PROJECT_DIR="$src_dir"
+  ALPHA_DIR="$(abs_path "$alpha_dir")"
+  LEGACY_ALPHA_DIR="$(abs_path "$tmp_root/cat-cafe-main-test")"
+  ALPHA_BRANCH="alpha/main-sync"
+  REMOTE_NAME="origin"
+  RUN_INSTALL=false
+  init_alpha_worktree
+
+  # Create dist dirs with no dist artifact and no .build-commit stamp (simulates fresh worktree, never built)
+  mkdir -p "$ALPHA_DIR/packages/shared/dist"
+  mkdir -p "$ALPHA_DIR/packages/api/dist"
+  mkdir -p "$ALPHA_DIR/packages/mcp-server/dist"
+
+  # Mock pnpm to record calls without actually building
+  local pnpm_calls=""
+  pnpm() { pnpm_calls="$pnpm_calls|$*"; }
+
+  build_alpha_stale_packages
+
+  echo "$pnpm_calls" | grep -q "packages/shared" || {
+    echo "FAIL: shared should be rebuilt when dist is missing"
+    exit 1
+  }
+  echo "$pnpm_calls" | grep -q "packages/api" || {
+    echo "FAIL: api should be rebuilt when dist is missing"
+    exit 1
+  }
+  echo "$pnpm_calls" | grep -q "packages/mcp-server" || {
+    echo "FAIL: mcp-server should be rebuilt when dist is missing"
+    exit 1
+  }
+
+  echo "PASS: build_alpha_stale_packages rebuilds all packages when dist is missing"
+}
+
+test_build_alpha_stale_packages_skips_fresh_packages() {
+  local tmp_root origin_dir src_dir alpha_dir
+  tmp_root="$(mktemp -d)"
+  trap 'rm -rf "$tmp_root"' RETURN
+
+  origin_dir="$tmp_root/origin.git"
+  src_dir="$tmp_root/src"
+  alpha_dir="$tmp_root/cat-cafe-alpha"
+
+  git init --bare "$origin_dir" >/dev/null 2>&1
+  git clone "$origin_dir" "$src_dir" >/dev/null 2>&1
+  git -C "$src_dir" config user.name "Alpha Test"
+  git -C "$src_dir" config user.email "alpha-test@example.com"
+  echo "one" > "$src_dir/README.md"
+  git -C "$src_dir" add README.md
+  git -C "$src_dir" commit -m "init" >/dev/null
+  git -C "$src_dir" branch -M main
+  git -C "$src_dir" push -u origin main >/dev/null 2>&1
+
+  PROJECT_DIR="$src_dir"
+  ALPHA_DIR="$(abs_path "$alpha_dir")"
+  LEGACY_ALPHA_DIR="$(abs_path "$tmp_root/cat-cafe-main-test")"
+  ALPHA_BRANCH="alpha/main-sync"
+  REMOTE_NAME="origin"
+  RUN_INSTALL=false
+  init_alpha_worktree
+
+  # Create fresh dist artifacts + stamps matching current HEAD
+  local head
+  head="$(git -C "$ALPHA_DIR" rev-parse HEAD)"
+  for pkg in shared api mcp-server; do
+    mkdir -p "$ALPHA_DIR/packages/$pkg/dist"
+    echo "fake-built" > "$ALPHA_DIR/packages/$pkg/dist/index.js"
+    echo "$head" > "$ALPHA_DIR/packages/$pkg/dist/.build-commit"
+  done
+
+  # Mock pnpm — should NOT be called
+  local pnpm_called=false
+  pnpm() { pnpm_called=true; }
+
+  build_alpha_stale_packages
+
+  [ "$pnpm_called" = "false" ] || {
+    echo "FAIL: pnpm should not be called when all dists are fresh"
+    exit 1
+  }
+
+  echo "PASS: build_alpha_stale_packages skips rebuild when dist is fresh"
+}
+
+test_build_alpha_stale_packages_rebuilds_when_head_moved() {
+  local tmp_root origin_dir src_dir alpha_dir
+  tmp_root="$(mktemp -d)"
+  trap 'rm -rf "$tmp_root"' RETURN
+
+  origin_dir="$tmp_root/origin.git"
+  src_dir="$tmp_root/src"
+  alpha_dir="$tmp_root/cat-cafe-alpha"
+
+  git init --bare "$origin_dir" >/dev/null 2>&1
+  git clone "$origin_dir" "$src_dir" >/dev/null 2>&1
+  git -C "$src_dir" config user.name "Alpha Test"
+  git -C "$src_dir" config user.email "alpha-test@example.com"
+  echo "one" > "$src_dir/README.md"
+  git -C "$src_dir" add README.md
+  git -C "$src_dir" commit -m "init" >/dev/null
+  git -C "$src_dir" branch -M main
+  git -C "$src_dir" push -u origin main >/dev/null 2>&1
+
+  PROJECT_DIR="$src_dir"
+  ALPHA_DIR="$(abs_path "$alpha_dir")"
+  LEGACY_ALPHA_DIR="$(abs_path "$tmp_root/cat-cafe-main-test")"
+  ALPHA_BRANCH="alpha/main-sync"
+  REMOTE_NAME="origin"
+  RUN_INSTALL=false
+  init_alpha_worktree
+
+  # Simulate "built at old HEAD": stamp set to old commit, but current HEAD will move after sync
+  local old_head
+  old_head="$(git -C "$ALPHA_DIR" rev-parse HEAD)"
+  for pkg in shared api mcp-server; do
+    mkdir -p "$ALPHA_DIR/packages/$pkg/dist"
+    echo "fake-built" > "$ALPHA_DIR/packages/$pkg/dist/index.js"
+    echo "$old_head" > "$ALPHA_DIR/packages/$pkg/dist/.build-commit"
+  done
+
+  # Push a new commit to origin so sync can move HEAD forward
+  echo "two" >> "$src_dir/README.md"
+  git -C "$src_dir" add README.md
+  git -C "$src_dir" commit -m "update" >/dev/null
+  git -C "$src_dir" push >/dev/null 2>&1
+
+  # Sync alpha so HEAD moves to new commit
+  sync_alpha_worktree
+
+  local new_head
+  new_head="$(git -C "$ALPHA_DIR" rev-parse HEAD)"
+  [ "$new_head" != "$old_head" ] || {
+    echo "FAIL: test setup: HEAD should have moved after sync"
+    exit 1
+  }
+
+  # Mock pnpm — should be called since stamps now mismatch HEAD
+  local pnpm_calls=""
+  pnpm() { pnpm_calls="$pnpm_calls|$*"; }
+
+  build_alpha_stale_packages
+
+  echo "$pnpm_calls" | grep -q "packages/shared" || {
+    echo "FAIL: shared should be rebuilt after HEAD moved past its stamp"
+    exit 1
+  }
+  echo "$pnpm_calls" | grep -q "packages/api" || {
+    echo "FAIL: api should be rebuilt after HEAD moved past its stamp"
+    exit 1
+  }
+  echo "$pnpm_calls" | grep -q "packages/mcp-server" || {
+    echo "FAIL: mcp-server should be rebuilt after HEAD moved past its stamp"
+    exit 1
+  }
+
+  echo "PASS: build_alpha_stale_packages rebuilds stale packages when HEAD moved after sync"
+}
+
 test_usage_includes_alpha_commands
 test_print_alpha_env_exports
 test_init_and_sync_alpha_worktree_ff_only
@@ -229,3 +408,6 @@ test_ensure_alpha_branch_repairs_detached_worktree
 test_migrate_legacy_main_test_worktree_to_alpha_location
 test_resolve_env_source_file_falls_back_to_sibling_cat_cafe
 test_is_api_running_checks_alpha_api_port
+test_build_alpha_stale_packages_rebuilds_missing_dist
+test_build_alpha_stale_packages_skips_fresh_packages
+test_build_alpha_stale_packages_rebuilds_when_head_moved

@@ -36,8 +36,9 @@ import type { VectorStore } from './VectorStore.js';
  *   2 — CatCafeScanner: section headings → keywords (PR #1179)
  *   3 — Phase D: pathToAuthority backfill (authority derived from path)
  *   4 — F209 Phase B: entity mention extraction from docs/passages
+ *   5 — visual artifact text indexing (SVG text + message block alt/caption)
  */
-export const INDEXING_VERSION = 4;
+export const INDEXING_VERSION = 5;
 
 /** Higher number = higher priority for anchor ownership */
 const KIND_PRIORITY: Record<EvidenceKind, number> = {
@@ -72,6 +73,59 @@ function computeThreadSourceHash(title: string, summary: string, keywords: strin
   return createHash('sha256').update(JSON.stringify({ title, summary, keywords })).digest('hex').slice(0, 16);
 }
 
+const SEARCHABLE_BLOCK_TEXT_FIELDS = [
+  'text',
+  'alt',
+  'caption',
+  'title',
+  'subtitle',
+  'label',
+  'description',
+  'body',
+  'bodyMarkdown',
+  'markdown',
+  'summary',
+];
+
+function buildSearchableMessageContent(message: StoredMessageSnapshot): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  const push = (value: unknown): void => {
+    if (typeof value !== 'string') return;
+    const text = value.replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    parts.push(text);
+  };
+
+  push(message.content);
+  for (const block of message.contentBlocks ?? []) collectBlockText(block, push);
+  for (const block of message.richBlocks ?? []) collectBlockText(block, push);
+
+  return parts.join('\n');
+}
+
+function collectBlockText(block: unknown, push: (value: unknown) => void): void {
+  if (!block || typeof block !== 'object') return;
+  const obj = block as Record<string, unknown>;
+
+  for (const field of SEARCHABLE_BLOCK_TEXT_FIELDS) {
+    push(obj[field]);
+  }
+
+  const items = obj.items;
+  if (Array.isArray(items)) {
+    for (const item of items) collectBlockText(item, push);
+  }
+
+  const sections = obj.sections;
+  if (Array.isArray(sections)) {
+    for (const section of sections) collectBlockText(section, push);
+  }
+}
+
 /** Callback that returns all threads for indexing. */
 export type ThreadListFn = () => ThreadSnapshot[] | Promise<ThreadSnapshot[]>;
 
@@ -85,6 +139,8 @@ export interface StoredMessageSnapshot {
   catId?: string;
   threadId: string;
   timestamp: number;
+  contentBlocks?: readonly unknown[];
+  richBlocks?: readonly unknown[];
 }
 
 /** Callback that returns messages for a given thread. */
@@ -401,7 +457,12 @@ export class IndexBuilder implements IIndexBuilder {
           try {
             const messages = await this.messageListFn(thread.id, 100);
             if (messages.length > 0) {
-              const turns = messages.map((m) => `[${m.catId ?? 'user'}] ${m.content}`);
+              const turns = messages
+                .map((m) => {
+                  const content = buildSearchableMessageContent(m);
+                  return content ? `[${m.catId ?? 'user'}] ${content}` : '';
+                })
+                .filter(Boolean);
               // Truncate to ~3000 chars for FTS5 summary field
               const joined = turns.join('\n');
               summary = joined.length > 3000 ? `${joined.slice(0, 2997)}...` : joined;
@@ -512,6 +573,10 @@ export class IndexBuilder implements IIndexBuilder {
     report('done', 100);
 
     return { docsIndexed: indexed, docsSkipped: skipped, durationMs: Date.now() - start };
+  }
+
+  isPassageWarmupActive(): boolean {
+    return this.passageEmbeddingWarmupInFlight !== null;
   }
 
   startPassageEmbeddingWarmup(): void {
@@ -822,7 +887,12 @@ export class IndexBuilder implements IIndexBuilder {
         try {
           const messages = await this.messageListFn(threadId, 100);
           if (messages.length > 0) {
-            const turns = messages.map((m) => `[${m.catId ?? 'user'}] ${m.content}`);
+            const turns = messages
+              .map((m) => {
+                const content = buildSearchableMessageContent(m);
+                return content ? `[${m.catId ?? 'user'}] ${content}` : '';
+              })
+              .filter(Boolean);
             const joined = turns.join('\n');
             summary = joined.length > 3000 ? `${joined.slice(0, 2997)}...` : joined;
           }
@@ -884,19 +954,22 @@ export class IndexBuilder implements IIndexBuilder {
     const deps = this.embedDeps;
     if (!deps?.passageVectorStore) return;
 
-    try {
-      const db = this.store.getDb();
-      const existingStmt = db.prepare('SELECT 1 AS present FROM passage_vectors WHERE passage_key = ? LIMIT 1');
-      let lastId = 0;
+    const db = this.store.getDb();
+    const existingStmt = db.prepare('SELECT 1 AS present FROM passage_vectors WHERE passage_key = ? LIMIT 1');
+    let lastId = 0;
+    let consecutiveErrors = 0;
 
-      for (;;) {
-        const whereClauses = ['id > ?'];
-        const params: unknown[] = [lastId];
-        if (docAnchors?.length) {
-          whereClauses.push(`doc_anchor IN (${docAnchors.map(() => '?').join(',')})`);
-          params.push(...docAnchors);
-        }
-        const rows = db
+    for (;;) {
+      const whereClauses = ['id > ?'];
+      const params: unknown[] = [lastId];
+      if (docAnchors?.length) {
+        whereClauses.push(`doc_anchor IN (${docAnchors.map(() => '?').join(',')})`);
+        params.push(...docAnchors);
+      }
+
+      let rows: Array<PassageEmbeddingRow & { id: number }>;
+      try {
+        rows = db
           .prepare(
             `SELECT id, doc_anchor AS docAnchor, passage_id AS passageId, content
              FROM evidence_passages
@@ -905,18 +978,31 @@ export class IndexBuilder implements IIndexBuilder {
              LIMIT ?`,
           )
           .all(...params, PASSAGE_EMBED_SCAN_BATCH_SIZE) as Array<PassageEmbeddingRow & { id: number }>;
-        if (rows.length === 0) return;
+      } catch {
+        // DB read error — stop scanning (structural problem, not transient)
+        return;
+      }
+      if (rows.length === 0) return;
 
-        lastId = rows[rows.length - 1]!.id;
-        const missing = rows.filter((r) => !existingStmt.get(passageVectorKey(r.docAnchor, r.passageId)));
+      lastId = rows[rows.length - 1]!.id;
+      const missing = rows.filter((r) => !existingStmt.get(passageVectorKey(r.docAnchor, r.passageId)));
+
+      try {
         await embedPassages({
           passages: missing,
           embedding: deps.embedding,
           passageVectorStore: deps.passageVectorStore,
         });
+        consecutiveErrors = 0;
+      } catch {
+        // Batch-level fail-open: skip this batch, continue with the next.
+        // passage_fts remains canonical — vectors are an accelerator.
+        consecutiveErrors++;
+        if (consecutiveErrors >= 3) {
+          // 3 consecutive batch failures → embedding service likely down, stop gracefully
+          return;
+        }
       }
-    } catch {
-      // fail-open: passage vectors are an accelerator; passage_fts remains canonical.
     }
   }
 
@@ -928,12 +1014,21 @@ export class IndexBuilder implements IIndexBuilder {
     if (!this.messageListFn) return;
     const db = this.store.getDb();
 
-    // Phase I (AC-I2): INSERT OR IGNORE — passages only increase, never deleted on rebuild.
-    // Previously used DELETE-then-INSERT which lost passages when Redis messages expired.
+    // Phase I (AC-I2): never delete missing passages on rebuild.
+    // Existing returned messages still need to refresh so new block metadata can backfill.
     const upsertStmt = db.prepare(`
-      INSERT OR IGNORE INTO evidence_passages
+      INSERT INTO evidence_passages
       (doc_anchor, passage_id, content, speaker, position, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(doc_anchor, passage_id) DO UPDATE SET
+        content = excluded.content,
+        speaker = excluded.speaker,
+        position = excluded.position,
+        created_at = excluded.created_at
+      WHERE evidence_passages.content IS NOT excluded.content
+        OR evidence_passages.speaker IS NOT excluded.speaker
+        OR evidence_passages.position IS NOT excluded.position
+        OR evidence_passages.created_at IS NOT excluded.created_at
     `);
 
     for (const thread of threads) {
@@ -947,14 +1042,19 @@ export class IndexBuilder implements IIndexBuilder {
       const tx = db.transaction((msgs: StoredMessageSnapshot[]) => {
         for (let i = 0; i < msgs.length; i++) {
           const msg = msgs[i];
-          upsertStmt.run(
-            `thread-${thread.id}`,
-            `msg-${msg.id}`,
-            msg.content,
+          const content = buildSearchableMessageContent(msg);
+          if (!content) continue;
+          const docAnchor = `thread-${thread.id}`;
+          const passageId = `msg-${msg.id}`;
+          const result = upsertStmt.run(
+            docAnchor,
+            passageId,
+            content,
             msg.catId ?? 'user',
             i,
             new Date(msg.timestamp).toISOString(),
           );
+          if (result.changes > 0) this.embedDeps?.passageVectorStore?.delete(passageVectorKey(docAnchor, passageId));
         }
       });
 

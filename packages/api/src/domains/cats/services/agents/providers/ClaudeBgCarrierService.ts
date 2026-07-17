@@ -29,7 +29,9 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { type CatId, createCatId } from '@cat-cafe/shared';
+import { resolveCatCafeNodeCommand } from '../../../../../config/capabilities/mcp-constants.js';
 import { getCatModel } from '../../../../../config/cat-models.js';
+import { createModuleLogger } from '../../../../../infrastructure/logger.js';
 import { resolveCliCommandOrBare } from '../../../../../utils/cli-resolve.js';
 import { buildChildEnv } from '../../../../../utils/cli-spawn.js';
 import type { AgentMessage, AgentService, AgentServiceOptions } from '../../types.js';
@@ -44,12 +46,20 @@ import {
   buildClaudeEnvOverrides,
   resolveClaudeModelSelection,
   resolveDefaultClaudeMcpServerPath,
+  SUBSCRIPTION_MODE_DENY_KEYS,
 } from './ClaudeAgentService.js';
 import { JobEventConsumer } from './JobEventConsumer.js';
 import { compileL0ViaSubprocess } from './l0-compiler.js';
 import { TranscriptTailer } from './TranscriptTailer.js';
 
 const SHORT_ID_PATTERN = /backgrounded\s*·\s*([a-f0-9]{8})/;
+
+// F198 Bug #3: `claude --bg --resume <id>` requires a full conversation UUID —
+// the 8-hex daemon shortId (or any non-UUID) makes the resumed daemon error
+// out. Guard sessionId before forwarding it as --resume.
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const log = createModuleLogger('claude-bg-carrier');
 
 export class CarrierError extends Error {
   override readonly cause?: unknown;
@@ -165,6 +175,17 @@ export class ClaudeBgCarrierService implements AgentService {
   }
 
   /**
+   * F198 Bug #3 — the bg daemon forks a fresh sessionId UUID every
+   * `--bg --resume` round, so there is no stable per-conversation id. Signal
+   * invoke-single-cat to anchor this conversation on a derived chainKey
+   * (`bg:${threadId}:${catId}`) instead of the rotating cliSessionId — which
+   * avoids the session_init seal+create cascade behind multi-turn amnesia.
+   */
+  usesChainKeyResume(): boolean {
+    return true;
+  }
+
+  /**
    * F203 Phase C: compile per-cat L0 → temp file for `--system-prompt-file`
    * (compression-immune native system role; replaces the user-message prepend
    * stripped in Task 2). fail-closed: a missing L0 = a cat with no identity/
@@ -199,7 +220,7 @@ export class ClaudeBgCarrierService implements AgentService {
       // explicitly strip CLAUDE_CODE_ENTRYPOINT. Otherwise transcript entrypoint
       // becomes sdk-cli regardless of flag. See F198 spike commit 8c5da78c7.
       //
-      // F198 refactor (CVO directive 2026-05-14): delegate env construction
+      // F198 refactor (operator directive 2026-05-14): delegate env construction
       // to the shared `buildClaudeEnvOverrides` helper (exported from
       // ClaudeAgentService) instead of re-implementing 80% of subscription/
       // ENTRYPOINT/Anthropic-clearing rules. Coordinate-system fix for the
@@ -218,6 +239,16 @@ export class ClaudeBgCarrierService implements AgentService {
           envOverrides[k] = v;
         }
       }
+      // #883: Subscription deny-list must survive accountEnv merge.
+      // bg carrier is ALWAYS subscription (api_key fallback routes to
+      // ClaudeAgentService per KD-3). Use the effective mode from
+      // callbackEnvWithMode — which defaults to 'subscription' — so the
+      // deny-list fires even when the caller doesn't explicitly pass mode.
+      // Only an explicit api_key callbackEnv (which overrides the default
+      // at line 233) bypasses the deny-list.
+      if (callbackEnvWithMode[ANTHROPIC_PROFILE_MODE_KEY] === 'subscription') {
+        for (const key of SUBSCRIPTION_MODE_DENY_KEYS) envOverrides[key] = null;
+      }
       envOverrides.CLAUDE_CODE_ENTRYPOINT = null;
       envOverrides.CLAUDECODE = null;
       const env = buildChildEnv(envOverrides);
@@ -228,11 +259,36 @@ export class ClaudeBgCarrierService implements AgentService {
       // - callbackEnv MODEL_OVERRIDE_KEY (per-invocation override)
       // - api_key + non-Anthropic model → omit --model (let env drive)
       const { effectiveModel, useEnvModelOverride } = resolveClaudeModelSelection(options?.callbackEnv, this.model);
-      const args = useEnvModelOverride ? ['--bg', prompt] : ['--bg', prompt, '--model', effectiveModel];
+      // #840 R2 (砚砚 review 2026-06-02): bg carrier prompt also rides argv
+      // historically — same ENAMETOOLONG risk as the `-p` carrier. Spike
+      // verified `claude --bg` accepts stdin prompt (supervisor reads stdin
+      // before detaching worker daemon). Remove prompt positional from argv;
+      // stream content via stdin (set up below).
+      const args = useEnvModelOverride ? ['--bg'] : ['--bg', '--model', effectiveModel];
       // F203 Phase C: native system role from compiled L0 file (above).
       args.push('--system-prompt-file', l0Path);
+
+      // F198 Bug #3: resume an existing conversation when the caller hands us a
+      // valid-UUID sessionId — the daemon's previous fork id, surfaced via
+      // state.resumeSessionId and persisted by invoke-single-cat as the chainKey
+      // record's latestResumeSessionId. Spike 2026-06-03 (3-turn real run):
+      // `claude --bg --resume <uuid>` restores history with NO replay/cross-talk.
+      // Guard non-UUID ids (e.g. the 8-hex daemon shortId) — the daemon rejects them.
+      if (options?.sessionId && UUID_PATTERN.test(options.sessionId)) {
+        args.push('--resume', options.sessionId);
+      }
+      // #840: write the append-system-prompt payload (pack blocks + briefing) to
+      // a temp file so it rides `--append-system-prompt-file <path>` instead of
+      // inline argv. Otherwise A2A briefings with long Windows paths can push
+      // the spawn command line past CreateProcess' 32,767-char cap and produce
+      // `spawn ENAMETOOLONG`. Per L0 pattern (see compileL0ToTempFile docblock):
+      // per-invocation file, no cleanup — daemon may read it lazily on resume,
+      // OS reclaims via tmp.
       if (options?.systemPrompt) {
-        args.push('--append-system-prompt', options.systemPrompt);
+        const appendDir = mkdtempSync(join(tmpdir(), 'cat-cafe-bg-append-prompt-'));
+        const appendPath = join(appendDir, 'append-system-prompt.md');
+        writeFileSync(appendPath, options.systemPrompt, 'utf-8');
+        args.push('--append-system-prompt-file', appendPath);
       }
 
       // F198 Phase D carrier parity (2026-05-19 hotfix): ClaudeAgentService
@@ -241,7 +297,7 @@ export class ClaudeBgCarrierService implements AgentService {
       // ClaudeBgCarrierService ('--bg' carrier) was missing this flag → the
       // daemon-spawned claude process reverted to default permission mode →
       // every tool call prompted inside the detached daemon TTY (invisible
-      // from web UI) → invocations hung. Realized when 铲屎官 flipped
+      // from web UI) → invocations hung. Realized when co-creator flipped
       // CAT_CAFE_CLAUDE_CARRIER=bg_daemon in runtime and布偶猫 cats stalled
       // on first Bash call. Parity-keep with ClaudeAgentService PERMISSION_MODE.
       args.push('--permission-mode', 'bypassPermissions');
@@ -262,7 +318,7 @@ export class ClaudeBgCarrierService implements AgentService {
             writeFileSync(
               this.mcpConfigFilePath,
               JSON.stringify({
-                mcpServers: { 'cat-cafe': { command: 'node', args: [this.mcpServerPath] } },
+                mcpServers: { 'cat-cafe': { command: resolveCatCafeNodeCommand(), args: [this.mcpServerPath] } },
               }),
               'utf-8',
             );
@@ -272,7 +328,7 @@ export class ClaudeBgCarrierService implements AgentService {
           args.push(
             '--mcp-config',
             JSON.stringify({
-              mcpServers: { 'cat-cafe': { command: 'node', args: [this.mcpServerPath] } },
+              mcpServers: { 'cat-cafe': { command: resolveCatCafeNodeCommand(), args: [this.mcpServerPath] } },
             }),
           );
         }
@@ -301,12 +357,29 @@ export class ClaudeBgCarrierService implements AgentService {
       // during the 5-15s startup window kills the child via SIGTERM. Without
       // this, abort during startJob() never reaches waitForTerminal()'s
       // bestEffortStop cleanup path and leaks the daemon job.
+      // #840 R2: pipe stdin so we can stream the prompt off the command line.
+      // Supervisor (`claude --bg`) reads stdin synchronously before forking
+      // the detached worker, so it's safe to write+close before the daemon
+      // backgrounds itself (spike-verified).
       const child = this.spawnFn(claudeCommand, args, {
         cwd: options?.workingDirectory ?? process.cwd(),
         env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
         signal: options?.signal,
       });
+
+      // Write the prompt to the supervisor's stdin, then close. Mirror the
+      // EPIPE guard used in cli-spawn.ts (child may exit before consuming).
+      const childStdin = child.stdin;
+      if (childStdin) {
+        childStdin.on('error', (err: NodeJS.ErrnoException) => {
+          if (err && err.code !== 'EPIPE') {
+            log.warn({ err, pid: child.pid }, 'Unexpected claude --bg stdin write error');
+          }
+        });
+        childStdin.write(prompt);
+        childStdin.end();
+      }
 
       let stdout = '';
       let stderr = '';
@@ -606,6 +679,12 @@ export class ClaudeBgCarrierService implements AgentService {
           metadata: {
             provider: 'claude-bg',
             model: effectiveModel,
+            // F198 Bug #3: surface the daemon's freshly-forked conversation UUID
+            // for the NEXT turn so invoke-single-cat persists it as the chainKey
+            // record's latestResumeSessionId (next round's --resume target).
+            // Daemon writes resumeSessionId directly to state.json (spike 2026-06-03)
+            // — no need to parse linkScanPath as the original bug-report §4.2 assumed.
+            ...(state?.resumeSessionId ? { resumeSessionId: state.resumeSessionId } : {}),
             ...(usage ? { usage } : {}),
             diagnostics: {
               ...(state?.state && state.state !== 'done' ? { terminalState: state.state } : {}),

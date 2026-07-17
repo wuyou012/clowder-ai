@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Cat Cafe — Cross-Platform One-Click Install Helper (F113)
+# Clowder AI — Cross-Platform One-Click Install Helper (F113)
 # Usage: bash scripts/install.sh [--start] [--memory] [--registry=URL] [--skip-preflight]
 # Supported: macOS (Homebrew), Debian/Ubuntu, CentOS/RHEL/Fedora
 
@@ -693,7 +693,7 @@ case "$PLATFORM" in
         fi
         # Persist brew shellenv to login profiles so new terminals find brew, node, etc.
         if [[ "$_brew_recovered" == true ]]; then
-            _shellenv_line="eval \"\$($(command -v brew) shellenv)\"  # Homebrew (added by Cat Cafe)"
+            _shellenv_line="eval \"\$($(command -v brew) shellenv)\"  # Homebrew (added by Clowder AI)"
             for _prof in $(darwin_login_profiles); do
                 append_to_profile "$_shellenv_line" "$_prof"
             done
@@ -739,7 +739,7 @@ esac
 # distros already include ~/.local/bin in PATH via ~/.profile / ~/.bashrc.
 if [[ "$DISTRO_FAMILY" == "darwin" ]]; then
     for _prof in $(darwin_login_profiles); do
-        append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Cat Cafe user binaries' "$_prof"
+        append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Clowder AI user binaries' "$_prof"
     done
     unset _prof
 fi
@@ -830,12 +830,13 @@ else
     esac
 fi
 
-# ── [3/8] Install Node.js 20+ ────────────────────────────
+# ── [3/8] Install Node.js 24+ ────────────────────────────
 step "[3/8] Checking Node.js / 检测 Node.js..."
 node_needs_install() {
     command -v node &>/dev/null || return 0
     local v; v=$(node -v | sed 's/v//' | cut -d. -f1)
-    [[ "$v" -lt 20 ]] && { warn "Node.js $(node -v) < v20 — upgrading"; return 0; }
+    [[ "$v" -lt 24 ]] && { warn "Node.js $(node -v) < v24 — upgrading"; return 0; }
+    [[ "$v" -ge 26 ]] && { warn "Node.js $(node -v) >= v26 is unsupported — switching to Node 24"; return 0; }
     return 1
 }
 install_node_fnm() {
@@ -844,10 +845,11 @@ install_node_fnm() {
         || curl -fsSL https://ghp.ci/https://raw.githubusercontent.com/Schniz/fnm/master/.ci/install.sh | bash -s -- --skip-shell 2>/dev/null || return 1
     export PATH="$HOME/.local/share/fnm:$HOME/.fnm:$PATH"
     eval "$(fnm env --shell bash 2>/dev/null)" 2>/dev/null || true
-    fnm install 20 && fnm use 20 && fnm default 20 || return 1
+    fnm install 24 && fnm use 24 && fnm default 24 || return 1
     for bin in node npm npx corepack; do persist_user_bin "$bin"; done
     command -v node &>/dev/null || return 1
-    [[ "$(node -v | sed 's/v//' | cut -d. -f1)" -ge 20 ]] || return 1
+    local v; v="$(node -v | sed 's/v//' | cut -d. -f1)"
+    [[ "$v" -ge 24 && "$v" -lt 26 ]] || return 1
 }
 if node_needs_install; then
     NODE_OK=false
@@ -856,14 +858,14 @@ if node_needs_install; then
             # Prefer fnm for version management; fall back to Homebrew
             install_node_fnm && NODE_OK=true
             if [[ "$NODE_OK" == false ]]; then
-                brew install node@20 2>/dev/null || true
-                # node@20 is keg-only — Homebrew does not link it into PATH by default.
+                brew install node@24 2>/dev/null || true
+                # node@24 is keg-only — Homebrew does not link it into PATH by default.
                 # Add the keg bin to PATH for this session AND persist to shell profile.
-                _keg_prefix="$(brew --prefix node@20 2>/dev/null || true)"
+                _keg_prefix="$(brew --prefix node@24 2>/dev/null || true)"
                 _keg_bin="${_keg_prefix:+$_keg_prefix/bin}"
                 if [[ -n "$_keg_bin" && -d "$_keg_bin" ]]; then
                     export PATH="$_keg_bin:$PATH"
-                    _keg_line="export PATH=\"$_keg_bin:\$PATH\"  # Homebrew node@20 keg"
+                    _keg_line="export PATH=\"$_keg_bin:\$PATH\"  # Homebrew node@24 keg"
                     for _prof in $(darwin_login_profiles); do
                         append_to_profile "$_keg_line" "$_prof"
                     done
@@ -877,25 +879,25 @@ if node_needs_install; then
             $SUDO mkdir -p /etc/apt/keyrings
             if timeout 15 curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
                 | $SUDO gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg 2>/dev/null; then
-                echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+                echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
                     | $SUDO tee /etc/apt/sources.list.d/nodesource.list >/dev/null
                 $SUDO apt-get update -qq && $SUDO apt-get install -y -qq nodejs && NODE_OK=true
             fi
             [[ "$NODE_OK" == false ]] && install_node_fnm && NODE_OK=true
             ;;
         rhel)
-            if timeout 15 curl -fsSL https://rpm.nodesource.com/setup_20.x | $SUDO bash - 2>/dev/null; then
+            if timeout 15 curl -fsSL https://rpm.nodesource.com/setup_24.x | $SUDO bash - 2>/dev/null; then
                 $SUDO $PKG_INSTALL nodejs && NODE_OK=true
             fi
             [[ "$NODE_OK" == false ]] && install_node_fnm && NODE_OK=true
             ;;
     esac
     node_needs_install && NODE_OK=false
-    [[ "$NODE_OK" == false ]] && { fail "Could not install Node.js 20. Install manually: https://nodejs.org"; exit 1; }
+    [[ "$NODE_OK" == false ]] && { fail "Could not install Node.js 24. Install manually: https://nodejs.org"; exit 1; }
     # Persist PATH additions to login profiles (zsh + bash) for new terminals.
     if [[ "$DISTRO_FAMILY" == "darwin" ]]; then
         for _prof in $(darwin_login_profiles); do
-            append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Cat Cafe user binaries' "$_prof"
+            append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Clowder AI user binaries' "$_prof"
             if [[ "$USED_FNM" == true ]]; then
                 _fnm_shell="zsh"
                 [[ "$_prof" == *bash* || "$_prof" == *profile ]] && _fnm_shell="bash"
@@ -906,7 +908,7 @@ if node_needs_install; then
     fi
     ok "Node.js $(node -v) installed"
 else
-    ok "Node.js $(node -v) already installed (>= 20)"
+    ok "Node.js $(node -v) already installed (>= 24 and < 26)"
 fi
 
 # ── [4/8] Install pnpm + Redis ─────────────────────────────
@@ -925,7 +927,7 @@ if ! command -v pnpm &>/dev/null; then
     # if Node was already present and the Node install step was skipped).
     if [[ "$DISTRO_FAMILY" == "darwin" ]]; then
         for _prof in $(darwin_login_profiles); do
-            append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Cat Cafe user binaries' "$_prof"
+            append_to_profile 'export PATH="$HOME/.local/bin:$PATH"  # Clowder AI user binaries' "$_prof"
         done
         unset _prof
     fi
@@ -979,21 +981,11 @@ build_step "mcp-server" pnpm --dir packages/mcp-server run build
 build_step "api" pnpm --dir packages/api run build
 build_step "web" env NEXT_TELEMETRY_DISABLED=1 NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=3072}" pnpm --dir packages/web run build
 ok "Build complete"
-# Skills: per-skill user-level symlinks (ADR-009)
-SKILLS_SOURCE="$PROJECT_DIR/cat-cafe-skills"
-if [[ -d "$SKILLS_SOURCE" ]]; then
-    for tdir in "$HOME/.claude/skills" "$HOME/.codex/skills" "$HOME/.gemini/skills" "$HOME/.kimi/skills"; do
-        mkdir -p "$tdir"
-        for sd in "$SKILLS_SOURCE"/*/; do
-            [[ -d "$sd" ]] || continue; sn=$(basename "$sd"); [[ "$sn" == "refs" ]] && continue; ln -sfn "$sd" "$tdir/$sn"
-        done
-    done; ok "Skills linked"
-else fail "cat-cafe-skills/ not found"; exit 1; fi
 sync_agent_hooks_best_effort
 
 # ── [6/8] Install AI agent CLI tools ─────────────────────
 step "[6/8] Installing AI CLI tools / 安装 AI 命令行工具..."
-info "  Cat Cafe spawns CLI subprocesses — these are required"
+info "  Clowder AI spawns CLI subprocesses — these are required"
 install_npm_cli() {
     local name="$1" cmd="$2" pkg="$3"
     info "  Installing $name ($pkg)..."
@@ -1179,7 +1171,7 @@ chmod 600 .env 2>/dev/null || true
 
 # ── [8/8] Done ──────────────────────────────────────────────
 step "[8/8] Installation complete! / 安装完成！"
-echo -e "\n  ${GREEN}══ Cat Cafe is ready! 猫猫咖啡已就绪！══${NC}\n  Project: $PROJECT_DIR"
+echo -e "\n  ${GREEN}══ Clowder AI is ready! 猫猫咖啡已就绪！══${NC}\n  Project: $PROJECT_DIR"
 START_CMD="cd $PROJECT_DIR && pnpm start"; [[ "$MEMORY_MODE" == true ]] && START_CMD+=" --memory"
 # The script runs as a subprocess — PATH changes don't propagate to the parent
 # shell. On macOS, prefix the banner command with `source ~/.zprofile` so the

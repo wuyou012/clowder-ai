@@ -15,6 +15,17 @@ function getInvokePnpmInstallFunctionBody() {
   return fn[0];
 }
 
+/**
+ * Extract the "Install dependencies and build" step block from install.ps1.
+ * Uses Step 5/\d+ … Step 6/\d+ so the match survives installer renumbering
+ * (e.g. 8→7 steps when a step is removed).
+ */
+function getInstallDependenciesStepBlock() {
+  const block = installScript.match(/Write-Step "Step 5\/\d+[\s\S]*?Write-Step "Step 6\/\d+/);
+  assert.ok(block, 'must find Step 5 install block');
+  return block[0];
+}
+
 test('install.ps1 defines Test-LockfileMismatchFailure helper', () => {
   assert.match(
     installScript,
@@ -69,9 +80,7 @@ test('install.ps1 defines Write-WindowsEpermHint to surface actionable fixes', (
 });
 
 test('Step 5 install flow branches on error class instead of blind retry', () => {
-  const step5Block = installScript.match(/Write-Step "Step 5\/8[\s\S]*?Write-Step "Step 6\/8/);
-  assert.ok(step5Block, 'must find Step 5 install block');
-  const block = step5Block[0];
+  const block = getInstallDependenciesStepBlock();
   assert.match(
     block,
     /Test-LockfileMismatchFailure/,
@@ -85,9 +94,7 @@ test('Step 5 install flow branches on error class instead of blind retry', () =>
 });
 
 test('Step 5 no longer prints misleading "Frozen lockfile failed, retrying" for non-lockfile errors', () => {
-  const step5Block = installScript.match(/Write-Step "Step 5\/8[\s\S]*?Write-Step "Step 6\/8/);
-  assert.ok(step5Block, 'must find Step 5 install block');
-  const block = step5Block[0];
+  const block = getInstallDependenciesStepBlock();
   // The misleading retry message must now be gated behind a lockfile-mismatch check.
   // It is acceptable for the string to appear once, but only inside a branch that
   // first confirmed the error is actually a lockfile mismatch.
@@ -103,9 +110,7 @@ test('Step 5 no longer prints misleading "Frozen lockfile failed, retrying" for 
 });
 
 test('Step 5 surfaces Windows EPERM hint when EPERM detected, instead of silently failing', () => {
-  const step5Block = installScript.match(/Write-Step "Step 5\/8[\s\S]*?Write-Step "Step 6\/8/);
-  assert.ok(step5Block, 'must find Step 5 install block');
-  const block = step5Block[0];
+  const block = getInstallDependenciesStepBlock();
   assert.match(
     block,
     /Write-WindowsEpermHint/,
@@ -119,9 +124,7 @@ test('Step 5 plain-install retry passes --no-frozen-lockfile to override pnpm CI
   // ineffective in that environment unless we explicitly opt out: the retry
   // call must include --no-frozen-lockfile so it actually recovers from drift
   // (ERR_PNPM_LOCKFILE_CONFIG_MISMATCH / ERR_PNPM_FROZEN_LOCKFILE_WITH_OUTDATED_LOCKFILE).
-  const step5Block = installScript.match(/Write-Step "Step 5\/8[\s\S]*?Write-Step "Step 6\/8/);
-  assert.ok(step5Block, 'must find Step 5 install block');
-  const block = step5Block[0];
+  const block = getInstallDependenciesStepBlock();
   // The retry call must appear AFTER the "Frozen lockfile failed, retrying"
   // warning (i.e. inside the lockfile-mismatch branch) and must contain
   // --no-frozen-lockfile.
@@ -139,9 +142,7 @@ test('Step 5 fails fast on non-lockfile errors instead of swapping to plain pnpm
   // The fix: when frozen-lockfile fails for a reason that is NOT a lockfile mismatch
   // (e.g. EPERM unlink), we must NOT fall back to plain `pnpm install` — that just
   // repeats the same failure and buries the real error under a misleading message.
-  const step5Block = installScript.match(/Write-Step "Step 5\/8[\s\S]*?Write-Step "Step 6\/8/);
-  assert.ok(step5Block, 'must find Step 5 install block');
-  const block = step5Block[0];
+  const block = getInstallDependenciesStepBlock();
   // There must be a code path that exits 1 without invoking a second plain install
   // when the first failure is not a lockfile mismatch.
   assert.match(
@@ -155,15 +156,26 @@ test('Step 5 fails fast on non-lockfile errors instead of swapping to plain pnpm
 
 test('Invoke-PnpmInstallWithCapturedOutput trusts $LASTEXITCODE over pipeline exceptions (DEP0169 tolerance)', () => {
   // Node 24 emits DEP0169 deprecation warnings to stderr. With $ErrorActionPreference=Stop,
-  // the 2>&1 | Tee-Object pipeline can throw even when pnpm itself exited 0.
+  // the 2>&1 pipeline can throw even when pnpm itself exited 0.
   // The catch path must check $LASTEXITCODE and treat exit 0 as success, not failure.
   const body = getInvokePnpmInstallFunctionBody();
-  // The catch block must reference $LASTEXITCODE so it can distinguish a real
-  // process failure from a benign pipeline throw on stderr.
-  const catchBlock = body.match(/} catch \{[\s\S]*?\}/);
-  assert.ok(catchBlock, 'must have catch block');
+  // Anchor to the actual pnpm pipeline catch block by locating the
+  // "Two distinct scenarios reach this catch:" comment, which uniquely
+  // identifies the DEP0169 tolerance catch (not the bare spinner catch {}).
+  const scenariosIdx = body.indexOf('Two distinct scenarios');
+  assert.ok(scenariosIdx >= 0, 'must have DEP0169 tolerance catch block with "Two distinct scenarios" comment');
+  // Walk backward from the comment to find its enclosing '} catch {'
+  const beforeComment = body.substring(0, scenariosIdx);
+  const catchIdx = beforeComment.lastIndexOf('} catch {');
+  assert.ok(catchIdx >= 0, 'must have catch block before "Two distinct scenarios" comment');
+  // Slice from catch start to the following '} finally {' to capture the
+  // full pnpm pipeline catch block (excluding later code outside it).
+  const fromCatch = body.substring(catchIdx);
+  const finallyIdx = fromCatch.indexOf('} finally {');
+  assert.ok(finallyIdx >= 0, 'catch block must be followed by } finally {');
+  const catchBlock = fromCatch.substring(0, finallyIdx);
   assert.match(
-    catchBlock[0],
+    catchBlock,
     /\$(?:global:)?LASTEXITCODE\s*-eq\s*0/,
     'catch block must check $LASTEXITCODE (optionally with $global: scope) -eq 0 to avoid DEP0169 false failures',
   );
@@ -176,9 +188,7 @@ test('Step 5 pins --store-dir + --package-import-method copy on Windows by defau
   // very same command works once those two flags are passed. Step 5 must inject
   // them on every Invoke-PnpmInstallWithCapturedOutput call when running on
   // Windows; non-Windows platforms must NOT see the extra flags.
-  const step5Block = installScript.match(/Write-Step "Step 5\/8[\s\S]*?Write-Step "Step 6\/8/);
-  assert.ok(step5Block, 'must find Step 5 install block');
-  const block = step5Block[0];
+  const block = getInstallDependenciesStepBlock();
   assert.match(block, /Windows_NT|IsWindows/, 'Step 5 must guard the extra args on a Windows-only condition');
   assert.match(block, /LOCALAPPDATA/, 'Step 5 must derive the store dir from %LOCALAPPDATA%');
   assert.match(block, /--store-dir/, 'Step 5 must pass --store-dir on the default install invocation');
@@ -205,22 +215,23 @@ test('Invoke-PnpmInstallWithCapturedOutput calls resolved pnpm directly inside t
   // (Invoke-Pnpm -> Invoke-ToolCommand -> & $toolCommand) hides the native exit
   // code from the captured pipeline. Fix: resolve pnpm up-front and invoke it
   // directly inside the captured pipeline (`& $pnpmCommand @CommandArgs 2>&1
-  // | Tee-Object ...`) so the native command is the only producer of
+  // | ForEach-Object ...`) so the native command is the only producer of
   // $LASTEXITCODE in scope.
   const body = getInvokePnpmInstallFunctionBody();
   assert.match(body, /Resolve-PnpmCommand/, 'must resolve pnpm command upfront (not via Invoke-Pnpm wrapper)');
   // The captured pipeline must invoke the resolved pnpm command directly with
   // `& $pnpmCommand`, NOT through the Invoke-Pnpm wrapper, so PowerShell can
-  // record the native exit code in $LASTEXITCODE reliably.
+  // record the native exit code in $LASTEXITCODE reliably. The pipeline may
+  // use either Tee-Object or ForEach-Object — both preserve $LASTEXITCODE.
   assert.match(
     body,
-    /&\s*\$pnpmCommand\s+@CommandArgs\s+2>&1\s*\|\s*Tee-Object/,
-    'captured pipeline must call & $pnpmCommand @CommandArgs 2>&1 | Tee-Object directly',
+    /&\s*\$pnpmCommand\s+@CommandArgs\s+2>&1\s*\|\s*(?:Tee-Object|ForEach-Object)/,
+    'captured pipeline must call & $pnpmCommand @CommandArgs 2>&1 | Tee-Object or ForEach-Object directly',
   );
   assert.doesNotMatch(
     body,
-    /Invoke-Pnpm\s+-CommandArgs\s+\$CommandArgs\s+2>&1\s*\|\s*Tee-Object/,
-    'must NOT pipe Invoke-Pnpm into Tee-Object (hides native exit code from caller scope)',
+    /Invoke-Pnpm\s+-CommandArgs\s+\$CommandArgs\s+2>&1\s*\|\s*(?:Tee-Object|ForEach-Object)/,
+    'must NOT pipe Invoke-Pnpm into Tee-Object/ForEach-Object (hides native exit code from caller scope)',
   );
 });
 
@@ -248,10 +259,19 @@ test('Invoke-PnpmInstallWithCapturedOutput reads $global:LASTEXITCODE explicitly
   assert.ok(successCheck, 'must have an Ok = $... -eq 0 check on the success path');
   assert.equal(successCheck[1], '$global:LASTEXITCODE', 'success path must read $global:LASTEXITCODE explicitly');
   // The catch path must also read $global:LASTEXITCODE for the same reason.
-  const catchBlock = body.match(/} catch \{[\s\S]*?\}\s*\}\s*finally/);
-  assert.ok(catchBlock, 'must have catch block');
+  // Anchor to the pnpm pipeline catch block using the "Two distinct scenarios"
+  // comment, then extract the block between the catch and its following finally.
+  const scenariosIdx = body.indexOf('Two distinct scenarios');
+  assert.ok(scenariosIdx >= 0, 'must have DEP0169 tolerance catch block with "Two distinct scenarios" comment');
+  const beforeComment = body.substring(0, scenariosIdx);
+  const catchIdx = beforeComment.lastIndexOf('} catch {');
+  assert.ok(catchIdx >= 0, 'must have catch block before "Two distinct scenarios" comment');
+  const fromCatch = body.substring(catchIdx);
+  const finallyIdx = fromCatch.indexOf('} finally {');
+  assert.ok(finallyIdx >= 0, 'catch block must be followed by } finally {');
+  const catchBlock = fromCatch.substring(0, finallyIdx);
   assert.match(
-    catchBlock[0],
+    catchBlock,
     /\$global:LASTEXITCODE\s*-eq\s*0/,
     'catch path must read $global:LASTEXITCODE explicitly to detect pnpm success-with-pipeline-throw',
   );
@@ -261,7 +281,7 @@ test('Invoke-PnpmInstallWithCapturedOutput temporarily downgrades ErrorActionPre
   const body = getInvokePnpmInstallFunctionBody();
   const snapshotIdx = body.indexOf('$previousErrorActionPreference = $ErrorActionPreference');
   const downgradeIdx = body.indexOf('$ErrorActionPreference = "SilentlyContinue"');
-  const invokeMatch = body.match(/&\s*\$pnpmCommand\s+@CommandArgs\s+2>&1\s*\|\s*Tee-Object/);
+  const invokeMatch = body.match(/&\s*\$pnpmCommand\s+@CommandArgs\s+2>&1\s*\|\s*(?:Tee-Object|ForEach-Object)/);
   const invokeIdx = invokeMatch ? invokeMatch.index : -1;
   const finallyIdx = body.indexOf('} finally {');
   const restoreIdx = body.indexOf('$ErrorActionPreference = $previousErrorActionPreference');

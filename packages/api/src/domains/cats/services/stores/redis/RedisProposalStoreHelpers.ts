@@ -3,7 +3,7 @@
  * Split out of RedisProposalStore.ts to keep both files under the 350-line hard limit (AC-X1).
  */
 
-import type { CatId, ProposalApproveOverrides, ProposalStatus, ThreadProposal } from '@cat-cafe/shared';
+import type { CatId, ProposalApproveOverrides, ProposalStatus, ReportingMode, ThreadProposal } from '@cat-cafe/shared';
 import type { FinalizeApprovalInput } from '../ports/ProposalStore.js';
 
 /**
@@ -45,11 +45,11 @@ end
 return 1
 `;
 
-/** Conditional HSET: write createdThreadId only if proposal status is still 'approving'. */
+/** Conditional HSET: write createdThreadId + checkpoint fields only if status is still 'approving'. */
 export const RECORD_CREATED_THREAD_LUA = `
 local current = redis.call('HGET', KEYS[1], 'status')
 if current == 'approving' then
-  redis.call('HSET', KEYS[1], 'createdThreadId', ARGV[1])
+  redis.call('HSET', KEYS[1], unpack(ARGV))
 end
 return 1
 `;
@@ -83,6 +83,7 @@ export function serializeProposal(proposal: ThreadProposal): string[] {
   ];
   if (proposal.initialMessage) fields.push('initialMessage', proposal.initialMessage);
   if (proposal.cardMessageId) fields.push('cardMessageId', proposal.cardMessageId);
+  if (proposal.reportingMode) fields.push('reportingMode', proposal.reportingMode);
   return fields;
 }
 
@@ -104,6 +105,7 @@ export function hydrateProposal(data: Record<string, string>): ThreadProposal {
     createdAt: parseInt(data.createdAt!, 10),
   };
   if (initialMessage) proposal.initialMessage = initialMessage;
+  if (data.reportingMode) proposal.reportingMode = data.reportingMode as ReportingMode;
   if (data.approvedBy) proposal.approvedBy = data.approvedBy;
   if (data.approvedAt) proposal.approvedAt = parseInt(data.approvedAt, 10);
   if (data.createdThreadId) proposal.createdThreadId = data.createdThreadId;
@@ -132,6 +134,8 @@ export function applyOverrides(proposal: ThreadProposal, overrides: ProposalAppr
   if (overrides.title !== undefined) proposal.title = overrides.title;
   if (overrides.parentThreadId !== undefined) proposal.parentThreadId = overrides.parentThreadId;
   if (overrides.preferredCats !== undefined) proposal.preferredCats = [...overrides.preferredCats];
+  if (overrides.projectPath !== undefined) proposal.projectPath = overrides.projectPath;
+  if (overrides.reportingMode !== undefined) proposal.reportingMode = overrides.reportingMode;
   if (overrides.initialMessage === null) delete proposal.initialMessage;
   else if (typeof overrides.initialMessage === 'string') proposal.initialMessage = overrides.initialMessage;
 }

@@ -119,9 +119,31 @@ describe('services routes', () => {
 
       assert.equal(res.statusCode, 200, res.payload);
       const payload = JSON.parse(res.payload);
-      assert.equal(Object.keys(payload.endpoints).length, 6);
+      assert.equal(Object.keys(payload.endpoints).length, 5);
       assert.equal(payload.endpoints['whisper-stt'], 'http://127.0.0.1:19999/healthy');
       assert.equal(payload.endpoints['mlx-tts'], 'http://127.0.0.1:19998/unhealthy');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('serves the offline install guide as checked-in HTML', async () => {
+    const app = await buildApp();
+    try {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/services/docs/offline-install',
+      });
+
+      assert.equal(res.statusCode, 200, res.payload);
+      assert.match(res.headers['content-type'], /^text\/html/);
+      assert.match(res.payload, /服务离线\/受限网络安装指南/);
+      assert.doesNotMatch(res.payload, /--local-dir/);
+      assert.match(res.payload, /HF_HOME/);
+      assert.doesNotMatch(res.payload, /~\/\.cat-cafe\/piper-models/);
+      assert.match(res.payload, /CAT_CAFE_HOME[\s\S]*piper-models/);
+      assert.doesNotMatch(res.payload, /download-source-overrides\.ps1/);
+      assert.match(res.payload, /start-windows\.ps1/);
     } finally {
       await app.close();
     }
@@ -347,7 +369,6 @@ describe('services routes', () => {
       assert.equal(res.statusCode, 200, res.payload);
       assert.deepEqual(JSON.parse(res.payload).endpoints, {
         'whisper-stt': 'http://127.0.0.1:19981',
-        'qwen3-asr': 'http://127.0.0.1:19981',
         'mlx-tts': 'http://127.0.0.1:19982',
         'embedding-model': 'http://127.0.0.1:19983',
         'llm-postprocess': 'http://127.0.0.1:19984',

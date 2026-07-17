@@ -6,7 +6,15 @@
  * ID 使用 generateSortableId 保证天然有序。
  */
 
-import type { AutomationState, CreateTaskInput, TaskItem, TaskKind, UpdateTaskInput } from '@cat-cafe/shared';
+import type {
+  AutomationState,
+  CreateTaskInput,
+  IssueAutomationState,
+  TaskItem,
+  TaskKind,
+  UpdateTaskInput,
+} from '@cat-cafe/shared';
+import { isTrackingKind } from '@cat-cafe/shared';
 import { generateSortableId } from './MessageStore.js';
 
 const MAX_TASKS = 500;
@@ -46,6 +54,22 @@ export function isSubjectOwnershipConflictError(
   );
 }
 
+export function assertSubjectUpdateOwnership(
+  subjectKey: string,
+  existing: Pick<TaskItem, 'threadId' | 'userId'>,
+  input: Pick<CreateTaskInput, 'threadId' | 'userId'>,
+): void {
+  if (existing.userId && input.userId && existing.userId === input.userId) return;
+  if (!existing.userId && input.userId && existing.threadId === input.threadId) return;
+  if (!existing.userId && !input.userId) return;
+
+  throw createSubjectOwnershipConflict(
+    subjectKey,
+    existing.userId ?? `thread:${existing.threadId}`,
+    input.userId ?? `thread:${input.threadId}`,
+  );
+}
+
 /**
  * Common interface for task stores (in-memory and Redis).
  * #320: Extended with kind/subject-based queries for unified PR tracking.
@@ -54,6 +78,12 @@ export interface ITaskStore {
   create(input: CreateTaskInput): TaskItem | Promise<TaskItem>;
   get(taskId: string): TaskItem | null | Promise<TaskItem | null>;
   update(taskId: string, input: UpdateTaskInput): TaskItem | null | Promise<TaskItem | null>;
+  /** Conditionally update only when the task still belongs to the expected thread. */
+  updateIfThreadId(
+    taskId: string,
+    expectedThreadId: string,
+    input: UpdateTaskInput,
+  ): TaskItem | null | Promise<TaskItem | null>;
   listByThread(threadId: string): TaskItem[] | Promise<TaskItem[]>;
   delete(taskId: string): boolean | Promise<boolean>;
   /** Delete all tasks in a thread (cascade delete support) */
@@ -106,6 +136,12 @@ export class TaskStore implements ITaskStore {
       updatedAt: now,
       automationState: input.automationState,
       userId: input.userId,
+      probe: input.probe,
+      resolveMode: input.resolveMode,
+      // F193 Phase E (dispatch gate)
+      ...(input.relatedFeatureId ? { relatedFeatureId: input.relatedFeatureId } : {}),
+      ...(input.detectedFeatureIds?.length ? { detectedFeatureIds: input.detectedFeatureIds } : {}),
+      ...(input.dispatchGate ? { dispatchGate: input.dispatchGate } : {}),
     };
 
     this.tasks.set(task.id, task);
@@ -133,18 +169,20 @@ export class TaskStore implements ITaskStore {
     if (existingId) {
       const existing = this.tasks.get(existingId);
       if (existing) {
-        if (existing.userId && input.userId && existing.userId !== input.userId) {
-          throw createSubjectOwnershipConflict(sk, existing.userId, input.userId);
-        }
+        assertSubjectUpdateOwnership(sk, existing, input);
         const updated: TaskItem = {
           ...existing,
           threadId: input.threadId,
           title: input.title,
           ownerCatId: input.ownerCatId ?? existing.ownerCatId,
-          status: existing.kind === 'pr_tracking' && existing.status === 'done' ? 'todo' : existing.status,
+          status: isTrackingKind(existing.kind) && existing.status === 'done' ? 'todo' : existing.status,
           why: input.why,
           userId: input.userId ?? existing.userId,
-          automationState: input.automationState ?? existing.automationState,
+          probe: input.probe !== undefined ? input.probe : existing.probe,
+          resolveMode: input.resolveMode !== undefined ? input.resolveMode : existing.resolveMode,
+          automationState: input.automationState
+            ? this.mergeAutomationState(existing.automationState, input.automationState)
+            : existing.automationState,
           updatedAt: Date.now(),
         };
         this.tasks.set(existingId, updated);
@@ -170,25 +208,47 @@ export class TaskStore implements ITaskStore {
     const existing = this.tasks.get(taskId);
     if (!existing) return null;
 
-    const merged: AutomationState = {
-      ...existing.automationState,
-      ...patch,
-      ci: patch.ci ? { ...existing.automationState?.ci, ...patch.ci } : existing.automationState?.ci,
-      conflict: patch.conflict
-        ? { ...existing.automationState?.conflict, ...patch.conflict }
-        : existing.automationState?.conflict,
-      review: patch.review
-        ? { ...existing.automationState?.review, ...patch.review }
-        : existing.automationState?.review,
-    };
-
     const updated: TaskItem = {
       ...existing,
-      automationState: merged,
+      automationState: this.mergeAutomationState(existing.automationState, patch),
       updatedAt: Date.now(),
     };
     this.tasks.set(taskId, updated);
     return updated;
+  }
+
+  /** Shallow-merge automation state preserving sub-object cursors (ci/review/conflict/issue). */
+  private mergeAutomationState(
+    existing: AutomationState | undefined,
+    patch: Partial<AutomationState>,
+  ): AutomationState {
+    return {
+      ...existing,
+      ...patch,
+      ci: patch.ci ? { ...existing?.ci, ...patch.ci } : existing?.ci,
+      conflict: patch.conflict ? { ...existing?.conflict, ...patch.conflict } : existing?.conflict,
+      review: patch.review ? { ...existing?.review, ...patch.review } : existing?.review,
+      issue: patch.issue ? this.mergeIssueAutomationState(existing?.issue, patch.issue) : existing?.issue,
+    };
+  }
+
+  /** Merge issue automation state using Math.max for cursor fields to prevent stale re-seeds from lowering cursors. */
+  private mergeIssueAutomationState(
+    existing: IssueAutomationState | undefined,
+    patch: IssueAutomationState,
+  ): IssueAutomationState {
+    const merged: IssueAutomationState = { ...existing, ...patch };
+    return {
+      ...merged,
+      lastCommentCursor:
+        existing?.lastCommentCursor !== undefined && patch.lastCommentCursor !== undefined
+          ? Math.max(existing.lastCommentCursor, patch.lastCommentCursor)
+          : merged.lastCommentCursor,
+      lastDeliveredCursor:
+        existing?.lastDeliveredCursor !== undefined && patch.lastDeliveredCursor !== undefined
+          ? Math.max(existing.lastDeliveredCursor, patch.lastDeliveredCursor)
+          : merged.lastDeliveredCursor,
+    };
   }
 
   update(taskId: string, input: UpdateTaskInput): TaskItem | null {
@@ -202,11 +262,24 @@ export class TaskStore implements ITaskStore {
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.why !== undefined ? { why: input.why } : {}),
       ...(input.automationState !== undefined ? { automationState: input.automationState } : {}),
+      ...(input.probe !== undefined ? { probe: input.probe } : {}),
+      ...(input.resolveMode !== undefined ? { resolveMode: input.resolveMode } : {}),
+      // Generic task move support: callers that change threadId own the UX contract.
+      ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      // F193-E1 P1-4: allow patching dispatchGate
+      ...(input.dispatchGate !== undefined ? { dispatchGate: input.dispatchGate } : {}),
       updatedAt: Date.now(),
     };
 
     this.tasks.set(taskId, updated);
     return updated;
+  }
+
+  updateIfThreadId(taskId: string, expectedThreadId: string, input: UpdateTaskInput): TaskItem | null {
+    const existing = this.tasks.get(taskId);
+    if (!existing) return null;
+    if (existing.threadId !== expectedThreadId) return null;
+    return this.update(taskId, input);
   }
 
   listByThread(threadId: string): TaskItem[] {
@@ -270,6 +343,6 @@ export class TaskStore implements ITaskStore {
   }
 
   private isProtectedFromFallbackEviction(task: TaskItem): boolean {
-    return task.kind === 'pr_tracking' && task.status !== 'done';
+    return isTrackingKind(task.kind) && task.status !== 'done';
   }
 }

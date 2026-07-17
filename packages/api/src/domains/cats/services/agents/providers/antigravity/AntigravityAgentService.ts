@@ -51,7 +51,13 @@ import {
   prependAntigravityContinuityControlBlock,
 } from './antigravity-continuity-bootstrap.js';
 import type { UpstreamErrorKind } from './antigravity-event-transformer.js';
-import { classifyStep, humanErrorMessage, transformTrajectorySteps } from './antigravity-event-transformer.js';
+import {
+  classifyStep,
+  deferralNearMissSignal,
+  humanErrorMessage,
+  isDeferredProgressOnlyTerminal,
+  transformTrajectorySteps,
+} from './antigravity-event-transformer.js';
 import {
   collectImagePathsFromSteps,
   publishAntigravityImages,
@@ -76,6 +82,7 @@ import {
   buildAntigravitySessionLifecycle,
 } from './antigravity-runtime-lifecycle.js';
 import { classifyAntigravityStepEffect, summarizeAntigravityEffects } from './antigravity-step-effects.js';
+import { isLsOwnedApprovalTool } from './antigravity-tool-surface.js';
 import { summarizeStepShape, TRACE_ENABLED, traceLog } from './antigravity-trace.js';
 import { AuditLogger } from './executors/AuditLogger.js';
 import { ExecutorRegistry } from './executors/ExecutorRegistry.js';
@@ -86,6 +93,13 @@ import { isReadOnlyRunCommand, RunCommandExecutor } from './executors/RunCommand
 const log = createModuleLogger('antigravity-service');
 const STREAM_ERROR_GRACE_WINDOW_MS = 4_500;
 const STALL_PROBE_MAX_ATTEMPTS = 2;
+// F211 REG-followup: when the terminal planner text only ANNOUNCES a deliverable
+// without delivering it, nudge once for the real answer; cap at one nudge per
+// invocation so a persistently-deferring model surfaces incomplete_response
+// instead of looping (preserves REG12 termination — never stalls).
+const DEFERRED_TERMINAL_NUDGE_MAX_ATTEMPTS = 1;
+const DEFERRED_TERMINAL_NUDGE_PROMPT =
+  '请直接输出最终答案，不要只描述下一步要做什么。如果还需要更多步骤，请现在就执行并给出结果。';
 const DEFAULT_AUTO_RESUME_MAX_ATTEMPTS = 1;
 const DEFAULT_MODEL_CAPACITY_RETRY_DELAYS_MS = [1_000, 3_000, 5_000, 10_000, 15_000, 20_000, 30_000, 36_000];
 
@@ -135,16 +149,30 @@ function sanitizeAutoResumeMaxAttempts(value?: number): number {
   return Math.max(0, Math.floor(value));
 }
 
-function hasTerminalPlannerText(steps: readonly TrajectoryStep[]): boolean {
-  return steps.some((step) => {
-    if (step.type !== 'CORTEX_STEP_TYPE_PLANNER_RESPONSE') return false;
+/**
+ * The LAST non-empty terminal planner text in a batch (the model's final answer),
+ * or null if none. The last qualifying step wins so a multi-planner batch reports
+ * the most recent terminal text. Used both for terminal-text presence and for the
+ * F211 REG-followup deferred/progress-only detection (isDeferredProgressOnlyTerminal).
+ */
+function extractTerminalPlannerText(steps: readonly TrajectoryStep[]): string | null {
+  let result: string | null = null;
+  for (const step of steps) {
+    if (step.type !== 'CORTEX_STEP_TYPE_PLANNER_RESPONSE') continue;
     if (step.status !== 'CORTEX_STEP_STATUS_DONE' && step.status !== 'FINISHED' && step.status !== 'DONE') {
-      return false;
+      continue;
     }
-    if (step.plannerResponse?.stopReason === 'STOP_REASON_CLIENT_STREAM_ERROR') return false;
-    const text = step.plannerResponse?.modifiedResponse ?? step.plannerResponse?.response;
-    return typeof text === 'string' && text.trim() !== '';
-  });
+    if (step.plannerResponse?.stopReason === 'STOP_REASON_CLIENT_STREAM_ERROR') continue;
+    // `||` (not `??`): a blank modifiedResponse must fall through to response, matching
+    // the transformer's displayed `modifiedResponse || response` (#2558).
+    const text = step.plannerResponse?.modifiedResponse || step.plannerResponse?.response;
+    if (typeof text === 'string' && text.trim() !== '') result = text;
+  }
+  return result;
+}
+
+function hasTerminalPlannerText(steps: readonly TrajectoryStep[]): boolean {
+  return extractTerminalPlannerText(steps) !== null;
 }
 
 function isAssistantPrefillTailError(rawError: string): boolean {
@@ -222,7 +250,7 @@ function buildAntigravityResumeProbes(input: {
 }
 
 function buildSafeAutoResumePrompt(originalPrompt: string, resumeContext: AntigravityResumeContext): string {
-  return `${originalPrompt}\n\n---\n\n[Cat Cafe Antigravity safe auto-resume]\nThe previous Antigravity cascade was interrupted. Continue the same user request in this fresh cascade.\nDo not repeat completed side effects. Use the resumeContext JSON below as the source of truth for completed and pending effects.\n\nresumeContext:\n${JSON.stringify(resumeContext, null, 2)}`;
+  return `${originalPrompt}\n\n---\n\n[Clowder AI Antigravity safe auto-resume]\nThe previous Antigravity cascade was interrupted. Continue the same user request in this fresh cascade.\nDo not repeat completed side effects. Use the resumeContext JSON below as the source of truth for completed and pending effects.\n\nresumeContext:\n${JSON.stringify(resumeContext, null, 2)}`;
 }
 
 function buildRetrySignal(
@@ -274,13 +302,33 @@ function detectStallLivenessFromTrajectory(
   return null;
 }
 
-function getWaitingCodeActionStepFromTrajectory(trajectory: StallTrajectorySnapshot): TrajectoryStep | undefined {
+function getTrajectoryStepsFromSnapshot(trajectory: StallTrajectorySnapshot): readonly TrajectoryStep[] {
   let steps: readonly TrajectoryStep[] = [];
   if (trajectory.trajectory?.steps) {
     steps = trajectory.trajectory.steps;
   } else if (trajectory.steps) {
     steps = trajectory.steps;
   }
+  return steps;
+}
+
+function getWaitingCodeActionStepsFromTrajectory(trajectory: StallTrajectorySnapshot): TrajectoryStep[] {
+  const steps = getTrajectoryStepsFromSnapshot(trajectory);
+  const waitingSteps: TrajectoryStep[] = [];
+  for (const step of steps) {
+    if (
+      step.type === 'CORTEX_STEP_TYPE_CODE_ACTION' &&
+      step.status === 'CORTEX_STEP_STATUS_WAITING' &&
+      isLsOwnedApprovalTool(getTrajectoryStepToolName(step))
+    ) {
+      waitingSteps.push(step);
+    }
+  }
+  return waitingSteps;
+}
+
+function getWaitingCodeActionStepFromTrajectory(trajectory: StallTrajectorySnapshot): TrajectoryStep | undefined {
+  const steps = getTrajectoryStepsFromSnapshot(trajectory);
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const step = steps[index];
     if (step.type === 'CORTEX_STEP_TYPE_CODE_ACTION' && step.status === 'CORTEX_STEP_STATUS_WAITING') {
@@ -328,7 +376,7 @@ function buildCallbackFallbackInstructions(callbackEnv?: Record<string, string>)
   const catId = callbackEnv?.CAT_CAFE_CAT_ID?.trim() ?? 'antig-opus';
   if (!apiUrl || !invocationId || !callbackToken) return '';
 
-  return `\n[Cat Cafe callback fallback]\n如果当前环境已挂载只读 Cat Cafe MCP（常见为 search_evidence / graph_resolve / list_recent / session-chain / signals），这些读工具可直接使用。共享 Antigravity MCP 的 agent-key 工具（post_message / get_thread_context / list_threads / cross_post_message；如挂了 cat-cafe-limb，limb_* 也同理）必须带 agentKeyCatId="${catId}"，这样 Gemini/Claude variant 会使用各自身份的 sidecar key。当前 invocation / thread 的写回凭证也可通过 run_command 调 HTTP callback。\n- 当前 thread 上下文: curl -fsS "${apiUrl}/api/callbacks/thread-context?invocationId=${invocationId}&callbackToken=${callbackToken}&limit=20"\n- 带关键词过滤: curl -fsS "${apiUrl}/api/callbacks/thread-context?invocationId=${invocationId}&callbackToken=${callbackToken}&keyword=review"\n- 发消息回当前 thread: curl -fsS -X POST "${apiUrl}/api/callbacks/post-message" -H 'Content-Type: application/json' -d '{"invocationId":"${invocationId}","callbackToken":"${callbackToken}","content":"<message>"}'\n- 完整文档（public / static，无需凭证）: curl -fsS "${apiUrl}/api/callbacks/instructions"\n\n[Cold-start onboarding — 新 cascade 必读]\nAntigravity 持久 cascade 累积过多 step 时（>200）会因 context 撑爆产生 empty PLANNER_RESPONSE，这时铲屎官可能让你 New Cascade 重启。**新 cascade 是 fresh state，你之前的工作记忆会丢**。第一次回应铲屎官前，**先把上下文找回来**——只需要用 readonly MCP 白名单里的工具，不依赖任何 callback 凭证。当前 thread / cat 已经在 prompt 里给你了：threadId="${threadId ?? ''}", catId="${catId}"，照搬即可。\n1. **读上几次 session 的工作记忆**：cat_cafe_list_session_chain({ threadId: "${threadId ?? ''}", catId: "${catId}", limit: 5 }) 拿到最近 session 列表 → 对最近的 1-2 个 sessionId 调 cat_cafe_read_session_digest({ sessionId }) 看你之前在做什么、卡在哪、已交付什么。这是最浓缩的"自己脑子里的活"摘要。\n2. **找当前 feature 文档**：从 session digest 里能抠出 feature ID（F0xx）或关键词，cat_cafe_search_evidence({ query: "<feature ID 或关键词>", scope: "docs", mode: "hybrid" }) 拿真相源（spec / 决策 / lessons）。\n3. **如需更细的工作过程证据**：cat_cafe_read_session_events({ sessionId, limit: 50 }) 看单个 session 内具体调了哪些工具、产生了哪些消息。\n4. 把"我是 Bengal Cat 孟加拉猫，刚被 New Cascade 重启，读了 session chain 最近 X 个 digest，理解了上下文是 ___，正在做的是 ___，准备继续 ___"作为开场白回给铲屎官，让他看到你已经找回记忆。\n这一套约 2-4 次 tool 调用，比让铲屎官手把手 onboard 快得多。所有用到的工具（list_session_chain / read_session_digest / read_session_events / search_evidence）都在 readonly MCP 白名单，无需 callback 凭证、无 UI 审批。\n\n[F061 Bug-F workaround — shell exec via MCP]\n当 Antigravity UI permission gate 拦截 pwd / git 等只读命令时（user denied permission），优先用 MCP 工具 cat_cafe_shell_exec 代替 cascade run_command。cat_cafe_shell_exec 走 MCP stdio，不经 cascade UI gate。**只读命令白名单（严格）**：pwd / ls / cat / git log|status|rev-parse|diff|show。**路径参数必须在 ALLOWED_WORKSPACE_DIRS 范围内**（和 file-tools 同边界）。**默认 cwd 自动指向 workspace 根目录**（ALLOWED_WORKSPACE_DIRS 第一项），所以**不传 cwd 参数也能直接跑**——例如 cat_cafe_shell_exec({ commandLine: "git log --oneline -3" }) 立即返回结果，无需手动指定 cwd。**不在 whitelist 的工具**（curl / mkdir / git worktree / git checkout / npm install 等）不要走 cat_cafe_shell_exec；请走 cascade run_command。Cat Cafe 会对 run_command 做 YOLO native execution + tool-result writeback（仍硬拒绝 Redis 6399、recursive root delete、fork bomb 等危险命令），不依赖铲屎官在 Antigravity UI 点 approval。注意：thread-context / post-message / instructions 这些 HTTP callback 仍必须用 curl via cascade run_command，不走 cat_cafe_shell_exec。`;
+  return `\n[Clowder AI callback fallback]\n如果当前环境已挂载只读 Clowder AI MCP（常见为 search_evidence / graph_resolve / list_recent / session-chain / signals），这些读工具可直接使用。共享 Antigravity MCP 的 agent-key 工具（post_message / get_thread_context / list_threads / cross_post_message；如挂了 cat-cafe-limb，limb_* 也同理）必须带 agentKeyCatId="${catId}"，这样 Gemini/Claude variant 会使用各自身份的 sidecar key。当前 invocation / thread 的写回凭证也可通过 run_command 调 HTTP callback。\n- 当前 thread 上下文: curl -fsS "${apiUrl}/api/callbacks/thread-context?invocationId=${invocationId}&callbackToken=${callbackToken}&limit=20"\n- 带关键词过滤: curl -fsS "${apiUrl}/api/callbacks/thread-context?invocationId=${invocationId}&callbackToken=${callbackToken}&keyword=review"\n- 发消息回当前 thread: curl -fsS -X POST "${apiUrl}/api/callbacks/post-message" -H 'Content-Type: application/json' -d '{"invocationId":"${invocationId}","callbackToken":"${callbackToken}","content":"<message>"}'\n- 完整文档（public / static，无需凭证）: curl -fsS "${apiUrl}/api/callbacks/instructions"\n\n[Cold-start onboarding — 新 cascade 必读]\nAntigravity 持久 cascade 累积过多 step 时（>200）会因 context 撑爆产生 empty PLANNER_RESPONSE，这时co-creator可能让你 New Cascade 重启。**新 cascade 是 fresh state，你之前的工作记忆会丢**。第一次回应co-creator前，**先把上下文找回来**——只需要用 readonly MCP 白名单里的工具，不依赖任何 callback 凭证。当前 thread / cat 已经在 prompt 里给你了：threadId="${threadId ?? ''}", catId="${catId}"，照搬即可。\n1. **读上几次 session 的工作记忆**：cat_cafe_list_session_chain({ threadId: "${threadId ?? ''}", catId: "${catId}", limit: 5 }) 拿到最近 session 列表 → 对最近的 1-2 个 sessionId 调 cat_cafe_read_session_digest({ sessionId }) 看你之前在做什么、卡在哪、已交付什么。这是最浓缩的"自己脑子里的活"摘要。\n2. **找当前 feature 文档**：从 session digest 里能抠出 feature ID（F0xx）或关键词，cat_cafe_search_evidence({ query: "<feature ID 或关键词>", scope: "docs", mode: "hybrid" }) 拿真相源（spec / 决策 / lessons）。\n3. **如需更细的工作过程证据**：cat_cafe_read_session_events({ sessionId, limit: 50 }) 看单个 session 内具体调了哪些工具、产生了哪些消息。\n4. 把"我是 Bengal Cat 孟加拉猫，刚被 New Cascade 重启，读了 session chain 最近 X 个 digest，理解了上下文是 ___，正在做的是 ___，准备继续 ___"作为开场白回给co-creator，让他看到你已经找回记忆。\n这一套约 2-4 次 tool 调用，比让co-creator手把手 onboard 快得多。所有用到的工具（list_session_chain / read_session_digest / read_session_events / search_evidence）都在 readonly MCP 白名单，无需 callback 凭证、无 UI 审批。\n\n[F061 Bug-F workaround — shell exec via MCP]\n当 Antigravity UI permission gate 拦截 pwd / git 等只读命令时（user denied permission），优先用 MCP 工具 cat_cafe_shell_exec 代替 cascade run_command。cat_cafe_shell_exec 走 MCP stdio，不经 cascade UI gate。**只读命令白名单（严格）**：pwd / ls / cat / git log|status|rev-parse|diff|show。**路径参数必须在 ALLOWED_WORKSPACE_DIRS 范围内**（和 file-tools 同边界）。**默认 cwd 自动指向 workspace 根目录**（ALLOWED_WORKSPACE_DIRS 第一项），所以**不传 cwd 参数也能直接跑**——例如 cat_cafe_shell_exec({ commandLine: "git log --oneline -3" }) 立即返回结果，无需手动指定 cwd。**不在 whitelist 的工具**（curl / mkdir / git worktree / git checkout / npm install 等）不要走 cat_cafe_shell_exec；请走 cascade run_command。Clowder AI 会对 run_command 做 YOLO native execution + tool-result writeback（仍硬拒绝 Redis 6399、recursive root delete、fork bomb 等危险命令），不依赖co-creator在 Antigravity UI 点 approval。注意：thread-context / post-message / instructions 这些 HTTP callback 仍必须用 curl via cascade run_command，不走 cat_cafe_shell_exec。`;
 }
 
 export interface AntigravityAgentServiceOptions {
@@ -865,6 +913,9 @@ export class AntigravityAgentService implements AgentService {
       // first send so cascade retries / rotation continuations (which resend prompt text) don't
       // re-deliver the image bytes.
       let pendingMediaItems = imageMediaItems.length > 0 ? imageMediaItems : undefined;
+      // F211 REG-followup: invocation-scoped so the deferred-terminal nudge cap
+      // survives across the send/poll loop iterations (anti-loop: at most one nudge).
+      let deferredNudgeCount = 0;
       while (true) {
         // Abort check BEFORE send: getOrCreateSession's reuse wait (settleRunningCascadeForReuse) can
         // block while a busy cascade settles, so a follow-up may have been cancelled in the meantime —
@@ -894,12 +945,19 @@ export class AntigravityAgentService implements AgentService {
 
         let hasText = false;
         let hasTerminalText = false;
+        // F211 REG-followup: the LAST terminal planner text seen this turn, for
+        // deferred/progress-only detection at completion. The length is captured
+        // here (where it is provably a string) because TS's flow analysis pins the
+        // `let` to a non-string type at the post-loop completion block.
+        let terminalPlannerText: string | null = null;
+        let terminalPlannerTextLen = 0;
         let fatalSeen = false;
         let terminalAbort = false;
         let cursorAutoApproveAttempted = false;
         const autoApprovedPendingStepKeys = new Set<string>();
         const stallProbeBudget: StallProbeBudget = { attempts: 0, maxAttempts: STALL_PROBE_MAX_ATTEMPTS };
         let lastDelivered = stepsBefore;
+        let busyReuseFollowUpUserInputSeen = false;
         let attemptHasToolActivity = false;
         let attemptHasDispatchedToolResult = false;
         let attemptHasNativeDispatch = false;
@@ -1133,8 +1191,9 @@ export class AntigravityAgentService implements AgentService {
         const seenUnknownKeys = new Set<string>();
         const pollOnce = async function* (self: AntigravityAgentService, fromStep: number) {
           const iterator = self.bridge
-            // F211-REG8: only the FIRST poll (fromStep === the original stepsBefore) is the busy-reuse
-            // follow-up; re-polls advance fromStep and must use normal termination (no extra USER_INPUT wait).
+            // F211-REG8/REG14: busy-reuse follow-up waiting is an attempt-level state, not a
+            // single-iterator state. Stall/probe retries resume from lastDelivered, but they must
+            // continue waiting for the queued follow-up's USER_INPUT until this service observes it.
             // Keep the replay baseline pinned to the original send boundary so same-turn planner
             // mutations still replay after a stall/probe resumes from lastDelivered.
             .pollForSteps(
@@ -1143,7 +1202,7 @@ export class AntigravityAgentService implements AgentService {
               self.pollTimeoutMs,
               2_000,
               options?.signal,
-              wasBusy && fromStep === stepsBefore,
+              wasBusy && !busyReuseFollowUpUserInputSeen,
               stepsBefore,
             )
             [Symbol.asyncIterator]();
@@ -1247,6 +1306,60 @@ export class AntigravityAgentService implements AgentService {
               if (self.autoApprove && !cursorAutoApproveAttempted) {
                 cursorAutoApproveAttempted = true;
                 try {
+                  let waitingCodeActionSteps: TrajectoryStep[] = [];
+                  try {
+                    const trajectory = await self.bridge.getTrajectory(cascadeId);
+                    waitingCodeActionSteps = getWaitingCodeActionStepsFromTrajectory(trajectory);
+                  } catch (err) {
+                    log.warn(
+                      { cascadeId, err },
+                      'failed to inspect awaiting-user-input trajectory before generic auto-approve',
+                    );
+                  }
+                  if (waitingCodeActionSteps.length > 0) {
+                    let approvedCodeActionCount = 0;
+                    let failedCodeActionCount = 0;
+                    for (const waitingCodeActionStep of waitingCodeActionSteps) {
+                      const stepIndex = getTrajectoryStepIndex(waitingCodeActionStep);
+                      let toolName = getTrajectoryStepToolName(waitingCodeActionStep);
+                      if (!toolName) toolName = waitingCodeActionStep.type;
+                      const approved = await self.bridge
+                        .approvePendingInteraction(cascadeId, waitingCodeActionStep)
+                        .then(
+                          () => {
+                            log.info(
+                              { cascadeId, toolName, stepIndex },
+                              'auto-approved pending CODE_ACTION interaction from awaiting-user-input trajectory',
+                            );
+                            return true;
+                          },
+                          (err) => {
+                            log.warn(
+                              { cascadeId, toolName, stepIndex, err },
+                              'failed to auto-approve pending CODE_ACTION interaction; continuing',
+                            );
+                            return false;
+                          },
+                        );
+                      if (approved) approvedCodeActionCount += 1;
+                      else failedCodeActionCount += 1;
+                    }
+                    if (approvedCodeActionCount > 0) {
+                      if (failedCodeActionCount > 0) {
+                        log.warn(
+                          { cascadeId, approvedCodeActionCount, failedCodeActionCount },
+                          'some pending CODE_ACTION auto-approvals failed after successful approvals',
+                        );
+                      }
+                      continue;
+                    }
+                    if (failedCodeActionCount > 0) {
+                      log.warn(
+                        { cascadeId, failedCodeActionCount },
+                        'all pending CODE_ACTION auto-approvals failed; falling back to generic auto-approve',
+                      );
+                    }
+                  }
                   await self.bridge.resolveOutstandingSteps(cascadeId);
                   log.info(`auto-approved pending interaction for cascade ${cascadeId}`);
                   continue;
@@ -1283,6 +1396,13 @@ export class AntigravityAgentService implements AgentService {
                   seenUnknownKeys.add(unknownKey);
                   log.info('unknown step type %s (status=%s) in cascade %s', step.type, step.status, cascadeId);
                 }
+              }
+              if (
+                wasBusy &&
+                !busyReuseFollowUpUserInputSeen &&
+                batch.steps.some((step) => step.type === 'CORTEX_STEP_TYPE_USER_INPUT')
+              ) {
+                busyReuseFollowUpUserInputSeen = true;
               }
 
               const messages = transformTrajectorySteps(batch.steps, self.catId, metadata);
@@ -1621,6 +1741,24 @@ export class AntigravityAgentService implements AgentService {
                   terminalAbort = true;
                   const errorMetadata = msg.metadata ?? metadata;
                   await flushSideEffectJournalAudit();
+                  const transientRetrySuppressedBy =
+                    transientRecoveryDecision?.action === 'surface_terminal_error'
+                      ? transientRecoveryDecision.reason
+                      : batchHasResolvedToolishStep || attemptHasResolvedToolishStep
+                        ? 'resolved_toolish_step_seen'
+                        : attemptHasNativeDispatch
+                          ? 'native_dispatch_seen'
+                          : (attemptHasToolActivity || batchHasToolActivity) &&
+                              !toolishRetryEligible &&
+                              !readOnlyToolActivityRetryEligible
+                            ? 'tool_activity_seen'
+                            : batchHasDispatchRelevantStep && !toolishRetryEligible
+                              ? 'toolish_step_present'
+                              : batchHasUpstreamError
+                                ? 'cooccurring_upstream_error'
+                                : capacityRetryCount >= self.modelCapacityRetryDelaysMs.length
+                                  ? 'retry_budget_exhausted'
+                                  : 'terminal_policy';
                   // This branch is exactly the ambiguity we are debugging:
                   // the model has surfaced a capacity error, but we also saw a
                   // tool-ish step in the same batch, so automatic retry is
@@ -1634,20 +1772,7 @@ export class AntigravityAgentService implements AgentService {
                         ...buildBeforeDispatchDiagnostics('provider_capacity', {
                           retryEligible: false,
                           ...buildRecoveryDecisionDiagnostics(transientRecoveryDecision),
-                          retrySuppressedBy:
-                            batchHasResolvedToolishStep || attemptHasResolvedToolishStep
-                              ? 'resolved_toolish_step_seen'
-                              : attemptHasNativeDispatch
-                                ? 'native_dispatch_seen'
-                                : attemptHasToolActivity || batchHasToolActivity
-                                  ? 'tool_activity_seen'
-                                  : batchHasDispatchRelevantStep && !toolishRetryEligible
-                                    ? 'toolish_step_present'
-                                    : batchHasUpstreamError
-                                      ? 'cooccurring_upstream_error'
-                                      : capacityRetryCount >= self.modelCapacityRetryDelaysMs.length
-                                        ? 'retry_budget_exhausted'
-                                        : 'terminal_policy',
+                          retrySuppressedBy: transientRetrySuppressedBy,
                         }),
                         retryEligible: false,
                       },
@@ -1770,7 +1895,31 @@ export class AntigravityAgentService implements AgentService {
                 yield msg;
               }
 
-              if (batchHasTerminalPlannerText && !batchHasFatalError) hasTerminalText = true;
+              // F211 (#2558): capture the completed terminal-planner snapshot from ANY
+              // batch carrying it. The text can land on a non-terminal (still-RUNNING)
+              // batch while the cascade flips to IDLE as an empty terminal close, and the
+              // grow-in-place batch carries only a suffix delta in `steps` — so the
+              // bridge's full latest-planner snapshot (cursor.latestPlannerText) is the
+              // single source of truth, NOT gated on this batch being terminal. Covers
+              // both batch-boundary variants (cloud #2558 P1 rounds 1 & 3).
+              const plannerSnapshot = batch.cursor.latestPlannerText;
+              if (typeof plannerSnapshot === 'string' && plannerSnapshot.trim() !== '') {
+                terminalPlannerText = plannerSnapshot;
+                terminalPlannerTextLen = plannerSnapshot.length;
+              }
+              if (batchHasTerminalPlannerText && !batchHasFatalError) {
+                hasTerminalText = true;
+                // Fallback when no bridge snapshot is present (older path / partial test
+                // mocks): extract from the batch steps. This may be a suffix delta — the
+                // snapshot above is preferred precisely to avoid that.
+                if (terminalPlannerText === null) {
+                  const tt = extractTerminalPlannerText(batch.steps);
+                  if (tt) {
+                    terminalPlannerText = tt;
+                    terminalPlannerTextLen = tt.length;
+                  }
+                }
+              }
 
               if (modelCapacityRetryDelayMs != null) {
                 log.info(
@@ -2171,6 +2320,71 @@ export class AntigravityAgentService implements AgentService {
             metadata: { ...metadata, diagnostics },
             timestamp: Date.now(),
           };
+        }
+
+        // F211 REG-followup: a terminal planner response that only ANNOUNCES a
+        // deliverable ("让我整理分析。") without delivering it sets hasText=true, so
+        // the empty_response backstop above is skipped and the turn would finish
+        // SILENTLY on a half-thought. Detect that deferred shape and nudge ONCE in
+        // the SAME cascade for the real answer; if it persists, surface
+        // incomplete_response rather than completing silently. A terminal tail that
+        // LOOKS deferred but the predicate misses is logged as a near-miss
+        // (observability only — drives marker/verb iteration; it never nudges).
+        // F211 (#2558): gate on the captured planner snapshot itself, not on the
+        // text-bearing batch having been terminal — the terminal signal can arrive on a
+        // separate empty close batch (round 3). A non-null snapshot means a planner with
+        // displayable text was the latest output; clean termination (no fatal/abort) plus
+        // a deferred tail is the silent-failure shape to recover.
+        if (terminalPlannerText !== null && !fatalSeen && !terminalAbort && !sawImageOutput) {
+          if (isDeferredProgressOnlyTerminal(terminalPlannerText)) {
+            if (deferredNudgeCount < DEFERRED_TERMINAL_NUDGE_MAX_ATTEMPTS) {
+              deferredNudgeCount += 1;
+              log.info(
+                { cascadeId, deferredNudgeCount },
+                'deferred/progress-only terminal text — nudging once for the final answer',
+              );
+              // Follow-up on the SAME cascade (no rotation) so the model keeps its
+              // context; re-enter the send/poll loop with the nudge prompt. The deferred
+              // half-thought was already yielded as a text bubble, so flag the recovered
+              // answer with textMode:replace (the same guard retry recovery uses) — the
+              // route/queue aggregators append by default, and we want the answer to
+              // SUPERSEDE the half-thought, not trail it (cloud #2558 P2).
+              pendingTextReplace = true;
+              promptForCurrentCascade = DEFERRED_TERMINAL_NUDGE_PROMPT;
+              continue;
+            }
+            // Already nudged once and STILL deferred — do not finish silently.
+            const deferredDiagnostics = {
+              cascadeId,
+              deferredNudgeCount,
+              totalStepsSeen,
+              lastDelivered,
+              hasText,
+              terminalTextLen: terminalPlannerTextLen,
+            };
+            log.warn(
+              deferredDiagnostics,
+              'deferred/progress-only terminal text persisted after nudge — surfacing incomplete_response',
+            );
+            await flushSideEffectJournalAudit();
+            yield {
+              type: 'error',
+              catId: this.catId,
+              error: 'Antigravity terminal response only described the next step without delivering it',
+              errorCode: 'incomplete_response',
+              metadata: { ...metadata, diagnostics: deferredDiagnostics },
+              timestamp: Date.now(),
+            };
+          } else {
+            // Near-miss observability: structural shape only, never raw content.
+            const nearMiss = deferralNearMissSignal(terminalPlannerText);
+            if (nearMiss) {
+              log.info(
+                { cascadeId, ...nearMiss },
+                'deferred-terminal near-miss: future-action tail did not match the predicate (iteration signal)',
+              );
+            }
+          }
         }
 
         // F172 Phase C: publish any images found in tool results (legacy / future-proof path).

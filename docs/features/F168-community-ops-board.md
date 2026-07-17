@@ -4,24 +4,179 @@ related_features: [F141, F116, F140, F055, F122]
 topics: [community, orchestration, opensource]
 doc_kind: spec
 created: 2026-04-18
+tips_exempt: internal operations tool — board/reconciler/closure UX visible only to cat operators, not end users
 ---
 
 # F168: Community Operations Board — 社区事务编排引擎
 
-> **Status**: done | **Completed**: 2026-04-20 | **Owner**: Ragdoll | **Priority**: P1
+> **Status**: infra-complete / ops-gap 🚧 — 管道精密但没流水（2026-06-20 operator review 后重新定位）| **基础设施 A→E 全部 merged ✅** | **Phase F backend + backfill + board UX merged, opus-47 vision guards PASS ✅** | **运营闭环仍在推进 🚧**（端到端生产流未完成）| **Owner**: Ragdoll (opus-4.8) | **Priority**: P1
+
+## Reopen（2026-06-10，operator signoff）
+
+**为什么 reopen**：v1 看板上线后，运维实战暴露系统性缺口——webhook 事件与看板 dispatch 是两条互不回流的平行线、issue 追评无一等事件、closure 靠猫记性（积压 64 条未回复，2026-06-09 截图）。三猫独立思考收敛 + Maine Coon 4 P1 review 放行后，operator 批准以终态设计重构。
+
+**真相源链**：
+- 思考过程：`2026-06-09-community-ops-eventbus-retrospective.md`（运维Maine Coon）/ `2026-06-09-community-ops-multiagent-coordination-fable.md`（Ragdoll）
+- 实现依赖挂靠：F141（issue 生命周期事件）/ F140（PR 信号层复用）
+
+**分工（operator 拍板 2026-06-10，2026-06-14 / 2026-06-17 更新）**：Phase D/E 由Maine Coon（@codex）主导 spec/AC/failure-mode/gate；实现与 review 保持跨个体铁律（Maine Coon实现则 opus/gpt52/47 review，opus 实现则Maine Coon强 review）。Phase C 由 opus 家族接手并 closed。原分工 fable plan + sonnet 实现，实测效果不理想；fable-5 下线后 operator 确认由 opus 们全程接手 Phase C。
+
+**Phase 总览**：A 事件引擎 ✅ → B Issue Signals ✅ → C Narrator + Role Registry + 路由 ✅ → D Closure UX + Reconciler ✅ → E 看板决策队列 ✅ → **F 运营闭环上线 🚧 backend + backfill + board UX + vision guards PASS / e2e pending（2026-06-20 operator 发起）**。A→E = 基础设施全部就位；F = 把管道接上水，让 triage → 分配 → 工作 → 闭环真正在生产跑起来。原 v1 文档（下方）保留为历史语境。
+
+**Phase A 完成（2026-06-10）**：PR #2203，commit `10c3c9bfdb`，squash-merged。Event Log + 纯函数状态机 + CommunityProjector + bootstrap CLI + 3 入口接线 + PR lifecycle + 看板 API（向后兼容）。6 轮 cloud review 全修。Phase B 由 @fable5 规划。
+
+**Phase B PR-1 完成（2026-06-10）**：PR #2210，commit `757ef632f5`，squash-merged。活动信号事件类型（issue.commented / issue.labeled / pr.review_submitted / case.awaiting_external）shared types + webhook 三件套 + linked issue 解析器（parseLinkedIssues）+ projector cascade fix（pr.merged 时正确传播 linkedIssues → fixed）+ 体-enrichment 竞态修复（Cloud R4）+ default-branch gate（Cloud R4）+ projector 重试修复（Cloud R5/R6）。6 轮 cloud review 全修。PR-2（双 cursor + awaiting_external 闭环 + e2e）待续。
+
+**Phase B ✅ CLOSED（2026-06-12，fable-5 归档）**
+
+交付：三 PR（#2210/#2214/#2231 + #2232 sanctuary flag）全部 squash merge + 双轮愿景守护 PASS + LL-072 封板协议执行（21 轮 cloud review saga 收口）。**Task 0 ✅**：453 条 legacy records 迁入 Event Log（production，0 error）。**轮询链路验收 ✅**：test issue #912 → resolve → `case.routed` 自动注册 tracking（Task 5 生产首跑 ✓）→ comment → 轮询采集 → `issue.commented`（合成键 `comment:...#912:4695069413`）→ 投影 `lastExternalActivityAt` 更新 → delivery 决策 silent-log（OWNER 静默 = 设计行为）。
+
+**验收边界（如实记录）**：wake 分叉（外部用户评论 → wake-owner → thread 唤醒）未做生产实证——测试评论为 OWNER 身份走了 silent 分叉；wake 路径由 Redis e2e Chain B（CONTRIBUTOR → wake）+ IssueCommentRouter 机制数月生产运行覆盖。**外部用户下一条真实评论 = wake 生产首验**，届时在本 doc 补一行观察记录。
+
+**AC1 语义变更（operator 2026-06-12 20:03 签字）**：webhook 主路径 → **opt-in 加速器**；轮询为主路径（多租户零配置——开源用户 Mac+Tailscale 画像无公网域名，webhook 作为主路径违反"自用→开放"硬约束）。生产证据：clowder-ai 从无 repo webhook，F141 至今全部事件来自轮询（事件 log 零 webhook delivery 格式）。
+
+**遗留去向（全部有 owner，零悬空）**：
+- `threadStore` 未传 `communityIssueRoutes`（routeAccepted Path 2 静默退出，optional-dep 接线缺失第 4 次）→ **Phase C 前置修复项**（narrator 路由强依赖此路径）
+- repo 级 comment 轮询（`issues/comments?since=` 游标，灭未-routed 追评盲区）→ **Phase C plan**
+- optional-dep 接线缺失已四犯 → **Phase C 落硬层检查**（ADR-031：构造点传参 grep 守护测试）
+- narrator 排除存量（453 条 bootstrap case 不进 triage 队列，防 64+ 卡风暴）→ **Phase C plan 硬约束**
+- `GITHUB_WEBHOOK_SECRET` 已在 chat 暴露 → **待operator**：换新值或清空禁用（webhook 现为 opt-in 未启用，清空 = 攻击面归零）
+
+## Operational Gap Assessment（2026-06-20，operator review）
+
+> **背景**：A→E 基础设施全部 merged 并通过愿景守护，但operator在 operator review 中发现：管道精密但没流水。
+> **诊断来源**：Maine Coon运维回顾 `2026-06-09-community-ops-eventbus-retrospective.md` + operator 2026-06-10 原始 thread 投诉。
+
+### Maine Coon投诉的 7 个痛点 vs 当前状态
+
+operator在 reopen 时明确了 7 个痛点（来自对Maine Coon运维经验的观察）。这些才是 F168 reopen 的真正北极星：
+
+| # | 痛点 | Maine Coon原文/operator描述 | 当前状态 |
+|---|------|---------------------|----------|
+| 1 | **上下文污染** | 源 thread 混杂 N 条不相关 issue/PR，Maine Coon被迫在脑中维护多对象状态 | ❌ 有管道没流水——Role Registry + narrator 能把事务分发到独立 thread，但生产中 0 条 issue 被分配到工作 thread |
+| 2 | **源 thread 干太多** | 一个 thread 同时当 event inbox / router / evidence checker / operator translator / PR reviewer / downstream monitor / GitHub scribe / closure guard | ❌ 同上——NarratorDriver + TriageOrchestrator 代码就绪，但 narrator 从未在生产 triage 过一条 issue |
+| 3 | **过度验证（verification addiction）** | Maine Coon对每条 issue 做深度代码 review 级别的验证，inbox routing 的成本被拉到 maintainer brain 级别 | ❌ 设计上 narrator = 轻量 triage（不做深度 review），但 narrator 没跑过，Maine Coon仍在老模式 |
+| 4 | **PR 进行中不该管** | PR 分配到 thread 后应由 worker thread 全权管理生命周期，源 thread 不该反复过问进度 | ❌ worker thread 生命周期管理代码（closure checklist / reconciler）就绪，但没有 worker thread 被创建过 |
+| 5 | **operator 报告太技术** | operator收到的不是价值决策包（"这是个真 bug，建议路由到 F070"），而是工程噪声（"我检查了 governance-pack.ts..."） | ❌ Decision Queue 前端已上线，5 种决策类型已建模，但队列数据为空——没有 narrator 生产决策包 |
+| 6 | **追评无事件** | 外部用户在 issue 下追评后，系统没有事件驱动唤醒 owner thread | ✅ `issue.commented` 事件已上线（Phase B），轮询采集 + 事件投影 + wake 路径已验收 |
+| 7 | **闭环遗忘** | 代码修了但忘了回复 GitHub、忘了关 issue、忘了更新 label——下次全量同步时发现积压 | ❌ Closure checklist + reconciler + SLA dead-letter 全部就绪，但没有 worker thread 触发过 closure flow |
+
+**结论**：7 个痛点中，只有 #6（追评事件）真正在生产中运行。其余 6 个痛点的**基础设施全部就位**，但**运营闭环从未启动**。
+
+### 核心缺口：运营闭环
+
+生产数据（2026-06-19）：
+
+- 515 条 community issues（318 closed / 115 new / 55 triaged / 17 routed / 10 null）
+- **0 条 issue 被分配到工作 thread**（`with_thread = 0`）
+- **2 条 issue 有 assignedCatId**（515 条中的 2 条）
+- **Decision Queue 为空**（narrator 从未生产过决策包）
+
+根因：我们建了精密的管道系统（Event Log → Projector → State Machine → Reconciler → SLA → Decision Queue → Closure Guard），但从未把水（实际 issue triage）接进管道。
+
+### 真正想做的（北极星）
+
+F168 的终态不是"基础设施通过愿景守护"。终态是：
+
+1. **narrator 自动运行**：新 issue/PR 进来 → narrator 自动 triage → 生成 Direction Card → 发到 operator Decision Queue 或猫自决路由
+2. **thread 分配生效**：triage 完成 → issue 被分配到工作 thread → assignedCatId + assignedThreadId 写入 → 看板上能看到"谁在哪个 thread 干这个 issue"
+3. **worker 生命周期跑通**：worker thread 接管后全权管理 → 有进度就更新事件 → operator点击 issue 能跳到对应 thread 看进度
+4. **closure 闭环生效**：worker 完成后 closure checklist 自动校验 → GitHub 回复/关 issue/更新 label → reconciler 定期扫描兜底
+5. **operator体感变化**：从"人肉 dispatcher"变成"Decision Queue 里看决策包、拍板、看进度"——operator打开 Workspace Community tab 能看到谁在干什么、卡在哪里
+
+**operator experience（reopen thread）**：
+> "管道精密但没流水。你们建了一整套管道系统——Event Log、Projector、State Machine、Reconciler、SLA、Decision Queue、Closure Guard——每一段都精密、测试全绿、愿景守护 PASS。但生产中 515 条 issue，0 条被分配到工作 thread，Decision Queue 是空的。Maine Coon的 7 个痛点只解决了 1 个。"
+
+### 基础设施清单（已完成，保留参考）
+
+<details>
+<summary>A→E Phase 基础设施完成记录（点击展开）</summary>
+
+- **Phase A ✅** Event Log + 纯函数状态机 + CommunityProjector + bootstrap
+- **Phase B ✅** Issue Signals 全量事件（issue.commented / labeled / pr.review_submitted / awaiting_external）+ 轮询链路 + 453 条 legacy 迁移
+- **Phase C ✅** Narrator spawn + Role Registry + DirectionCard + resolve routing + eval.1
+- **Phase D ✅** Closure checklist + reconciler + SLA dead-letter + closure UX components
+- **Phase E ✅** Decision Queue selector + API + frontend UX + owner-thread navigation
+
+All merged, all tests green (4383 pass), all vision guards PASS.
+</details>
+
+### Phase F: 运营闭环上线 🚧（2026-06-20 开始讨论；backend PR #2445 merged）
+
+**目标**：把 A→E 建好的管道接上Maine Coon已有的运营工作流——Maine Coon一直在 Repo Inbox thread 里每天跟进 issue，但 F168 系统没有记录这些工作。先同步存量，再自动化增量。
+
+**认知修正（operator 2026-06-20）**：之前误以为"运营闭环没启动"，实际是**Maine Coon在老模式（Repo Inbox thread）里每天跟进，但 F168 系统没有反映Maine Coon的工作**。515 条 issue 中 367 closed（系统通过轮询自动同步了 GitHub 状态），但只有 2 条有 `assignedCatId`——其余 513 条Maine Coon的工作在系统里是"无人负责"状态。
+
+**认知修正 #2（operator 2026-06-20 第二轮）**：narrator triage 完不能直接自动路由——**猫也会分错 thread**。正确的流程是 narrator **提议**路由方案，operator**审批后才执行**。类似 F128 propose_thread / F225 的审批卡片机制。
+
+**认知修正 #3（operator 2026-06-20 第三轮）**：
+> "是Maine Coon有把握的他直接不要我批准直接传球！但是接受到球的猫需要验证是不是属于他们的 thread！！！然后其他的他没把握就让我审批啊"
+
+**认知修正 #4（operator 2026-06-20 第四轮）**：
+> "我在想这个开源社区管理是不是可以主动让我设置每个不同的 repo → 对应的守门 thread？以及猫猫，比如这个 repo 守门 thread a 猫猫 b 另一个也允许我定义？"
+>
+> → per-repo routing config：每个 repo 绑定守门 thread + 守门猫，operator在 CommunityPanel 配置。backfill / narrator 路由 / autoRoute 全部从配置读，不硬编码。
+
+**operator 确认（2026-06-20）**：Maine Coon的守门 thread = `[thread-id]`（operator："你看看这个 thread 现在守门Maine Coon都在这里工作呢！！"）
+
+**Phase F 流程（operator 4 轮定向后定稿）**：
+
+```
+前置：operator配置 per-repo routing config（repo → 守门 thread + 守门猫）
+
+新 issue 进来
+  → narrator（守门猫）triage → 生成 Direction Card
+  → narrator 判断置信度
+      ├── 有把握 → 直接传球到目标 thread（不经operator）
+      │     → @ 目标猫 → 目标猫验证是否属于自己的 thread
+      │           ├── 确认接单 → 工作
+      │           └── 退回 → 回到 Decision Queue → operator重新分配
+      └── 没把握 → 审批卡片进 Decision Queue（类似 F128/F225）
+            → operator审批/修改/拒绝
+            → 批准后 → 路由到目标 thread → 目标猫验证
+```
+
+**两层安全网**：
+1. **守门猫有判断力**——有把握的直接传球（不当 rubber stamp 让operator盖章），没把握的才升级
+2. **目标猫必须验证**——不管谁路由的，目标猫都要确认"这是我的 thread 该接的活吗？"，不对就退回到 Decision Queue
+
+**三步走**：
+1. **F-Step0 per-repo config**：operator配置每个 repo 的守门 thread + 守门猫
+2. **F-Step1 存量同步**：从 per-repo config 读配置，backfill 已处理 issue 的 `assignedCatId` + `assignedThreadId`
+3. **F-Step2 置信度分流路由**：narrator triage → 置信度判断 → 直接路由 or 审批卡片 → 目标猫确认
+
+**Backend PR #2445 已合入（2026-06-20）**：SO-0~SO-3 完成 per-repo config store/routes、triage confidence pure function、`/validate-route` 接/退单、`TriageOrchestrator.autoRoute` 生产接线；cloud LL-072 封板 + gpt52 final review PASS；`pnpm gate` + GitHub Brand Boundary Guard 全绿。随后 AC-F0 存量 backfill 与 AC-F6 CommunityPanel board UX 已完成；Deferred：至少 1 条生产端到端流。
+
+**讨论点（4 轮后全部 resolved）**：
+- 存量 backfill：从 per-repo config 读，closed 标给 guardCatId，open 未 triaged 不标（✅ operator 确认 + 自决）
+- 置信度分流：5Q 全 PASS + WELCOME + existing-thread = high，其余 low（✅ 自决）
+- 目标猫验证：@ mention 提醒 + CommunityPanel 验证卡片双通道（✅ 自决）
+- 审批卡片：复用 Decision Queue（direction-decision kind）（✅ 自决）
+
+**Phase F AC（operator 4 轮讨论后定稿）**：
+
+- [x] AC-F00: per-repo routing config——operator可配置每个 repo 的守门 thread + 守门猫（operator 第四轮 2026-06-20；PR #2445 backend store/routes）
+- [x] AC-F0: 存量 backfill ✅（2026-06-20）——515 条 issue 全部补标：514 codex + 1 sonnet，assignedThreadId 指向社区运维 thread。operator 原话："Maine Coon就是干了这些的猫，不是没猫接"
+- [x] AC-F1: narrator triage 新 issue → 生成 Direction Card → 判断置信度（PR #2445 `deriveTriageConfidence`）
+- [x] AC-F2: 有把握 → 直接传球到目标 thread（不经operator）→ @ 目标猫（PR #2445 high-confidence auto-route backend）
+- [x] AC-F3: 没把握 → 审批卡片进 Decision Queue → operator批准后路由（PR #2445 low-confidence pending-decision backend path）
+- [x] AC-F4: 目标猫验证是否属于自己 thread → 接单（accept）或退回（reject）（PR #2445 `/validate-route`）
+- [x] AC-F5: 退回 → 自动进 Decision Queue → operator重新分配（PR #2445 reject clears assignment + projection returns to triaged）
+- [x] AC-F6: operator在看板上能看到 issue → thread → 猫 的分配关系并点击跳转（PR #2450：board API resolves `assignedThreadName` + CommunityPanel SVG assignment chip）
+- [ ] AC-F7: 至少 1 条 issue 跑完整流程（narrator 传球 → 目标猫接单 → 工作 → closure）
 
 ## Why
 
-team lead现在是人肉 dispatcher：手动 @ 猫看 issue/PR、手动分配线程、手动跟进进度、手动叮嘱"好好看 skill"、手动触发 guardian 验证。现有 F141（发现层）+ F116（ops skill）有完整的流程定义，但缺少**状态管理**和**自动编排**——流程靠team lead口头驱动，进度靠team lead脑子记。
+operator现在是人肉 dispatcher：手动 @ 猫看 issue/PR、手动分配线程、手动跟进进度、手动叮嘱"好好看 skill"、手动触发 guardian 验证。现有 F141（发现层）+ F116（ops skill）有完整的流程定义，但缺少**状态管理**和**自动编排**——流程靠operator口头驱动，进度靠operator脑子记。
 
-### team experience（需求讨论 2026-04-18，完整语境）
+### operator experience（需求讨论 2026-04-18，完整语境）
 
 **核心痛点**：
 > "现在全看我喊你们去看有点麻烦"
 > "你们得想想得做管理的啊，不然上次这个任务派发给什么线程的猫，然后他们进度如何，是合入还是正在拉扯还是 issue 怎么样了"
 > "比如 issue xxx 的 pr yyy 现在正在 xxx 线程负责"
 
-**team lead现在的人肉话术**（应被系统取代）：
+**operator现在的人肉话术**（应被系统取代）：
 > - 看到新 issue/PR → "加载开源社区管理 skills，看看这个 PR inbound 流程，maintainer 身份而言这个 PR 对我们自己有益吗？他的内容是什么？我们值得 merge 和 intake 吗？"
 > - 方向评估 → "我一般会 at 两只猫，因为一只猫视角大概率有偏颇。但如果是二次 review 一般只会一只"
 > - 决定 intake → "那你走 intake 回家的流程吧，merge 然后读 SOP 走流程回家。记得一定要好好看看 intake skills，大多数猫猫都会犯错，而且是从以前到现在每次 intake 都会有各种错误没有一次不是"
@@ -52,13 +207,13 @@ team lead现在是人肉 dispatcher：手动 @ 猫看 issue/PR、手动分配线
 
 ### 目标
 
-把team lead从"人肉编排器"解放成"决策者"——猫猫自动发现、分拣、分配、跟踪、守护，team lead只需要在关键节点拍板。
+把operator从"人肉编排器"解放成"决策者"——猫猫自动发现、分拣、分配、跟踪、守护，operator只需要在关键节点拍板。
 
 ## What
 
 ### Phase A: 定方向卡片 + Inbox 首猫分拣
 
-把team lead的人肉 dispatch 话术模板化为标准流程：
+把operator的人肉 dispatch 话术模板化为标准流程：
 
 1. **定方向卡片（Direction Card）**：猫猫 triage 完后，向 Inbox thread 发一张结构化 rich block：
    - 事项来源（issue/PR #、repo）
@@ -66,13 +221,13 @@ team lead现在是人肉 dispatcher：手动 @ 猫看 issue/PR、手动分配线
    - 关联 feat（如有）
    - Ownership 5 问结果（Q1-Q5 pass/warn/fail）
    - 猫的建议（WELCOME / NEEDS-DISCUSSION / POLITELY-DECLINE）
-   - 需要team lead决定什么（明确标注 or "猫自决"）
+   - 需要operator决定什么（明确标注 or "猫自决"）
 
    **实现方式（KD-10 gpt52 review）**：初版用 `RichCardBlock`（`kind: 'card'`），5 问结果放 `fields` 数组（`{ label: 'Q1 愿景', value: 'PASS' }`），tone 映射建议结果。`card.fields` 目前不支持 `icon` 字段，SVG 图标需后续扩展 `CardField` 类型；初版接受文本 badge 降级（PASS/WARN/FAIL）
-2. **双猫方向交叉**：首猫 triage 后自动 @ 第二只猫独立评估方向（不等team lead喊），两猫意见汇总后再标记是否需要team lead拍板。bugfix 场景猫自决，不需双猫
+2. **双猫方向交叉**：首猫 triage 后自动 @ 第二只猫独立评估方向（不等operator喊），两猫意见汇总后再标记是否需要operator拍板。bugfix 场景猫自决，不需双猫
 3. **路由分发**：
    - 已有 feat → 路由到该 feat thread，@ 负责猫
-   - 全新事项 + team lead OK → 首猫创建新 thread 并分配
+   - 全新事项 + operator OK → 首猫创建新 thread 并分配
    - bugfix（猫自决）→ 首猫就地分配或自行处理
 
 ### Phase B: 社区事务台账 + 生命周期跟踪
@@ -95,7 +250,7 @@ interface CommunityIssueItem {
   assignedCatId: string | null;          // 负责猫
   linkedPrNumbers: number[];             // 关联的 PR（一个 issue 可能有多个 PR）
   directionCard: object | null;          // 定方向卡片快照
-  ownerDecision: 'accepted' | 'declined' | null; // team lead拍板
+  ownerDecision: 'accepted' | 'declined' | null; // operator拍板
   relatedFeature: string | null;         // 关联 feat（如 'F056'）
   lastActivity: { at: number; event: string };
   createdAt: number;
@@ -118,9 +273,9 @@ unreplied → discussing → pending-decision → accepted / declined
 |------|------|------|
 | unreplied | 新来的，还没人搭理 | 手动"发送给系统猫"创建 |
 | discussing | 已回复，讨论中 | 猫回复后 |
-| pending-decision | 双猫看过，需要team lead拍板 | 双猫意见汇总后 |
-| accepted | team lead同意 | team lead在对话中拍板 |
-| declined | 礼貌回绝 | team lead/猫自决拒绝 |
+| pending-decision | 双猫看过，需要operator拍板 | 双猫意见汇总后 |
+| accepted | operator同意 | operator在对话中拍板 |
+| declined | 礼貌回绝 | operator/猫自决拒绝 |
 | closed | GitHub issue 已关闭 | 同步 GitHub 状态 |
 
 `replyState` 和 `consensusState` 独立于 `state` 更新——讨论中的 issue 可能是"已回复+待复现"也可能是"已回复+达成一致"。
@@ -171,9 +326,9 @@ function derivePrGroup(task: TaskItem): PrBoardGroup {
 
 #### 4. 触发模式（初版 A-C）
 
-- **Issue 未接单**：team lead在看板手动点击"发送给系统猫"触发 triage，不自动巡检
+- **Issue 未接单**：operator在看板手动点击"发送给系统猫"触发 triage，不自动巡检
 - **PR 已分配到线程**：自动——F140 `CiCdCheckTaskSpec` 已有 commit+CI 推送能力，看板消费其状态
-- **看板状态**：定时刷新（建议 5 分钟）+ **手动同步按钮**（team lead随时可点击强制刷新）
+- **看板状态**：定时刷新（建议 5 分钟）+ **手动同步按钮**（operator随时可点击强制刷新）
 
 #### 5. 多仓库支持
 
@@ -185,7 +340,7 @@ TTL=0（铁律 #5），用户数据默认持久化
 
 ### Phase C: 管理视图（Workspace tab + 社区系统 thread 联动）
 
-**设计决策**：不做独立页面（Mission Hub 教训：独立页面team lead几乎不打开）。社区管理作为 **Workspace 右侧 tab**，与对话流并存——用户心智不变，操作在自然语言中完成，看板是辅助视图。
+**设计决策**：不做独立页面（Mission Hub 教训：独立页面operator几乎不打开）。社区管理作为 **Workspace 右侧 tab**，与对话流并存——用户心智不变，操作在自然语言中完成，看板是辅助视图。
 
 **前置基础设施（KD-12 gpt52 review P2）**：现有 `workspaceMode` 枚举只有 `dev | recall | schedule | tasks`（`chatStore.ts`），`WorkspacePanel` 只渲染四种，无 thread-scoped 自动切换机制。Phase C 需要：
 1. 扩展 `workspaceMode` 枚举加 `community`
@@ -205,12 +360,12 @@ TTL=0（铁律 #5），用户数据默认持久化
 │ │ 关联: F056 (子需求)         │   │                                      │
 │ │ 5问: pass/pass/warn/pass   │   │ -- 未回复 (1) ---------------------- │
 │ │ 建议: WELCOME              │   │ #52 SSO支持  feature  2h ago        │
-│ │ !需要team lead: 纳入backlog?   │   │                                      │
+│ │ !需要operator: 纳入backlog?   │   │                                      │
 │ └────────────────────────────┘   │ -- 讨论中 (2) ---------------------- │
 │                                  │ #48 日志延迟  bug  已回复 待复现 1d  │
-│ team lead: 要，挂 F056 下           │ #42 深色模式  feat  达成一致→PR#58 3h│
+│ operator: 要，挂 F056 下           │ #42 深色模式  feat  达成一致→PR#58 3h│
 │                                  │                                      │
-│ [系统猫]：                        │ -- 待team lead定方向 (1) --------------- │
+│ [系统猫]：                        │ -- 待operator定方向 (1) --------------- │
 │ 已路由到 F056 thread，            │ #50 插件系统  feat  双猫看过 F056相关│
 │ @codex 开始 review               │    [发送给系统猫]                     │
 │                                  │                                      │
@@ -245,14 +400,14 @@ TTL=0（铁律 #5），用户数据默认持久化
 | 点击 issue/PR 编号 | 新 tab 打开 GitHub 页面 |
 | repo 下拉 | 切换仓库视图（多仓库场景） |
 | [同步状态] 按钮 | 手动触发从 GitHub 同步最新状态 |
-| 状态组折叠/展开 | team lead自行收起不关心的组 |
+| 状态组折叠/展开 | operator自行收起不关心的组 |
 | [发送给系统猫] 按钮 | 未接单 issue 手动触发 triage（初版，非自动巡检） |
 | 定方向卡片里的拍板 | 在对话中自然语言回复即可（不需要 UI 按钮） |
 
 #### UX 原则
 
 1. **左边聊天，右边看板** — 跟现有 Workspace tab 一模一样的心智模型
-2. **拍板在对话里** — 不做额外的审批按钮，team lead直接在系统 thread 里回复
+2. **拍板在对话里** — 不做额外的审批按钮，operator直接在系统 thread 里回复
 3. **看板是只读导航** — 不在看板上做操作（除手动同步和发送给系统猫），所有操作都通过和猫对话完成
 4. **item 是入口不是终点** — 点进去到 thread 才是工作现场
 5. **图标用 SVG 不用 emoji** — 设计规范
@@ -260,7 +415,7 @@ TTL=0（铁律 #5），用户数据默认持久化
 #### Issue 与 PR 分区
 
 看板分两个区域（Issues / Pull Requests），因为生命周期不同：
-- **Issues**：重点是"有没有回复""讨论到哪了""需不需要team lead定方向"
+- **Issues**：重点是"有没有回复""讨论到哪了""需不需要operator定方向"
 - **PRs**：重点是"谁在 review""有没有新 commit 要 re-review""intake 进度"
 - **Issue ↔ PR 关联**：PR 行显示 `<-#issue号`，一眼看到来龙去脉
 
@@ -275,7 +430,7 @@ TTL=0（铁律 #5），用户数据默认持久化
 
 ### Phase F: GitHub PR 同步管线（Issue sync 的对称版） ✅
 
-看板 Issue 已有进货通道（Phase E），但 PR 区只显示猫猫主动注册的 `pr_tracking` 条目。team lead需要看到**所有 PR**的回复状态——和 issue 一样的体验。
+看板 Issue 已有进货通道（Phase E），但 PR 区只显示猫猫主动注册的 `pr_tracking` 条目。operator需要看到**所有 PR**的回复状态——和 issue 一样的体验。
 
 1. **PR Sync 入口**：复用同步按钮 → 后端调 `GET /repos/{repo}/pulls`（`state=all --paginate`）→ 写入 `CommunityPrStore`
 2. **回复状态检测**（replyState）：对每个 open PR，查 `GET /repos/{repo}/pulls/{number}/reviews`，有非 author 的 review → `replied`，否则 → `unreplied`
@@ -283,14 +438,14 @@ TTL=0（铁律 #5），用户数据默认持久化
 4. **看板合并**：board endpoint 合并 `CommunityPrStore`（全量发现层）+ `pr_tracking`（已注册的富数据），按 PR number 去重，`pr_tracking` 优先
 5. **前端 PR 分组**：unreplied → "未回复" / replied → "已回复" / has-new-activity → "有新动态" / merged → "已合入" / closed → "已关闭"（替代旧的 in-review/re-review/has-conflict/completed 分组）
 
-**与 KD-11 的关系**：KD-11（"PR 不另建台账"）针对的是已注册 PR 的跟踪数据。Phase F 新增的 `CommunityPrStore` 是**发现层**——让team lead看到所有 PR，不只是猫猫注册过的。两层共存，board 合并展示。
+**与 KD-11 的关系**：KD-11（"PR 不另建台账"）针对的是已注册 PR 的跟踪数据。Phase F 新增的 `CommunityPrStore` 是**发现层**——让operator看到所有 PR，不只是猫猫注册过的。两层共存，board 合并展示。
 
-**team experience**（2026-04-19）：
+**operator experience**（2026-04-19）：
 > "这里的 PR 我是想看到和 issue 那样，哪些我们回了哪些没回，比如上次回了之后对方有没有新的更新这些的"
 
 ### Phase D: Intake 硬门禁 + Guardian 自动触发
 
-把team lead的"你去守护一下"变成系统自动触发：
+把operator的"你去守护一下"变成系统自动触发：
 
 1. **Intake 完成信号**：负责猫声称 intake 完成 + reviewer 放行 → 自动触发 guardian 猫
 2. **Guardian 自动分配**：从 roster 中选一只（≠ author ≠ reviewer），自动 @ 并加载 intake skill
@@ -301,18 +456,18 @@ TTL=0（铁律 #5），用户数据默认持久化
 
 ### Phase A（定方向卡片 + Inbox 分拣）
 - [x] AC-A1: 首猫 triage 后自动向 Inbox 发结构化定方向卡片（rich block）— `opensource-ops` skill + Direction Card 模板 + `triage-complete` 端点已接通
-- [x] AC-A2: 定方向卡片包含：事项来源、关联 feat、5 问结果、猫建议、team lead决策点 — `DirectionCardPayload` + Direction Card 模板字段已覆盖
+- [x] AC-A2: 定方向卡片包含：事项来源、关联 feat、5 问结果、猫建议、operator决策点 — `DirectionCardPayload` + Direction Card 模板字段已覆盖
 - [x] AC-A3: 首猫自动 @ 第二只猫交叉评估方向（非 bugfix 场景）— `opensource-ops` skill 非 bugfix 双猫交叉 + backend `await-second-cat` 流程已接通
-- [x] AC-A4: 两猫意见汇总后，自动标记是否需要team lead拍板 — resolveConsensus + TriageOrchestrator 完整实现
+- [x] AC-A4: 两猫意见汇总后，自动标记是否需要operator拍板 — resolveConsensus + TriageOrchestrator 完整实现
 - [x] AC-A5: 已有 feat 事项自动路由到该 feat thread 并 @ 负责猫 — routeAccepted 支持 relatedFeature+threadId 透传，猫侧通过 resolve 端点调用
-- [x] AC-A6: 全新事项经team lead OK 后，首猫创建新 thread 并分配负责猫 — resolve 端点+routeAccepted 自动创建 thread+resolveUserId 身份链
+- [x] AC-A6: 全新事项经operator OK 后，首猫创建新 thread 并分配负责猫 — resolve 端点+routeAccepted 自动创建 thread+resolveUserId 身份链
 
 ### Phase B（台账 + 生命周期）
 - [x] AC-B1: `CommunityIssueItem` 独立存储，持久化（TTL=0）
 - [x] AC-B2: Issue 状态机 6 态 + `replyState` / `consensusState` 独立更新
 - [x] AC-B3: PR 视图投影自 `pr_tracking` TaskItem，不另建存储（单一真相源）
 - [x] AC-B4: Issue ↔ PR 关联：`linkedPrNumbers` 可追溯
-- [x] AC-B5: 未接单 issue 支持team lead手动触发"发送给系统猫"
+- [x] AC-B5: 未接单 issue 支持operator手动触发"发送给系统猫"
 - [x] AC-B6: 已分配 PR 的 commit+CI 信号由 F140 现有 `CiCdCheckTaskSpec` 推送，看板消费状态
 - [x] AC-B7: 支持多仓库绑定，repo 是配置参数非 hardcode
 - [x] AC-B8: 看板支持手动同步状态按钮 + 定时刷新（建议 5 分钟）
@@ -348,6 +503,11 @@ TTL=0（铁律 #5），用户数据默认持久化
 - [x] AC-E3: 同步结果实时反映到看板 — Issues 分类计数与 GitHub 实际状态一致
 - [x] AC-E4: 已有 CommunityIssueStore 条目的 issue 不重复创建；更新 `title/replyState`，并保护本地 triage 生命周期状态
 
+## Post-completion hardening
+
+- [ ] P3: Split `packages/web/src/components/community/DecisionQueueItem.tsx` (380 lines, 30 above the 350-line hard cap). Opus 4.7 final guard classified this as non-blocking because Phase E behavior, INV-E0~E5, and 43/43 focused tests passed; track it as a maintenance candidate after F168 close, not as unmet F168 AC.
+- [ ] P3: Observe AC-F6 assignment chip thread-name truncation. `CommunityPanel` uses `max-w-[8rem] truncate`; Opus 4.7 AC-F6 guard classified it as non-blocking because the full thread name remains available via `title`, SVG-only invariant passed, and 16/16 focused AC-F6 tests passed. Tune after production use if long thread names hide useful context.
+
 ## Dependencies
 
 - **Related**: F141（GitHub Repo Inbox — 发现层，本 feature 消费其事件）
@@ -365,29 +525,29 @@ TTL=0（铁律 #5），用户数据默认持久化
 | 多仓库 webhook 配置复杂度 | 复用 F141 已有的 allowlist 机制，扩展为 per-repo 配置 |
 | Guardian 自动触发可能产生 @ 风暴 | 限频：同一 item 最多触发一次 guardian |
 | 状态机复杂度 | Phase B 先实现线性状态流转，分支/回退后续迭代 |
-| 初版手动触发可能team lead还是觉得麻烦 | 验证 MVP 后 Phase E 再加自动巡检 |
+| 初版手动触发可能operator还是觉得麻烦 | 验证 MVP 后 Phase E 再加自动巡检 |
 
 ## Key Decisions
 
 | # | 决策 | 理由 | 日期 |
 |---|------|------|------|
 | KD-1 | 单实例多仓库，非多租户 | 每人自建 Cat Café 实例，不做 SaaS；data model 按 repo 隔离 | 2026-04-18 |
-| KD-2 | Inbox 首猫分拣制 | 中央入口 + 分发，team lead只看 Inbox 就知全局 | 2026-04-18 |
-| KD-3 | 方向评估必须双猫 | team lead："一只猫视角大概率有偏颇"，非 bugfix 场景强制双猫交叉 | 2026-04-18 |
-| KD-4 | Intake guardian 由系统自动触发 | team lead："每次 intake 都出错没有一次不是"→ 不靠叮嘱靠门禁 | 2026-04-18 |
-| KD-5 | 管理视图是 Workspace tab 而非独立页面 | Mission Hub 教训：独立页面team lead几乎不打开；操作在自然语言中完成，看板是辅助视图 | 2026-04-18 |
-| KD-6 | 社区系统 thread 作为中央入口 | 类似 IM Hub 系统 thread，首猫分拣+team lead拍板都在对话中；看板通过 thread 跳转联动到 feat thread | 2026-04-18 |
+| KD-2 | Inbox 首猫分拣制 | 中央入口 + 分发，operator只看 Inbox 就知全局 | 2026-04-18 |
+| KD-3 | 方向评估必须双猫 | operator："一只猫视角大概率有偏颇"，非 bugfix 场景强制双猫交叉 | 2026-04-18 |
+| KD-4 | Intake guardian 由系统自动触发 | operator："每次 intake 都出错没有一次不是"→ 不靠叮嘱靠门禁 | 2026-04-18 |
+| KD-5 | 管理视图是 Workspace tab 而非独立页面 | Mission Hub 教训：独立页面operator几乎不打开；操作在自然语言中完成，看板是辅助视图 | 2026-04-18 |
+| KD-6 | 社区系统 thread 作为中央入口 | 类似 IM Hub 系统 thread，首猫分拣+operator拍板都在对话中；看板通过 thread 跳转联动到 feat thread | 2026-04-18 |
 | KD-7 | Issue 和 PR 分区展示 | 生命周期不同：Issue 重"回复/讨论/定方向"，PR 重"review/re-review/intake" | 2026-04-18 |
-| KD-8 | 初版手动触发 + 手动同步 | team lead："最开始别是自动巡检，而是我手动点击"。已分配 PR 的 commit+CI 通知除外（自动） | 2026-04-18 |
-| KD-9 | 所有图标用 SVG 不用 emoji | team lead明确要求 + 设计规范 | 2026-04-18 |
+| KD-8 | 初版手动触发 + 手动同步 | operator："最开始别是自动巡检，而是我手动点击"。已分配 PR 的 commit+CI 通知除外（自动） | 2026-04-18 |
+| KD-9 | 所有图标用 SVG 不用 emoji | operator明确要求 + 设计规范 | 2026-04-18 |
 | KD-10 | Direction Card 初版用 `card` + `fields` 文本 badge | `card.fields` 无 `icon` 字段，SVG 图标需后续扩展 `CardField`；初版接受 PASS/WARN/FAIL 文本降级（gpt52 review P2） | 2026-04-18 |
 | KD-11 | PR 不另建台账，投影自 `pr_tracking` | 现有 `TaskStore` 的 `pr_tracking` 已是 CI/review/conflict 权威数据源；双写会导致状态漂移（gpt52 review P1） | 2026-04-18 |
 | KD-12 | Phase C 需补 `community` workspace mode 基础设施 | 现有枚举只有 4 态；需扩展 `WorkspaceMode = 'dev' \| 'recall' \| 'schedule' \| 'tasks' \| 'community'`（fail-closed 有界枚举），thread metadata 用 `WorkspaceMode` 类型不用 string（gpt52 review P2） | 2026-04-18 |
-| KD-13 | Phase F: PR 发现层 `CommunityPrStore` 与 KD-11 `pr_tracking` 共存 | KD-11 解决已注册 PR 的富数据跟踪，Phase F 解决"看到所有 PR"的发现需求。board 合并两层数据，pr_tracking 优先（team lead 2026-04-19 确认需要看全量 PR 回复状态） | 2026-04-19 |
+| KD-13 | Phase F: PR 发现层 `CommunityPrStore` 与 KD-11 `pr_tracking` 共存 | KD-11 解决已注册 PR 的富数据跟踪，Phase F 解决"看到所有 PR"的发现需求。board 合并两层数据，pr_tracking 优先（operator 2026-04-19 确认需要看全量 PR 回复状态） | 2026-04-19 |
 
 ## Review Gate
 
 - Phase A: 跨家族 review（skill 改动）
 - Phase B: 跨家族 review（数据模型 + API）
-- Phase C: Pencil 设计稿 → team lead UX 审核 → 实现。图标 SVG 不用 emoji
-- Phase D: 跨家族 review + team lead确认门禁策略
+- Phase C: Pencil 设计稿 → operator UX 审核 → 实现。图标 SVG 不用 emoji
+- Phase D: 跨家族 review + operator确认门禁策略

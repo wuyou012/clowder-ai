@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import Fastify from 'fastify';
 import {
   findPidsByPort,
+  isPrimaryServiceProcess,
   isServiceProcessCommand,
   readProcessCommand,
   readServiceLogTail,
@@ -19,6 +20,15 @@ const SESSION_HEADERS = { 'x-test-session-user': 'you' };
 const TRUSTED_ORIGIN_HEADERS = { origin: 'http://localhost:3003', host: 'localhost:3003' };
 const ORIGINAL_OWNER_ID = 'you';
 process.env.DEFAULT_OWNER_USER_ID = ORIGINAL_OWNER_ID;
+
+async function waitForFile(path, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
 
 async function buildApp(options = {}) {
   const app = Fastify({ logger: false });
@@ -2384,19 +2394,24 @@ describe('service lifecycle write routes', () => {
   });
 
   it('keeps shell service scripts on Windows when no PowerShell counterpart exists', () => {
+    // install-template.sh has no .ps1 counterpart — use it to test the
+    // keep-.sh fallback path on Windows.
     assert.match(
-      resolveServiceScriptPath('scripts/services/qwen3-asr-server.sh', 'win32'),
-      /scripts\/services\/qwen3-asr-server\.sh$/,
+      resolveServiceScriptPath('scripts/services/install-template.sh', 'win32'),
+      /scripts\/services\/install-template\.sh$/,
     );
   });
 
+  // PIDs use high values (90xxx) to avoid collision with process.pid — parsePidLines
+  // filters out the current process PID, and in --test-isolation=process mode the test
+  // runner can assign low PIDs (e.g. 222) that would collide with mock values.
   it('uses Windows-native port and command probes instead of lsof/ps', async () => {
     const calls = [];
     const fakeExecFile = (command, args, _options, callback) => {
       calls.push({ command, args });
       const commandText = args.join(' ');
       if (commandText.includes('Get-NetTCPConnection')) {
-        callback(null, "111\r\n222\r\n''\r\n", '');
+        callback(null, "90111\r\n90222\r\n''\r\n", '');
       } else if (commandText.includes('Get-CimInstance')) {
         callback(null, 'powershell.exe -File C:\\repo\\scripts\\services\\whisper-server.ps1\r\n', '');
       } else {
@@ -2406,9 +2421,9 @@ describe('service lifecycle write routes', () => {
     };
 
     const pids = await findPidsByPort(9876, { platform: 'win32', execFile: fakeExecFile });
-    const command = await readProcessCommand(111, { platform: 'win32', execFile: fakeExecFile });
+    const command = await readProcessCommand(90111, { platform: 'win32', execFile: fakeExecFile });
 
-    assert.deepEqual(pids, [111, 222]);
+    assert.deepEqual(pids, [90111, 90222]);
     assert.equal(command, 'powershell.exe -File C:\\repo\\scripts\\services\\whisper-server.ps1');
     assert.equal(calls[0].command, 'powershell.exe');
     assert.equal(calls[1].command, 'powershell.exe');
@@ -2426,10 +2441,10 @@ describe('service lifecycle write routes', () => {
           null,
           [
             '  Proto  Local Address          Foreign Address        State           PID',
-            '  TCP    0.0.0.0:9876           0.0.0.0:0              LISTENING       111',
-            '  TCP    [::]:9876              [::]:0                 LISTENING       222',
-            '  TCP    127.0.0.1:19876        0.0.0.0:0              LISTENING       333',
-            '  TCP    127.0.0.1:9876         127.0.0.1:50000        ESTABLISHED     444',
+            '  TCP    0.0.0.0:9876           0.0.0.0:0              LISTENING       90111',
+            '  TCP    [::]:9876              [::]:0                 LISTENING       90222',
+            '  TCP    127.0.0.1:19876        0.0.0.0:0              LISTENING       90333',
+            '  TCP    127.0.0.1:9876         127.0.0.1:50000        ESTABLISHED     90444',
           ].join('\r\n'),
           '',
         );
@@ -2441,7 +2456,7 @@ describe('service lifecycle write routes', () => {
 
     const pids = await findPidsByPort(9876, { platform: 'win32', execFile: fakeExecFile });
 
-    assert.deepEqual(pids, [111, 222]);
+    assert.deepEqual(pids, [90111, 90222]);
     assert.equal(calls[0].command, 'powershell.exe');
     assert.equal(calls[1].command, 'netstat.exe');
   });
@@ -2474,6 +2489,77 @@ describe('service lifecycle write routes', () => {
     assert.equal(isServiceProcessCommand(`/opt/cat/venv/bin/python "${apiScript}" --port 9879`, manifest), true);
     assert.equal(isServiceProcessCommand(`python worker.py --payload "${apiScript}"`, manifest), false);
     assert.equal(isServiceProcessCommand('python /tmp/scripts/services/tts-api.py --port 9879', manifest), false);
+  });
+
+  it('matches macOS Python.app service-owned API processes by exact runtime script identity', () => {
+    const manifest = {
+      id: 'embedding-model',
+      scripts: { start: 'scripts/services/embed-server.sh' },
+    };
+    const resolvedScript = resolveServiceScriptPath('scripts/services/embed-server.sh');
+    const apiScript = resolvedScript.replace(/embed-server\.sh$/, 'embed-api.py');
+    const pythonAppExecutable =
+      '/opt/homebrew/Cellar/python@3.14/3.14.2/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python';
+
+    assert.equal(
+      isServiceProcessCommand(
+        `${pythonAppExecutable} ${apiScript} --model mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ --port 9880`,
+        manifest,
+      ),
+      true,
+    );
+    assert.equal(
+      isServiceProcessCommand(`${pythonAppExecutable} /tmp/scripts/services/embed-api.py --port 9880`, manifest),
+      false,
+    );
+  });
+
+  it('recognizes unified whisper-api.py for both Whisper and Qwen3-ASR models (#863)', () => {
+    const manifest = {
+      id: 'whisper-stt',
+      scripts: {
+        start: 'scripts/services/whisper-server.sh',
+      },
+    };
+    const whisperApi = resolveServiceScriptPath('scripts/services/whisper-server.sh').replace(
+      /whisper-server\.sh$/,
+      'whisper-api.py',
+    );
+
+    // whisper-api.py handles all ASR models — both must be recognized
+    assert.equal(isServiceProcessCommand(`python3 ${whisperApi} --model whisper-large-v3 --port 9876`, manifest), true);
+    assert.equal(
+      isServiceProcessCommand(`python3 ${whisperApi} --model Qwen3-ASR-1.7B-8bit --port 9876`, manifest),
+      true,
+    );
+    // Foreign script must NOT be recognized
+    assert.equal(isServiceProcessCommand('python3 /tmp/random-api.py --port 9876', manifest), false);
+  });
+
+  it('distinguishes primary vs legacy additionalRuntimeScripts (#863)', () => {
+    const manifest = {
+      id: 'whisper-stt',
+      scripts: {
+        start: 'scripts/services/whisper-server.sh',
+        additionalRuntimeScripts: ['scripts/services/qwen3-asr-api.py'],
+      },
+    };
+    const whisperApi = resolveServiceScriptPath('scripts/services/whisper-server.sh').replace(
+      /whisper-server\.sh$/,
+      'whisper-api.py',
+    );
+    const qwen3Api = resolveServiceScriptPath('scripts/services/qwen3-asr-api.py');
+    const whisperServer = resolveServiceScriptPath('scripts/services/whisper-server.sh');
+
+    // isServiceProcessCommand matches ALL scripts (for cleanup)
+    assert.equal(isServiceProcessCommand(`python3 ${qwen3Api} --port 9876`, manifest), true);
+    assert.equal(isServiceProcessCommand(`python3 ${whisperApi} --port 9876`, manifest), true);
+    assert.equal(isServiceProcessCommand(`/bin/bash ${whisperServer}`, manifest), true);
+
+    // isPrimaryServiceProcess excludes additionalRuntimeScripts (legacy)
+    assert.equal(isPrimaryServiceProcess(`python3 ${qwen3Api} --port 9876`, manifest), false);
+    assert.equal(isPrimaryServiceProcess(`python3 ${whisperApi} --port 9876`, manifest), true);
+    assert.equal(isPrimaryServiceProcess(`/bin/bash ${whisperServer}`, manifest), true);
   });
 
   it('matches Windows PowerShell service processes by exact script identity', () => {
@@ -2554,16 +2640,191 @@ describe('service lifecycle write routes', () => {
   it('marks timed-out scripts even when they emitted output before termination', async () => {
     const scriptDir = mkdtempSync(join(tmpdir(), 'cat-cafe-service-timeout-'));
     const scriptPath = join(scriptDir, 'slow.sh');
-    writeFileSync(scriptPath, 'printf "started\\n"; sleep 2\n');
+    const readyPath = join(scriptDir, 'ready');
+    writeFileSync(scriptPath, `printf "started\\n"; : > ${JSON.stringify(readyPath)}; sleep 5\n`);
 
-    const result = await runServiceScript({
-      serviceId: 'test-service',
-      action: 'install',
-      scriptPath,
-      timeoutMs: 20,
+    try {
+      const run = runServiceScript({
+        serviceId: 'test-service',
+        action: 'install',
+        scriptPath,
+        timeoutMs: 1_000,
+      });
+      await waitForFile(readyPath);
+      const result = await run;
+
+      assert.equal(result.timedOut, true);
+      assert.match(result.output ?? '', /started/);
+    } finally {
+      rmSync(scriptDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('deep health probe (zombie detection)', () => {
+  it('kills zombie process when shallow health passes but deep health fails', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const killed = [];
+    let scriptRan = false;
+    const zombieAlive = { value: true };
+    const ttsStartScript = resolveServiceScriptPath('scripts/services/tts-server.sh');
+    const configs = new Map([
+      ['mlx-tts', { installed: true, enabled: true, selectedModel: 'mlx-community/Kokoro-82M-bf16' }],
+    ]);
+    const app = await buildApp({
+      fetchHealth: async (url) => {
+        // Zombie deep health always fails (synthesis broken)
+        if (url.includes('/health/deep') && zombieAlive.value) {
+          return { ok: false, status: 503, error: 'synthesis probe failed: Broken pipe' };
+        }
+        // After zombie is killed and script runs, new process is healthy
+        if (!zombieAlive.value && scriptRan) {
+          return { ok: true, status: 200, error: null };
+        }
+        // Zombie shallow health passes
+        if (zombieAlive.value) {
+          return { ok: true, status: 200, error: null };
+        }
+        // Between kill and restart — no process
+        return { ok: false, status: 503, error: 'unreachable' };
+      },
+      lifecycle: {
+        serviceConfig: {
+          get: (id) => configs.get(id) ?? { enabled: false },
+          set: (id, patch) => {
+            const updated = { ...(configs.get(id) ?? { enabled: false }), ...patch };
+            configs.set(id, updated);
+            return updated;
+          },
+        },
+        findPidsByPort: async (port) => {
+          if (port === 9879 && zombieAlive.value) return [55852];
+          return [];
+        },
+        readProcessCommand: async (pid) => (pid === 55852 ? `/bin/bash ${ttsStartScript}` : ''),
+        killPid: (pid, signal) => {
+          killed.push({ pid, signal });
+          if (pid === 55852) zombieAlive.value = false;
+        },
+        runScript: async () => {
+          scriptRan = true;
+          return { code: 0, output: 'started' };
+        },
+      },
     });
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/services/mlx-tts/start',
+        headers: SESSION_HEADERS,
+      });
 
-    assert.equal(result.timedOut, true);
-    assert.match(result.output ?? '', /started/);
+      assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode}: ${res.payload}`);
+      assert.deepEqual(killed, [{ pid: 55852, signal: 'SIGTERM' }], 'zombie process should be killed');
+      assert.equal(scriptRan, true, 'start script should run after killing zombie');
+    } finally {
+      await app.close();
+      restoreOwner(previousOwner);
+    }
+  });
+
+  it('returns already-running when both shallow and deep health pass', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const killed = [];
+    const ttsStartScript = resolveServiceScriptPath('scripts/services/tts-server.sh');
+    const configs = new Map([
+      ['mlx-tts', { installed: true, enabled: true, selectedModel: 'mlx-community/Kokoro-82M-bf16' }],
+    ]);
+    const app = await buildApp({
+      fetchHealth: async () => ({ ok: true, status: 200, error: null }),
+      lifecycle: {
+        serviceConfig: {
+          get: (id) => configs.get(id) ?? { enabled: false },
+          set: (id, patch) => {
+            const updated = { ...(configs.get(id) ?? { enabled: false }), ...patch };
+            configs.set(id, updated);
+            return updated;
+          },
+        },
+        findPidsByPort: async (port) => (port === 9879 ? [55852] : []),
+        readProcessCommand: async (pid) => (pid === 55852 ? `/bin/bash ${ttsStartScript}` : ''),
+        killPid: (pid, signal) => {
+          killed.push({ pid, signal });
+        },
+        runScript: async () => ({ code: 0, output: 'started' }),
+      },
+    });
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/services/mlx-tts/start',
+        headers: SESSION_HEADERS,
+      });
+
+      assert.equal(res.statusCode, 200, res.payload);
+      const body = JSON.parse(res.payload);
+      assert.equal(body.ok, true);
+      assert.match(body.message, /already running/i);
+      assert.deepEqual(killed, [], 'should NOT kill healthy process');
+    } finally {
+      await app.close();
+      restoreOwner(previousOwner);
+    }
+  });
+
+  it('terminates legacy additionalRuntimeScript listener and launches current start script (#863)', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    process.env.DEFAULT_OWNER_USER_ID = 'you';
+    const killed = [];
+    let scriptRan = false;
+    // Legacy qwen3-asr-api.py is running on the whisper-stt port.
+    // It's an additionalRuntimeScript — owned for cleanup, but NOT primary.
+    const qwen3Api = resolveServiceScriptPath('scripts/services/qwen3-asr-api.py');
+    const killedPids = new Set();
+    const configs = new Map([
+      ['whisper-stt', { installed: true, enabled: true, selectedModel: 'mlx-community/Qwen3-ASR-1.7B-8bit' }],
+    ]);
+    const app = await buildApp({
+      // Legacy listener responds healthy to /health
+      fetchHealth: async () => ({ ok: true, status: 200, error: null }),
+      lifecycle: {
+        serviceConfig: {
+          get: (id) => configs.get(id) ?? { enabled: false },
+          set: (id, patch) => {
+            const updated = { ...(configs.get(id) ?? { enabled: false }), ...patch };
+            configs.set(id, updated);
+            return updated;
+          },
+        },
+        // After kill, the process disappears from port probe
+        findPidsByPort: async (port) => (port === 9876 && !killedPids.has(44001) ? [44001] : []),
+        // PID 44001 is running the LEGACY script (not the current whisper-server.sh)
+        readProcessCommand: async (pid) => (pid === 44001 ? `python3 ${qwen3Api} --port 9876` : ''),
+        killPid: (pid, signal) => {
+          killed.push({ pid, signal });
+          killedPids.add(pid);
+        },
+        runScript: async () => {
+          scriptRan = true;
+          return { code: 0, output: 'started' };
+        },
+      },
+    });
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/services/whisper-stt/start',
+        headers: SESSION_HEADERS,
+      });
+
+      assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode}: ${res.payload}`);
+      assert.deepEqual(killed, [{ pid: 44001, signal: 'SIGTERM' }], 'legacy process should be terminated');
+      assert.equal(scriptRan, true, 'current start script should launch after terminating legacy');
+    } finally {
+      await app.close();
+      restoreOwner(previousOwner);
+    }
   });
 });

@@ -60,7 +60,8 @@ const nextConfig = {
   webpack: (config) => {
     // Suppress onnxruntime-web "Critical dependency" warnings — dynamic require() in
     // minified bundle is expected and cannot be statically analyzed by webpack.
-    config.ignoreWarnings = [{ module: /onnxruntime-web/ }];
+    // Also suppress @next/swc warnings for cross-platform optional deps (#843).
+    config.ignoreWarnings = [{ module: /onnxruntime-web/ }, { message: /managed item.*@next[\\/]swc/i }];
     return config;
   },
   async rewrites() {
@@ -84,7 +85,7 @@ const nextConfig = {
 module.exports = withPWA({
   dest: 'public',
   disable: process.env.NODE_ENV === 'development' && !enablePwaInDev,
-  reloadOnOnline: true,
+  reloadOnOnline: false,
   // Start URL is a static shell; precache it so PWA cold-open does not block on network.
   dynamicStartUrl: false,
   // Keep default page/document runtime caching and only override what we need.

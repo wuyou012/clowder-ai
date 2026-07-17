@@ -5,11 +5,17 @@ import type { CatData } from '@/hooks/useCatData';
 import { AvatarImageWithFallback } from './AvatarImageWithFallback';
 import type { ProfileItem } from './hub-accounts.types';
 import {
+  ACP_TRANSPORT_OPTIONS,
   autoSlug,
   CLIENT_OPTIONS,
+  defaultAcpCommandForClient,
+  defaultAcpStartupArgsForClient,
+  getAcpWarning,
   type HubCatEditorFormState,
+  isAcpOnlyClient,
   joinTags,
   normalizeMentionPattern,
+  showTransportSelector,
   splitMentionPatterns,
   splitStrengthTags,
 } from './hub-cat-editor.model';
@@ -19,6 +25,26 @@ import { VoiceConfigSection } from './hub-cat-editor-voice';
 import { TagEditor } from './hub-tag-editor';
 
 type FormPatch = Partial<HubCatEditorFormState>;
+
+function acpDefaultsForClientSwitch(
+  form: HubCatEditorFormState,
+  nextClient: HubCatEditorFormState['clientId'],
+): FormPatch {
+  const currentCommand = form.acpCommand.trim();
+  const currentStartupArgs = form.acpStartupArgs.trim();
+  const currentDefaultCommand = defaultAcpCommandForClient(form.clientId);
+  const currentDefaultStartupArgs = defaultAcpStartupArgsForClient(form.clientId);
+  const patch: FormPatch = {};
+
+  if (!currentCommand || currentCommand === currentDefaultCommand) {
+    patch.acpCommand = defaultAcpCommandForClient(nextClient);
+  }
+  if (!currentStartupArgs || currentStartupArgs === currentDefaultStartupArgs) {
+    patch.acpStartupArgs = defaultAcpStartupArgsForClient(nextClient);
+  }
+
+  return patch;
+}
 
 function safeAvatarSrc(value: string): string | null {
   const trimmed = value.trim();
@@ -36,6 +62,7 @@ export function IdentitySection({
   form,
   hasError,
   avatarUploading,
+  hasDossier,
   onChange,
   onAvatarUpload,
   onRefAudioUpload,
@@ -44,6 +71,8 @@ export function IdentitySection({
   form: HubCatEditorFormState;
   hasError?: boolean;
   avatarUploading: boolean;
+  /** F208 OQ-9: true when this cat has a structured dossier profile. */
+  hasDossier?: boolean;
   onChange: (patch: FormPatch) => void;
   onAvatarUpload: (file: File) => Promise<void>;
   onRefAudioUpload: (file: File) => Promise<void>;
@@ -69,12 +98,23 @@ export function IdentitySection({
           <input type="hidden" aria-label="Cat ID" value={form.catId} />
         </>
       ) : (
-        <TextField
-          label="名称"
-          ariaLabel="Name"
-          value={form.name}
-          onChange={(value) => onChange({ name: value, displayName: value })}
-        />
+        <>
+          {/* #968: Show catId (read-only) — above name so identity is first */}
+          <label className="flex flex-col gap-1.5 text-cafe sm:flex-row sm:items-center sm:gap-[14px]">
+            <span className="text-xs font-bold text-cafe-secondary sm:w-[150px] sm:shrink-0">Cat ID</span>
+            <div className="min-w-0 flex-1">
+              <code className="block w-full rounded-lg border border-transparent bg-[var(--console-field-bg)] px-3 py-1.5 font-mono text-xs text-cafe-secondary select-all">
+                {form.catId}
+              </code>
+            </div>
+          </label>
+          <TextField
+            label="名称"
+            ariaLabel="Name"
+            value={form.name}
+            onChange={(value) => onChange({ name: value, displayName: value })}
+          />
+        </>
       )}
 
       <TextField
@@ -82,7 +122,7 @@ export function IdentitySection({
         ariaLabel="Nickname"
         value={form.nickname}
         onChange={(value) => onChange({ nickname: value })}
-        placeholder="可选，铲屎官给的昵称"
+        placeholder="可选，co-creator给的昵称"
       />
       <TextField
         label="显示后缀"
@@ -147,6 +187,14 @@ export function IdentitySection({
         onChange={(hex) => onChange({ colorPrimary: hex, colorSecondary: hex })}
       />
 
+      {hasDossier && (
+        <p className="rounded-lg bg-conn-purple-bg px-3 py-1.5 text-xs text-conn-purple-text">
+          此猫已有结构化能力画像，擅长领域由画像驱动。此字段保留为社区兜底。
+          <a href="/settings?s=profiles" className="ml-1 underline hover:no-underline">
+            前往画像页 →
+          </a>
+        </p>
+      )}
       <TextField
         label="擅长领域"
         ariaLabel="Team Strengths"
@@ -202,6 +250,8 @@ export const KNOWN_OC_PROVIDERS = [
   'google',
   'azure',
   'deepseek',
+  'zhipu',
+  'glm',
 ];
 
 /** Merge well-known providers with any prefixes extracted from model strings like "openai/gpt-5.4". */
@@ -273,8 +323,9 @@ interface CallHint {
   warning: string;
 }
 
-// Generate a hint showing what API endpoint the CLI will actually call
-function buildCallHint(
+// Generate a hint showing what API endpoint the CLI will actually call.
+// Exported for testing (#886 regression coverage).
+export function buildCallHint(
   client: string,
   profile: ProfileItem | undefined,
   model: string,
@@ -282,9 +333,9 @@ function buildCallHint(
 ): CallHint | null {
   if (!profile || profile.authType === 'oauth' || !profile.baseUrl) return null;
   const base = profile.baseUrl.replace(/\/+$/, '');
-  const hasV1Suffix = /\/v1$/i.test(base);
-  // Strip trailing /v1 from base to avoid /v1/v1 duplication when pathSuffix already includes /v1
-  const baseWithoutV1 = hasV1Suffix ? base.replace(/\/v1$/i, '') : base;
+  // #886: detect ANY api-version suffix (/v1, /v2, …), not just /v1.
+  const versionMatch = base.match(/\/(v\d+)$/i);
+  const baseWithoutVersion = versionMatch ? base.slice(0, -versionMatch[0].length) : base;
 
   // For opencode, derive endpoint dynamically from provider name (sole authority)
   const ocPath = client === 'opencode' ? resolveOpenCodeEndpoint(providerName) : undefined;
@@ -294,14 +345,25 @@ function buildCallHint(
     opencode: { cli: 'opencode', pathSuffix: ocPath ?? '/v1/chat/completions' },
     openai: { cli: 'codex', pathSuffix: '/v1/responses' },
     google: { cli: 'gemini', pathSuffix: `/models/${model || '...'}:generateContent` },
-    dare: { cli: 'dare', pathSuffix: '/v1/chat/completions' },
   };
   const info = cliEndpoints[client];
   if (!info) return null;
 
-  // Use baseWithoutV1 for paths starting with /v1 to avoid duplication
-  const effectiveBase = info.pathSuffix.startsWith('/v1') ? baseWithoutV1 : base;
-  const fullUrl = `${effectiveBase}${info.pathSuffix}`;
+  // Match display URL to actual CLI runtime behavior:
+  // - base has /v1 + suffix has /v1 → strip /v1 from base to avoid /v1/v1.
+  // - only opencode uses provider base URLs as exact endpoint roots; for /vN
+  //   bases it calls /vN/<endpoint>, not /vN/v1/<endpoint> (#886).
+  //   Other CLIs keep their own /v1 suffix semantics.
+  let effectiveBase = base;
+  let effectiveSuffix = info.pathSuffix;
+  if (info.pathSuffix.startsWith('/v1') && versionMatch) {
+    if (versionMatch[1].toLowerCase() === 'v1') {
+      effectiveBase = baseWithoutVersion;
+    } else if (client === 'opencode') {
+      effectiveSuffix = info.pathSuffix.slice(3); // strip "/v1" prefix
+    }
+  }
+  const fullUrl = `${effectiveBase}${effectiveSuffix}`;
   let warning = '';
   if (client === 'google') {
     warning = '\n注意: Google 官方 endpoint 仍要求 builtin OAuth；第三方 gateway 会走这里展示的 baseUrl。';
@@ -345,11 +407,47 @@ export function AccountSection({
           label="Client"
           value={form.clientId}
           options={CLIENT_OPTIONS}
-          onChange={(value) =>
-            onChange({ clientId: value as HubCatEditorFormState['clientId'], provider: '', cliEffort: '' })
-          }
+          onChange={(value) => {
+            const nextClient = value as HubCatEditorFormState['clientId'];
+            const forceAcp = isAcpOnlyClient(nextClient);
+            const nextAcpEnabled = forceAcp || (showTransportSelector(nextClient) && form.acpEnabled);
+            onChange({
+              clientId: nextClient,
+              provider: '',
+              cliEffort: '',
+              acpEnabled: nextAcpEnabled,
+              ...(nextAcpEnabled ? acpDefaultsForClientSwitch(form, nextClient) : {}),
+            });
+          }}
           required
         />
+
+        {showTransportSelector(form.clientId) ? (
+          <SelectField
+            label="Transport"
+            ariaLabel="Transport"
+            value={form.acpEnabled ? 'acp' : 'cli'}
+            options={ACP_TRANSPORT_OPTIONS}
+            onChange={(value) => {
+              const acpEnabled = value === 'acp';
+              onChange({
+                acpEnabled,
+                ...(acpEnabled && !form.acpCommand.trim()
+                  ? { acpCommand: defaultAcpCommandForClient(form.clientId) }
+                  : {}),
+                ...(acpEnabled && !form.acpStartupArgs.trim()
+                  ? { acpStartupArgs: defaultAcpStartupArgsForClient(form.clientId) }
+                  : {}),
+              });
+            }}
+            required
+          />
+        ) : null}
+
+        {(() => {
+          const acpWarn = getAcpWarning(form.clientId, form.acpEnabled);
+          return acpWarn ? <p className="text-xs text-amber-600 dark:text-amber-400">⚠️ {acpWarn}</p> : null;
+        })()}
 
         {form.clientId === 'antigravity' ? (
           <>
@@ -378,7 +476,8 @@ export function AccountSection({
                 ...accountOptions
                   .filter((profile) => {
                     // Gemini CLI doesn't support custom API endpoints — only show builtin
-                    if (form.clientId === 'google' && profile.authType !== 'oauth') return false;
+                    // but allow api_key profiles with a third-party baseUrl (#470)
+                    if (form.clientId === 'google' && profile.authType !== 'oauth' && !profile.baseUrl) return false;
                     return true;
                   })
                   .map((profile) => ({
@@ -450,8 +549,57 @@ export function AccountSection({
                 </p>
               </div>
             ) : null}
+            {form.acpEnabled ? (
+              <>
+                <TextField
+                  label="ACP Command"
+                  value={form.acpCommand}
+                  onChange={(value) => onChange({ acpCommand: value })}
+                  required
+                  placeholder={defaultAcpCommandForClient(form.clientId) || 'agent-cli'}
+                />
+                <TextField
+                  label="ACP Startup Args"
+                  value={form.acpStartupArgs}
+                  onChange={(value) => onChange({ acpStartupArgs: value })}
+                  required
+                  placeholder={defaultAcpStartupArgsForClient(form.clientId) || '--acp'}
+                />
+                <p className="-mt-1 text-micro leading-4 text-cafe-muted">
+                  空格分隔，如 <code className="text-cafe-secondary">acp --pure</code> 或{' '}
+                  <code className="text-cafe-secondary">--acp --mode agent</code>。带空格的值用引号包裹。
+                </p>
+                <TextField
+                  label="ACP Max Processes"
+                  value={form.acpMaxLiveProcesses}
+                  onChange={(value) => onChange({ acpMaxLiveProcesses: value })}
+                  inputMode="numeric"
+                  placeholder="3"
+                />
+                <TextField
+                  label="ACP Idle TTL (min)"
+                  value={form.acpIdleTtlMinutes}
+                  onChange={(value) => onChange({ acpIdleTtlMinutes: value })}
+                  inputMode="numeric"
+                  placeholder="30"
+                />
+              </>
+            ) : null}
           </>
         )}
+        <SelectField
+          label="MCP Support"
+          value={form.mcpSupport ? 'true' : 'false'}
+          options={[
+            { value: 'true', label: '开启' },
+            { value: 'false', label: '关闭' },
+          ]}
+          onChange={(value) => onChange({ mcpSupport: value === 'true' })}
+        />
+        <p className="-mt-1 text-micro leading-4 text-cafe-muted">
+          控制该成员是否接收 Clowder AI MCP 工具（post_message、search_evidence
+          等）。关闭后该成员无法使用协作和记忆工具。
+        </p>
       </div>
     </SectionCard>
   );

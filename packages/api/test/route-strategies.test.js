@@ -850,14 +850,41 @@ describe('routeSerial A2A worklist', () => {
     assert.equal(deferred.priority, 'normal', 'deferred entry priority must be normal');
   });
 
-  it('does not defer A2A enqueue when signal is aborted (cloud P1-1)', async () => {
+  it('defers A2A enqueue when signal is aborted without user reason (#813 seal recovery)', async () => {
     const { routeSerial } = await import('../dist/domains/cats/services/agents/routing/route-serial.js');
     const ac = new AbortController();
     const deps = createMockDeps({
       opus: {
         async *invoke() {
           yield { type: 'text', catId: 'opus', content: '完成\n@缅因猫 帮忙', timestamp: Date.now() };
-          ac.abort();
+          ac.abort(); // no reason → seal/context-exhaustion case
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+        },
+      },
+      codex: createMockService('codex', 'should not run inline'),
+    });
+
+    const deferredEntries = [];
+    const messages = [];
+    for await (const msg of routeSerial(deps, ['opus'], 'test', 'user1', 'thread1', {
+      queueHasQueuedMessages: () => true,
+      deferA2AEnqueue: (entry) => deferredEntries.push(entry),
+      signal: ac.signal,
+    })) {
+      messages.push(msg);
+    }
+
+    assert.equal(deferredEntries.length, 1, 'abort without user reason must defer @mention for seal recovery');
+  });
+
+  it('does not defer A2A enqueue when signal is aborted by user_cancel (P2 gate)', async () => {
+    const { routeSerial } = await import('../dist/domains/cats/services/agents/routing/route-serial.js');
+    const ac = new AbortController();
+    const deps = createMockDeps({
+      opus: {
+        async *invoke() {
+          yield { type: 'text', catId: 'opus', content: '完成\n@缅因猫 帮忙', timestamp: Date.now() };
+          ac.abort('user_cancel'); // user explicitly stopped the flow
           yield { type: 'done', catId: 'opus', timestamp: Date.now() };
         },
       },
@@ -874,7 +901,7 @@ describe('routeSerial A2A worklist', () => {
       messages.push(msg);
     }
 
-    assert.equal(deferredEntries.length, 0, 'deferred enqueue must not fire when signal is aborted');
+    assert.equal(deferredEntries.length, 0, 'user_cancel abort must suppress A2A recovery');
   });
 
   it('does not defer A2A enqueue for cat already in pendingTail (cloud P1-2)', async () => {
@@ -1626,7 +1653,7 @@ describe('F155 guide offer ownership', () => {
             guideId: 'add-member',
             status: 'offered',
             offeredAt: Date.now(),
-            offeredBy: 'dare',
+            offeredBy: 'gemini',
           },
         };
       },
@@ -1672,7 +1699,7 @@ describe('F155 guide offer ownership', () => {
             guideId: 'add-member',
             status: 'awaiting_choice',
             offeredAt: Date.now(),
-            offeredBy: 'dare',
+            offeredBy: 'gemini',
           },
         };
       },
@@ -1761,7 +1788,7 @@ describe('F155 guide offer ownership', () => {
             guideId: 'add-member',
             status: 'offered',
             offeredAt: Date.now(),
-            offeredBy: 'dare',
+            offeredBy: 'gemini',
           },
         };
       },
@@ -1804,7 +1831,7 @@ describe('F155 guide offer ownership', () => {
             guideId: 'add-member',
             status: 'awaiting_choice',
             offeredAt: Date.now(),
-            offeredBy: 'dare',
+            offeredBy: 'gemini',
           },
         };
       },
@@ -2030,7 +2057,7 @@ describe('F155 guide completion ack ownership', () => {
       status: 'completed',
       offeredAt: Date.now(),
       completedAt: Date.now(),
-      offeredBy: 'dare',
+      offeredBy: 'gemini',
     };
     const { threadStore, sessionStore, bridge } = await createGuideAckFixture(completedGuide, 'default');
     const opusService = createCapturingService('opus', '我来接着处理');
@@ -2083,7 +2110,7 @@ describe('F155 guide completion ack ownership', () => {
       status: 'completed',
       offeredAt: Date.now(),
       completedAt: Date.now(),
-      offeredBy: 'dare',
+      offeredBy: 'gemini',
     };
     const { threadStore, sessionStore, bridge } = await createGuideAckFixture(completedGuide, 'default');
     const opusService = createCapturingService('opus', '我来接着处理');
@@ -2753,10 +2780,10 @@ function createDoneOnlyService(catId) {
 }
 
 /** Mock service that yields a visible system_info notice but no text */
-function createVisibleNoticeOnlyService(catId, content) {
+function createVisibleNoticeOnlyService(catId, content, metadata) {
   return {
     async *invoke() {
-      yield { type: 'system_info', catId, content, timestamp: Date.now() };
+      yield { type: 'system_info', catId, content, ...(metadata ? { metadata } : {}), timestamp: Date.now() };
       yield { type: 'done', catId, timestamp: Date.now() };
     },
   };
@@ -2804,6 +2831,52 @@ describe('routeSerial: done-only (no text, no error)', () => {
       messages.some((m) => m.type === 'system_info' && m.content?.includes('completed without textual output')),
       false,
       'should not add a duplicate silent_completion after a visible notice',
+    );
+  });
+
+  it('keeps provider silent_completion system notice off the error path', async () => {
+    const { routeSerial } = await import('../dist/domains/cats/services/agents/routing/route-serial.js');
+    const appendCalls = [];
+    const deps = createMockDeps(
+      {
+        codex: createVisibleNoticeOnlyService(
+          'codex',
+          JSON.stringify({ type: 'silent_completion', detail: 'No text' }),
+          {
+            cliDiagnostics: {
+              reasonCode: 'silent_completion',
+              publicSummary: 'CLI 完成但无文字输出',
+              publicHint: '展开详细诊断',
+              debugRef: { command: 'opencode', exitCode: 0, signal: null },
+            },
+          },
+        ),
+      },
+      appendCalls,
+    );
+
+    const messages = [];
+    for await (const msg of routeSerial(deps, ['codex'], 'test', 'user1', 'thread1', {
+      thinkingMode: 'play',
+    })) {
+      messages.push(msg);
+    }
+
+    assert.equal(
+      messages.some((m) => m.type === 'error' && m.metadata?.cliDiagnostics?.reasonCode === 'silent_completion'),
+      false,
+      'silent_completion diagnostic must not mark provider error',
+    );
+    assert.equal(
+      messages.filter((m) => m.type === 'system_info' && m.metadata?.cliDiagnostics?.reasonCode === 'silent_completion')
+        .length,
+      1,
+      'silent_completion diagnostic should remain user-visible as system_info',
+    );
+    assert.equal(
+      appendCalls.some((c) => c.userId === 'system' && c.content?.startsWith('Error:')),
+      false,
+      'route must not persist silent_completion as red system error',
     );
   });
 
@@ -2875,6 +2948,50 @@ describe('routeParallel: done-only (no text, no error)', () => {
       messages.some((m) => m.type === 'system_info' && m.content?.includes('completed without textual output')),
       false,
       'should not add a duplicate silent_completion after a visible notice',
+    );
+  });
+
+  it('keeps provider silent_completion system notice off the error path', async () => {
+    const { routeParallel } = await import('../dist/domains/cats/services/agents/routing/route-parallel.js');
+    const appendCalls = [];
+    const deps = createMockDeps(
+      {
+        codex: createVisibleNoticeOnlyService(
+          'codex',
+          JSON.stringify({ type: 'silent_completion', detail: 'No text' }),
+          {
+            cliDiagnostics: {
+              reasonCode: 'silent_completion',
+              publicSummary: 'CLI 完成但无文字输出',
+              publicHint: '展开详细诊断',
+              debugRef: { command: 'opencode', exitCode: 0, signal: null },
+            },
+          },
+        ),
+      },
+      appendCalls,
+    );
+
+    const messages = [];
+    for await (const msg of routeParallel(deps, ['codex'], 'test', 'user1', 'thread1')) {
+      messages.push(msg);
+    }
+
+    assert.equal(
+      messages.some((m) => m.type === 'error' && m.metadata?.cliDiagnostics?.reasonCode === 'silent_completion'),
+      false,
+      'silent_completion diagnostic must not mark provider error',
+    );
+    assert.equal(
+      messages.filter((m) => m.type === 'system_info' && m.metadata?.cliDiagnostics?.reasonCode === 'silent_completion')
+        .length,
+      1,
+      'silent_completion diagnostic should remain user-visible as system_info',
+    );
+    assert.equal(
+      appendCalls.some((c) => c.userId === 'system' && c.content?.startsWith('Error:')),
+      false,
+      'route must not persist silent_completion as red system error',
     );
   });
 });

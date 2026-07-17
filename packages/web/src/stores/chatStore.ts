@@ -3,6 +3,12 @@ import { getBubbleInvocationId } from '@/debug/bubbleIdentity';
 import { isBubbleInvariantStrictModeOn, recordBubbleInvariantViolation } from '@/debug/bubbleInvariantDiagnostics';
 import { recordDebugEvent } from '@/debug/invocationEventDebug';
 import { getCachedCats } from '@/hooks/useCatData';
+import { inferFileKind, inferRenderMode } from '@/lib/file-kind';
+import {
+  resolveNavigateTargetWorktreeId,
+  scopeWorktreeAliases,
+  type WorktreeAliasMap,
+} from '@/utils/worktree-id-alias';
 import { saveThreadMessages as saveMessagesSnapshot, saveThreads as saveThreadsSnapshot } from '../utils/offline-store';
 import { findBubbleStoreInvariantViolations } from './bubble-invariants';
 import type {
@@ -11,8 +17,10 @@ import type {
   ChatMessage,
   ChatMessageMetadata,
   ChatMessagePatch,
+  ComposerDraftInsert,
   GameState,
   PresentationLockSnapshot,
+  PresentationSurfaceState,
   QueueEntry,
   RichBlock,
   Thread,
@@ -482,6 +490,11 @@ function fireOwnerMentionNotification(msg: ChatMessage) {
 function findAssistantDuplicate(messages: ChatMessage[], incoming: ChatMessage): number {
   if (incoming.type !== 'assistant' || !incoming.catId) return -1;
 
+  // #814: Explicit post_message callbacks are independent messages — never merge.
+  // post_message is a cat-initiated separate communication (e.g., @mention to another cat),
+  // not a duplicate of the same response arriving via stream+callback paths.
+  if (incoming.origin === 'callback' && incoming.extra?.isExplicitPost) return -1;
+
   const incomingInvId = getBubbleInvocationId(incoming);
 
   // Phase 1: Hard rule — scan ALL same-cat assistants for exact invocationId match.
@@ -490,6 +503,11 @@ function findAssistantDuplicate(messages: ChatMessage[], incoming: ChatMessage):
     for (let i = messages.length - 1; i >= 0; i--) {
       const existing = messages[i]!;
       if (existing.type !== 'assistant' || existing.catId !== incoming.catId) continue;
+      // #814: explicit post_message is standalone — never match as merge target,
+      // even though it carries stream.invocationId for #573 correlation.
+      // Without this guard, a stream chunk arriving after F5/hydration would
+      // match the hydrated explicit post by invocationId and overwrite it.
+      if (existing.extra?.isExplicitPost) continue;
       const existingInvId = getBubbleInvocationId(existing);
       if (existingInvId === incomingInvId) {
         if (existing.id !== incoming.id && crossesUserTurnBoundary(messages, existing, incoming)) continue;
@@ -955,6 +973,8 @@ export interface ChatState {
   // ── F63: Workspace Explorer ──
   rightPanelMode: 'status' | 'workspace' | 'transcript';
   workspaceWorktreeId: string | null;
+  workspaceWorktreeAliases: WorktreeAliasMap;
+  workspaceWorktreeAliasesProjectPath: string | null;
   workspaceOpenTabs: string[];
   workspaceOpenFilePath: string | null;
   workspaceOpenFileLine: number | null;
@@ -964,7 +984,11 @@ export interface ChatState {
    * Used by WorkspacePanel to distinguish fresh navigate from stale leftovers on mount. */
   _workspaceFileSetAt: { ts: number; threadId: string | null };
   setRightPanelMode: (mode: 'status' | 'workspace' | 'transcript') => void;
+  /** 显式关闭右侧 panel 时退出 workspace/transcript mode（否则 ChatContainer auto-open effect 立即重开，关不掉）。 */
+  closeRightPanel: () => void;
   setWorkspaceWorktreeId: (id: string | null) => void;
+  normalizeWorkspaceWorktreeId: (id: string | null) => void;
+  setWorkspaceWorktreeAliases: (aliases: WorktreeAliasMap, projectPath?: string) => void;
   setWorkspaceOpenFile: (
     path: string | null,
     line?: number | null,
@@ -986,9 +1010,22 @@ export interface ChatState {
   setPresentationLockViewport: (scrollTop: number) => void;
   workspaceScrollTop: number | null;
 
-  // Phase H + F139 + F160 + F168: Workspace mode
-  workspaceMode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community';
-  setWorkspaceMode: (mode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community') => void;
+  // F226: Presentation Surface — file/md tear-off floating window
+  presentationSurface: PresentationSurfaceState | null;
+  detachToFloat: () => void;
+  dockBack: () => void;
+  closeFloat: () => void;
+  minimizeFloat: (minimized: boolean) => void;
+  setFloatPos: (pos: { x: number; y: number }) => void;
+  setFloatSize: (size: { width: number; height: number }) => void;
+  toggleMaximize: () => void;
+
+  // Phase H + F139 + F160 + F168 + F246: Workspace mode
+  // F233 Phase C C3: 'trajectory' — feat 球权轨迹时间轴
+  workspaceMode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community' | 'artifacts' | 'approval' | 'trajectory';
+  setWorkspaceMode: (
+    mode: 'dev' | 'recall' | 'schedule' | 'tasks' | 'community' | 'artifacts' | 'approval' | 'trajectory',
+  ) => void;
 
   // ── F195 Phase C: Floating transcript window ──
   floatingTranscriptVisible: boolean;
@@ -999,13 +1036,18 @@ export interface ChatState {
   setPendingPreviewAutoOpen: (data: { port: number; path: string }) => void;
   consumePreviewAutoOpen: () => { port: number; path: string } | null;
 
-  // ── F63-AC15: Code-to-chat reference ──
-  pendingChatInsert: { threadId: string; text: string } | null;
-  setPendingChatInsert: (insert: { threadId: string; text: string } | null) => void;
+  // ── F63-AC15: Code-to-chat reference ── #706: typed ComposerDraftInsert for recall-edit
+  pendingChatInsert: ComposerDraftInsert | null;
+  setPendingChatInsert: (insert: ComposerDraftInsert | null) => void;
 
   // ── F079: Vote modal ──
   showVoteModal: boolean;
   setShowVoteModal: (show: boolean) => void;
+
+  // ── #699: Reply-to (quote) state (threadId scoped for split-pane safety) ──
+  replyToMessage: { id: string; content: string; senderCatId: string | null; threadId: string } | null;
+  setReplyTo: (msg: { id: string; content: string; senderCatId: string | null; threadId: string }) => void;
+  clearReplyTo: () => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -1241,6 +1283,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // ── F63: Workspace Explorer ──
   rightPanelMode: 'status' as const,
   workspaceWorktreeId: null,
+  workspaceWorktreeAliases: {},
+  workspaceWorktreeAliasesProjectPath: null,
   workspaceOpenTabs: [],
   workspaceOpenFilePath: null,
   workspaceOpenFileLine: null,
@@ -1248,6 +1292,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   workspaceEditTokenExpiry: null,
   _workspaceFileSetAt: { ts: 0, threadId: null },
   setRightPanelMode: (mode) => set({ rightPanelMode: mode }),
+  // F232 P2（云端 round 5）：workspace/transcript mode 被 ChatContainer auto-open effect 强制开，
+  // 显式关闭 panel 时必须先退出这两个 mode 回 status，否则 effect 立即重开（关不掉）。status 无此问题，保留。
+  closeRightPanel: () =>
+    set((s) => ({
+      rightPanelMode:
+        s.rightPanelMode === 'workspace' || s.rightPanelMode === 'transcript' ? 'status' : s.rightPanelMode,
+    })),
   setWorkspaceWorktreeId: (id) => {
     // Guard: skip destructive reset when worktreeId is unchanged.
     // setWorkspaceWorktreeId unconditionally clears openFilePath/openTabs,
@@ -1270,13 +1321,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }
   },
+  normalizeWorkspaceWorktreeId: (id) =>
+    set((state) => {
+      if (id === state.workspaceWorktreeId) return state;
+      const oldWorktreeId = state.workspaceWorktreeId;
+      const lock = state.presentationLock;
+      return {
+        workspaceWorktreeId: id,
+        workspaceEditToken: null,
+        workspaceEditTokenExpiry: null,
+        ...(lock
+          ? {
+              presentationLock: {
+                ...lock,
+                worktreeId: lock.worktreeId === oldWorktreeId ? id : lock.worktreeId,
+                ownerWorkspace:
+                  lock.ownerWorkspace.worktreeId === oldWorktreeId
+                    ? { ...lock.ownerWorkspace, worktreeId: id }
+                    : lock.ownerWorkspace,
+              },
+            }
+          : {}),
+      };
+    }),
+  setWorkspaceWorktreeAliases: (aliases, projectPath) =>
+    set({
+      workspaceWorktreeAliases: aliases,
+      workspaceWorktreeAliasesProjectPath: projectPath ?? get().currentProjectPath,
+    }),
   setWorkspaceOpenFile: (path, line, targetWorktreeId, originThreadId) => {
     if (path) {
       const stamp = { ts: Date.now(), threadId: originThreadId ?? get().currentThreadId };
+      const currentWorktreeId = get().workspaceWorktreeId;
+      const state = get();
+      const scopedAliases = scopeWorktreeAliases(
+        state.workspaceWorktreeAliases,
+        state.workspaceWorktreeAliasesProjectPath,
+        state.currentProjectPath,
+      );
+      const effectiveTargetWorktreeId = resolveNavigateTargetWorktreeId(
+        currentWorktreeId,
+        targetWorktreeId,
+        scopedAliases,
+      );
       // Switch worktree if a different one is specified
-      if (targetWorktreeId && targetWorktreeId !== get().workspaceWorktreeId) {
+      if (effectiveTargetWorktreeId && effectiveTargetWorktreeId !== currentWorktreeId) {
         set({
-          workspaceWorktreeId: targetWorktreeId,
+          workspaceWorktreeId: effectiveTargetWorktreeId,
           workspaceOpenTabs: [path],
           workspaceOpenFilePath: path,
           workspaceOpenFileLine: line ?? null,
@@ -1426,6 +1517,108 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }),
   workspaceScrollTop: null,
 
+  // F226: Presentation Surface — file/md tear-off floating window
+  presentationSurface: null,
+  detachToFloat: () =>
+    set((state) => {
+      const filePath = state.workspaceOpenFilePath;
+      if (!filePath) return {};
+      const W = 420;
+      const H = 320;
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+      return {
+        presentationSurface: {
+          content: {
+            worktreeId: state.workspaceWorktreeId,
+            filePath,
+            tabs: state.workspaceOpenTabs,
+            fileKind: inferFileKind(filePath),
+            renderMode: inferRenderMode(filePath),
+            line: state.workspaceOpenFileLine,
+            // F226 云端 P2: snapshot the tracked presentation viewport (recorded by
+            // setPresentationLockViewport) so dock-back restores the reader's scroll position
+            // instead of jumping a long doc back to the top. Null when no viewport was tracked.
+            scrollTop: state.workspaceScrollTop,
+            title: filePath.split('/').pop() ?? filePath,
+          },
+          // 右下角默认位置（烁烁 UX：避免压住右侧 workspace mode tab 按钮条）
+          pos: { x: Math.max(16, vw - W - 24), y: Math.max(16, vh - H - 80) },
+          size: { width: W, height: H },
+          minimized: false,
+          maximized: false,
+          preMaximizeGeometry: null,
+        },
+      };
+    }),
+  // dock-back contract (砚砚 P1.2): switch docked back to dev + restore file snapshot
+  dockBack: () =>
+    set((state) => {
+      const surface = state.presentationSurface;
+      if (!surface) return {};
+      const c = surface.content;
+      return {
+        presentationSurface: null,
+        workspaceMode: 'dev' as const,
+        rightPanelMode: 'workspace' as const,
+        workspaceWorktreeId: c.worktreeId,
+        workspaceOpenFilePath: c.filePath,
+        workspaceOpenTabs: c.tabs,
+        workspaceOpenFileLine: c.line,
+        // F226 云端 P2: restore the snapped viewport so a long doc returns to where the presenter
+        // was (WorkspacePanel.restoreScrollTop consumes workspaceScrollTop while presentationLock holds).
+        workspaceScrollTop: c.scrollTop,
+        // F226 云端 P2: edit tokens are worktree-bound. dock-back restores worktreeId directly, so a
+        // token obtained in the interim worktree (while the docked panel was freed) must be cleared —
+        // normal worktree switches clear it (see setWorkspaceWorktreeId); otherwise edits / file-mgmt
+        // in the restored worktree fail with a stale token until the user forces a refresh.
+        workspaceEditToken: null,
+        workspaceEditTokenExpiry: null,
+      };
+    }),
+  // close/minimize must NOT mutate docked mode (砚砚 P1.2)
+  closeFloat: () => set((state) => (state.presentationSurface ? { presentationSurface: null } : {})),
+  minimizeFloat: (minimized) =>
+    set((state) =>
+      state.presentationSurface ? { presentationSurface: { ...state.presentationSurface, minimized } } : {},
+    ),
+  setFloatPos: (pos) =>
+    set((state) => (state.presentationSurface ? { presentationSurface: { ...state.presentationSurface, pos } } : {})),
+  setFloatSize: (size) =>
+    set((state) => (state.presentationSurface ? { presentationSurface: { ...state.presentationSurface, size } } : {})),
+  // F226 尺寸快捷: 一键适配 PPT (16:9 居中放大) ↔ 恢复手动尺寸。记 pre-maximize geometry → toggle 不用重新拖。
+  toggleMaximize: () =>
+    set((state) => {
+      const s = state.presentationSurface;
+      if (!s) return {};
+      if (s.maximized) {
+        // restore：回到 maximize 前的手动尺寸/位置
+        const pre = s.preMaximizeGeometry;
+        return {
+          presentationSurface: {
+            ...s,
+            maximized: false,
+            preMaximizeGeometry: null,
+            ...(pre ? { pos: pre.pos, size: pre.size } : {}),
+          },
+        };
+      }
+      // maximize：按 PPT 16:9 适配 viewport（~85%）并居中，一键看清 PPT 图
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+      const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+      const W = Math.round(Math.min(vw * 0.85, (vh * 0.85 * 16) / 9));
+      const H = Math.round((W * 9) / 16);
+      return {
+        presentationSurface: {
+          ...s,
+          maximized: true,
+          preMaximizeGeometry: { pos: s.pos, size: s.size },
+          pos: { x: Math.round((vw - W) / 2), y: Math.max(16, Math.round((vh - H) / 2)) },
+          size: { width: W, height: H },
+        },
+      };
+    }),
+
   // Phase H: Workspace mode
   workspaceMode: 'dev' as const,
   setWorkspaceMode: (mode) => set({ workspaceMode: mode, rightPanelMode: 'workspace' }),
@@ -1452,6 +1645,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   showVoteModal: false,
   setShowVoteModal: (show) => set({ showVoteModal: show }),
+
+  // ── #699: Reply-to (quote) state ──
+  replyToMessage: null,
+  setReplyTo: (msg) => set({ replyToMessage: msg }),
+  clearReplyTo: () => set({ replyToMessage: null }),
 
   // ── Active-thread actions ──
 
@@ -2011,7 +2209,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     void saveThreadsSnapshot(threads).catch(() => {});
   },
   setCurrentProject: (projectPath) =>
-    set((state) => (state.currentProjectPath === projectPath ? state : { currentProjectPath: projectPath })),
+    set((state) =>
+      state.currentProjectPath === projectPath
+        ? state
+        : {
+            currentProjectPath: projectPath,
+            workspaceWorktreeAliases: {},
+            workspaceWorktreeAliasesProjectPath: projectPath,
+          },
+    ),
   setLoadingThreads: (loading) => set({ isLoadingThreads: loading }),
   setOfflineSnapshot: (v) => set({ isOfflineSnapshot: v }),
 
@@ -2138,6 +2344,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           [state.currentThreadId]: saved,
         },
         ...flattened,
+        // #934: Clear reply-to on switch — ChatInput will restore from threadReplyDrafts on mount.
+        // This prevents stale reply context from the outgoing thread leaking into the new thread.
+        replyToMessage: null,
       };
     }),
 

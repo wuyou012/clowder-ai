@@ -9,6 +9,7 @@ const memoryDomain = {
   evalCat: { catId: 'opus47', handle: '@opus47', model: 'claude-opus-4-7' },
   frequency: 'daily',
   sourceAdapter: 'f200-f188-memory-eval',
+  sourceRefsKind: 'memory-recall-snapshot',
   threadPolicy: {
     role: 'working-home',
     stateSot: 'registry',
@@ -39,6 +40,7 @@ const healthyRecallMetrics = {
     tokenCostPerHit: 1200,
     consumedAnchorNotInPoolRate: 0.03,
     shadowConsumedMRR: null,
+    liveOnShadowSubsetMRR: null,
   },
   graph: {
     nonFirstSelectionRate: 0.18,
@@ -159,6 +161,7 @@ describe('eval-memory-adapter', () => {
               tokenCostPerHit: 0,
               consumedAnchorNotInPoolRate: 0,
               shadowConsumedMRR: null,
+              liveOnShadowSubsetMRR: null,
             },
             graph: { nonFirstSelectionRate: 0, traversalCompletion: 0 },
           },

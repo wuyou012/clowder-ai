@@ -1,13 +1,19 @@
 /**
- * GeminiAcpAdapter unit tests — Phase C: pool-backed AgentService via AcpClient.
+ * AcpAgentService unit tests — Phase C: pool-backed AgentService via AcpClient.
+ * F161: Renamed from GeminiAcpAdapter tests.
  */
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, it, mock } from 'node:test';
 
-const { GeminiAcpAdapter } = await import('../../dist/domains/cats/services/agents/providers/acp/GeminiAcpAdapter.js');
+const { AcpAgentService: GeminiAcpAdapter } = await import(
+  '../../dist/domains/cats/services/agents/providers/acp/AcpAgentService.js'
+);
 const { AcpProcessPool } = await import('../../dist/domains/cats/services/agents/providers/acp/AcpProcessPool.js');
 const { AcpClient } = await import('../../dist/domains/cats/services/agents/providers/acp/AcpClient.js');
 
@@ -67,8 +73,42 @@ function createPoolWithAutoRespond() {
       } else if (msg.method === 'session/new') {
         setImmediate(() =>
           agentStdout.write(
-            JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: `sess-${Date.now()}` } }) + '\n',
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: msg.id,
+              result: {
+                sessionId: `sess-${Date.now()}`,
+                configOptions: [
+                  {
+                    id: 'model',
+                    type: 'select',
+                    currentValue: 'google/gemini-default',
+                    options: [
+                      { value: 'google/gemini-default', name: 'Gemini Default' },
+                      { value: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6' },
+                    ],
+                  },
+                ],
+              },
+            }) + '\n',
           ),
+        );
+      } else if (msg.method === 'session/load') {
+        setImmediate(() =>
+          agentStdout.write(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: msg.id,
+              result: {
+                sessionId: msg.params.sessionId,
+                configOptions: [],
+              },
+            }) + '\n',
+          ),
+        );
+      } else if (msg.method === 'session/set_config_option') {
+        setImmediate(() =>
+          agentStdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { configOptions: [] } }) + '\n'),
         );
       } else if (msg.method === 'session/prompt') {
         setImmediate(() => {
@@ -125,7 +165,14 @@ describe('GeminiAcpAdapter', () => {
   it('invoke yields session_init + text + done', async () => {
     const result = createPoolWithAutoRespond();
     pool = result.pool;
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const messages = [];
     for await (const msg of adapter.invoke('hello')) {
@@ -148,16 +195,17 @@ describe('GeminiAcpAdapter', () => {
     assert.equal(doneMsg.metadata.provider, 'google');
   });
 
-  it('passes mcpServers to session/new when configured', async () => {
+  it('passes mcpServers to session/new when mcpServers configured', async () => {
     const { pool: p, captured } = createPoolWithAutoRespond();
     pool = p;
-    const mcpServers = [{ name: 'test-server', command: 'node', args: ['test.js'], env: [{ name: 'K', value: 'V' }] }];
+    // F161: AcpAgentService receives pre-resolved mcpServers from AcpServiceFactory
+    // (whitelist → server resolution happens at factory level, not adapter level)
     const adapter = new GeminiAcpAdapter({
       catId: 'gemini',
       pool,
       poolKey: TEST_POOL_KEY,
       projectRoot: '/tmp',
-      mcpServers,
+      mcpServers: [{ name: 'cat-cafe-collab', command: 'node', args: ['collab.js'] }],
     });
 
     const messages = [];
@@ -167,13 +215,227 @@ describe('GeminiAcpAdapter', () => {
 
     const sessionNew = captured.find((m) => m.method === 'session/new');
     assert.ok(sessionNew, 'Expected session/new in captured messages');
-    assert.deepStrictEqual(sessionNew.params.mcpServers, mcpServers);
+    assert.ok(sessionNew.params.mcpServers.length > 0, 'Should have resolved MCP servers');
+    assert.equal(sessionNew.params.mcpServers[0].name, 'cat-cafe-collab');
+  });
+
+  it('reloads resumed ACP sessions with fresh callback MCP env', async () => {
+    const { pool: p, captured } = createPoolWithAutoRespond();
+    pool = p;
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      mcpServers: [
+        {
+          name: 'cat-cafe-collab',
+          command: 'node',
+          args: ['mcp.js'],
+          env: [
+            { name: 'CAT_CAFE_INVOCATION_ID', value: 'old-invocation' },
+            { name: 'CAT_CAFE_CALLBACK_TOKEN', value: 'old-token' },
+          ],
+        },
+      ],
+    });
+
+    for await (const _ of adapter.invoke('resume turn', {
+      sessionId: 'sess-existing',
+      callbackEnv: {
+        CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+        CAT_CAFE_INVOCATION_ID: 'new-invocation',
+        CAT_CAFE_CALLBACK_TOKEN: 'new-token',
+        CAT_CAFE_THREAD_ID: 'thread-new',
+      },
+    })) {
+      /* drain */
+    }
+
+    const sessionLoad = captured.find((m) => m.method === 'session/load');
+    assert.ok(sessionLoad, 'resumed ACP turns must call session/load to refresh per-invocation MCP env');
+    assert.equal(sessionLoad.params.sessionId, 'sess-existing');
+    assert.equal(
+      captured.some((m) => m.method === 'session/new'),
+      false,
+      'successful resume must not create a new session',
+    );
+    const env = sessionLoad.params.mcpServers[0].env;
+    assert.deepEqual(Object.fromEntries(env.map((entry) => [entry.name, entry.value])), {
+      CAT_CAFE_INVOCATION_ID: 'new-invocation',
+      CAT_CAFE_CALLBACK_TOKEN: 'new-token',
+      CAT_CAFE_API_URL: 'http://127.0.0.1:3004',
+      CAT_CAFE_THREAD_ID: 'thread-new',
+    });
+  });
+
+  it('preserves ACP session affinity when resuming across idle pool clients', async () => {
+    const makeClient = (name, ownedSessionIds) => {
+      const client = {
+        name,
+        loadSessionCalls: [],
+        newSessionCalls: 0,
+        promptedSessionIds: [],
+        recentCapacitySignal: null,
+        async newSession() {
+          client.newSessionCalls++;
+          return { sessionId: `${name}-fresh-session` };
+        },
+        async loadSession(sessionId) {
+          client.loadSessionCalls.push(sessionId);
+          if (!ownedSessionIds.has(sessionId)) throw new Error(`${name} does not own ${sessionId}`);
+          return { sessionId };
+        },
+        async setSessionConfigOption() {},
+        cancelSession() {},
+        async *promptStream(sessionId) {
+          client.promptedSessionIds.push(sessionId);
+          yield {
+            sessionId,
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `resumed via ${name}` } },
+          };
+        },
+        onCapacity() {},
+        offCapacity() {},
+        clearRecentCapacitySignal() {},
+      };
+      return client;
+    };
+
+    const owningClient = makeClient('owner', new Set(['sess-owned']));
+    const wrongClient = makeClient('wrong', new Set());
+    const acquireCalls = [];
+    const rememberedSessions = [];
+    const fakePool = {
+      async acquire(poolKey, options) {
+        acquireCalls.push({ poolKey, options });
+        const client = options?.sessionId === 'sess-owned' ? owningClient : wrongClient;
+        return {
+          client,
+          poolKey,
+          release() {},
+        };
+      },
+      rememberSession(_poolKey, sessionId, lease) {
+        rememberedSessions.push({ sessionId, client: lease.client.name });
+      },
+    };
+
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool: fakePool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
+
+    const messages = [];
+    for await (const msg of adapter.invoke('resume turn', { sessionId: 'sess-owned' })) {
+      messages.push(msg);
+    }
+
+    assert.equal(acquireCalls[0].options?.sessionId, 'sess-owned', 'resume acquire must request session affinity');
+    assert.deepEqual(owningClient.loadSessionCalls, ['sess-owned']);
+    assert.deepEqual(wrongClient.loadSessionCalls, []);
+    assert.equal(wrongClient.newSessionCalls, 0, 'resume must not fresh-fallback on a wrong idle client');
+    assert.deepEqual(owningClient.promptedSessionIds, ['sess-owned']);
+    assert.deepEqual(rememberedSessions, [{ sessionId: 'sess-owned', client: 'owner' }]);
+    assert.ok(messages.some((m) => m.type === 'text' && m.content === 'resumed via owner'));
+  });
+
+  it('falls back to session/new when resumed ACP session cannot be loaded', async () => {
+    const { child, clientStdin, agentStdout } = createMockChild();
+    const captured = [];
+
+    clientStdin.on('data', (chunk) => {
+      for (const line of chunk.toString().trim().split('\n')) {
+        const msg = JSON.parse(line);
+        captured.push(msg);
+        if (msg.method === 'initialize') {
+          setImmediate(() =>
+            agentStdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: INIT_RESULT }) + '\n'),
+          );
+        } else if (msg.method === 'session/load') {
+          setImmediate(() =>
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: msg.id,
+                error: { code: -32000, message: 'session not found' },
+              }) + '\n',
+            ),
+          );
+        } else if (msg.method === 'session/new') {
+          setImmediate(() =>
+            agentStdout.write(
+              JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { sessionId: 'fresh-session' } }) + '\n',
+            ),
+          );
+        } else if (msg.method === 'session/prompt') {
+          setImmediate(() => {
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: msg.params.sessionId,
+                  update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'fresh ok' } },
+                },
+              }) + '\n',
+            );
+            agentStdout.write(
+              JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } }) + '\n',
+            );
+          });
+        }
+      }
+    });
+
+    pool = createPoolWithSpawn(() => child);
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
+
+    const messages = [];
+    for await (const msg of adapter.invoke('resume turn', {
+      sessionId: 'gone-session',
+      resumeFallbackSystemPrompt: 'Static identity prompt',
+    })) {
+      messages.push(msg);
+    }
+
+    const loadIndex = captured.findIndex((m) => m.method === 'session/load');
+    const newIndex = captured.findIndex((m) => m.method === 'session/new');
+    const promptReq = captured.find((m) => m.method === 'session/prompt');
+    assert.ok(loadIndex >= 0, 'resume should try session/load first');
+    assert.ok(newIndex > loadIndex, 'failed session/load should fall back to session/new');
+    assert.equal(promptReq.params.sessionId, 'fresh-session');
+    assert.equal(
+      promptReq.params.prompt[0].text,
+      'Static identity prompt\n\nresume turn',
+      'fresh fallback sessions must receive static identity when the outer resume turn skipped it',
+    );
+    assert.ok(messages.some((m) => m.type === 'session_init' && m.sessionId === 'fresh-session'));
+    assert.ok(messages.some((m) => m.type === 'text' && m.content === 'fresh ok'));
   });
 
   it('sends empty mcpServers when not configured', async () => {
     const { pool: p, captured } = createPoolWithAutoRespond();
     pool = p;
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     for await (const msg of adapter.invoke('hello')) {
       /* drain */
@@ -184,10 +446,260 @@ describe('GeminiAcpAdapter', () => {
     assert.deepStrictEqual(sessionNew.params.mcpServers, []);
   });
 
+  it('F161 P2 regression: mcpSupport:false blocks per-project .mcp.json merge in invoke', async () => {
+    // Setup: create a temp directory with a .mcp.json that has a server
+    const userProjectDir = mkdtempSync(join(tmpdir(), 'acp-mcp-gate-'));
+    writeFileSync(
+      join(userProjectDir, '.mcp.json'),
+      JSON.stringify({ mcpServers: { 'sneaky-server': { command: 'node', args: ['sneaky.js'] } } }),
+    );
+
+    try {
+      const { pool: p, captured } = createPoolWithAutoRespond();
+      pool = p;
+      const adapter = new GeminiAcpAdapter({
+        catId: 'gemini',
+        pool,
+        poolKey: TEST_POOL_KEY,
+        projectRoot: '/tmp',
+        mcpServers: [], // base servers already gated by resolver
+        mcpSupport: false, // member has MCP disabled
+      });
+
+      for await (const msg of adapter.invoke('hello', { workingDirectory: userProjectDir })) {
+        /* drain */
+      }
+
+      const sessionNew = captured.find((m) => m.method === 'session/new');
+      assert.ok(sessionNew, 'Expected session/new in captured messages');
+      assert.deepStrictEqual(
+        sessionNew.params.mcpServers,
+        [],
+        'mcpSupport:false must block per-project .mcp.json servers — session should have zero MCP servers',
+      );
+    } finally {
+      rmSync(userProjectDir, { recursive: true, force: true });
+    }
+  });
+
+  it('sets configured ACP session model after newSession and before prompt', async () => {
+    const { pool: p, captured } = createPoolWithAutoRespond();
+    pool = p;
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'opencode',
+      modelName: 'anthropic/claude-opus-4-6',
+      sessionModel: 'anthropic/claude-opus-4-6',
+    });
+
+    for await (const _ of adapter.invoke('hello')) {
+      /* drain */
+    }
+
+    const sessionNewIndex = captured.findIndex((m) => m.method === 'session/new');
+    const setModelIndex = captured.findIndex((m) => m.method === 'session/set_config_option');
+    const promptIndex = captured.findIndex((m) => m.method === 'session/prompt');
+    assert.ok(sessionNewIndex >= 0, 'Expected session/new');
+    assert.ok(setModelIndex >= 0, 'Expected session/set_config_option');
+    assert.ok(promptIndex >= 0, 'Expected session/prompt');
+    assert.ok(sessionNewIndex < setModelIndex, 'set_config_option must happen after session/new');
+    assert.ok(setModelIndex < promptIndex, 'set_config_option must happen before session/prompt');
+    assert.equal(captured[setModelIndex].params.configId, 'model');
+    assert.equal(captured[setModelIndex].params.value, 'anthropic/claude-opus-4-6');
+  });
+
+  it('does not set ACP session model when the agent model option does not allow it', async () => {
+    const { child, clientStdin, agentStdout, ee } = createMockChild();
+    const captured = [];
+
+    clientStdin.on('data', (chunk) => {
+      for (const line of chunk.toString().trim().split('\n')) {
+        const msg = JSON.parse(line);
+        captured.push(msg);
+        if (msg.method === 'initialize') {
+          setImmediate(() =>
+            agentStdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: INIT_RESULT }) + '\n'),
+          );
+        } else if (msg.method === 'session/new') {
+          setImmediate(() =>
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: msg.id,
+                result: {
+                  sessionId: 'sess-model-mismatch',
+                  configOptions: [
+                    {
+                      id: 'model',
+                      type: 'select',
+                      currentValue: 'anthropic/claude-opus-4-6',
+                      options: [{ value: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6' }],
+                    },
+                  ],
+                },
+              }) + '\n',
+            ),
+          );
+        } else if (msg.method === 'session/prompt') {
+          setImmediate(() => {
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: msg.params.sessionId,
+                  update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } },
+                },
+              }) + '\n',
+            );
+            agentStdout.write(
+              JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } }) + '\n',
+            );
+          });
+        }
+      }
+    });
+
+    pool = new AcpProcessPool(
+      { maxLiveProcesses: 5, idleTtlMs: 999_999, healthCheckIntervalMs: 999_999 },
+      {},
+      () => new AcpClient({ command: 'fake', args: [], cwd: '/tmp', spawnFn: () => child }),
+    );
+    const adapter = new GeminiAcpAdapter({
+      catId: 'opencode',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'opencode',
+      modelName: 'openai-compact/claude-opus-4-6',
+      sessionModel: 'openai-compact/claude-opus-4-6',
+    });
+
+    const messages = [];
+    for await (const msg of adapter.invoke('hello')) messages.push(msg);
+
+    assert.equal(
+      captured.some((m) => m.method === 'session/set_config_option'),
+      false,
+      'must not send unsupported model value to ACP agent',
+    );
+    assert.ok(
+      captured.some((m) => m.method === 'session/prompt'),
+      'should continue with the agent default model',
+    );
+    assert.ok(
+      messages.some((m) => m.type === 'done'),
+      'invoke should complete',
+    );
+  });
+
+  it('continues when optional ACP session model selection is rejected by the agent', async () => {
+    const { child, clientStdin, agentStdout, ee } = createMockChild();
+
+    clientStdin.on('data', (chunk) => {
+      for (const line of chunk.toString().trim().split('\n')) {
+        const msg = JSON.parse(line);
+        if (msg.method === 'initialize') {
+          setImmediate(() =>
+            agentStdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: INIT_RESULT }) + '\n'),
+          );
+        } else if (msg.method === 'session/new') {
+          setImmediate(() =>
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: msg.id,
+                result: {
+                  sessionId: 'sess-model-error',
+                  configOptions: [
+                    {
+                      id: 'model',
+                      type: 'select',
+                      currentValue: 'google/gemini-default',
+                      options: [{ value: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6' }],
+                    },
+                  ],
+                },
+              }) + '\n',
+            ),
+          );
+        } else if (msg.method === 'session/set_config_option') {
+          setImmediate(() =>
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: msg.id,
+                error: { code: -32602, message: 'model not found' },
+              }) + '\n',
+            ),
+          );
+        } else if (msg.method === 'session/prompt') {
+          setImmediate(() => {
+            agentStdout.write(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: msg.params.sessionId,
+                  update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } },
+                },
+              }) + '\n',
+            );
+            agentStdout.write(
+              JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } }) + '\n',
+            );
+          });
+        }
+      }
+    });
+
+    pool = new AcpProcessPool(
+      { maxLiveProcesses: 5, idleTtlMs: 999_999, healthCheckIntervalMs: 999_999 },
+      {},
+      () => new AcpClient({ command: 'fake', args: [], cwd: '/tmp', spawnFn: () => child }),
+    );
+    const adapter = new GeminiAcpAdapter({
+      catId: 'opencode',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'opencode',
+      modelName: 'anthropic/claude-opus-4-6',
+      sessionModel: 'anthropic/claude-opus-4-6',
+    });
+
+    const messages = [];
+    for await (const msg of adapter.invoke('hello')) messages.push(msg);
+
+    assert.ok(
+      messages.some((m) => m.type === 'text' && m.content === 'ok'),
+      'prompt should continue',
+    );
+    assert.equal(
+      messages.some((m) => m.type === 'error'),
+      false,
+      'model selection failure must not abort',
+    );
+    assert.ok(
+      messages.some((m) => m.type === 'done'),
+      'invoke should complete',
+    );
+  });
+
   it('reuses pool client across invocations (warm hit)', async () => {
     const { pool: p, captured } = createPoolWithAutoRespond();
     pool = p;
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const msgs1 = [];
     for await (const msg of adapter.invoke('first')) msgs1.push(msg);
@@ -233,7 +745,14 @@ describe('GeminiAcpAdapter', () => {
       return child;
     });
 
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const messages = [];
     for await (const msg of adapter.invoke('hello')) {
@@ -257,7 +776,14 @@ describe('GeminiAcpAdapter', () => {
   it('prepends system prompt to prompt text', async () => {
     const { pool: p, captured } = createPoolWithAutoRespond();
     pool = p;
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     for await (const _ of adapter.invoke('user question', { systemPrompt: 'You are a cat.' })) {
     }
@@ -298,7 +824,14 @@ describe('GeminiAcpAdapter', () => {
     });
 
     pool = createPoolWithSpawn(() => child);
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const messages = [];
     for await (const msg of adapter.invoke('hello')) {
@@ -401,7 +934,14 @@ describe('GeminiAcpAdapter integration', () => {
     });
 
     pool = createPoolWithSpawn(() => child);
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const messages = [];
     for await (const msg of adapter.invoke('what is this?')) {
@@ -477,7 +1017,14 @@ describe('GeminiAcpAdapter integration', () => {
     });
 
     pool = createPoolWithSpawn(() => child);
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const ac1 = new AbortController();
     const msgs1 = [];
@@ -551,7 +1098,14 @@ describe('GeminiAcpAdapter integration', () => {
 
     const ac = new AbortController();
     pool = createPoolWithSpawn(() => child);
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     // Abort 10ms in — during the 30ms newSession delay
     setTimeout(() => ac.abort(), 10);
@@ -604,7 +1158,14 @@ describe('GeminiAcpAdapter integration', () => {
 
     const ac = new AbortController();
     pool = createPoolWithSpawn(() => child);
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const messages = [];
     for await (const msg of adapter.invoke('hello', { signal: ac.signal })) {
@@ -623,7 +1184,14 @@ describe('GeminiAcpAdapter integration', () => {
   it('P2: pre-aborted signal short-circuits immediately', async () => {
     const result = createPoolWithAutoRespond();
     pool = result.pool;
-    const adapter = new GeminiAcpAdapter({ catId: 'gemini', pool, poolKey: TEST_POOL_KEY, projectRoot: '/tmp' });
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+      providerName: 'google',
+      modelName: 'gemini-acp',
+    });
 
     const ac = new AbortController();
     ac.abort(); // Abort BEFORE invoke
@@ -1538,6 +2106,129 @@ describe('GeminiAcpAdapter integration', () => {
     );
   });
 
+  it('thinking buffer flushes before error on stream failure (P2: catch path must not lose pending thinking)', async () => {
+    const fakeClient = {
+      isAlive: true,
+      initialize: async () => ({}),
+      close: async () => {},
+      onCapacity: () => {},
+      offCapacity: () => {},
+      recentCapacitySignal: null,
+      clearRecentCapacitySignal: () => {},
+      newSession: async () => ({ sessionId: 'think-err-sess' }),
+      cancelSession: () => {},
+      async *promptStream() {
+        // Only thinking chunks — no non-thinking event to trigger flush
+        yield {
+          sessionId: 'think-err-sess',
+          update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'Step 1: check the ' } },
+        };
+        yield {
+          sessionId: 'think-err-sess',
+          update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'database schema' } },
+        };
+        // Stream error — pending thinking must flush before error
+        const err = new Error('Stream idle: no events for 45000ms after 2 events received');
+        err.code = 'STREAM_IDLE_STALL';
+        throw err;
+      },
+    };
+
+    const mockPool = {
+      acquire: async () => ({ client: fakeClient, release: () => {} }),
+      closeAll: async () => {},
+    };
+
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool: mockPool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+    });
+
+    const messages = [];
+    for await (const msg of adapter.invoke('hello')) {
+      messages.push(msg);
+    }
+
+    // Thinking must appear before error
+    const thinkingMsg = messages.find((m) => m.type === 'system_info' && m.content.includes('"thinking"'));
+    assert.ok(thinkingMsg, 'Pending thinking must be flushed before error');
+    const thinkingContent = JSON.parse(thinkingMsg.content);
+    assert.equal(thinkingContent.text, 'Step 1: check the database schema', 'All thinking chunks must be concatenated');
+
+    // Order: thinking must come before error
+    const thinkingIdx = messages.indexOf(thinkingMsg);
+    const errorIdx = messages.findIndex((m) => m.type === 'error');
+    assert.ok(thinkingIdx < errorIdx, `thinking (idx=${thinkingIdx}) must precede error (idx=${errorIdx})`);
+  });
+
+  it('surfaces compaction loop cancellation as an error instead of a successful turn', async () => {
+    let cancelCount = 0;
+    const fakeClient = {
+      isAlive: true,
+      initialize: async () => ({}),
+      close: async () => {},
+      onCapacity: () => {},
+      offCapacity: () => {},
+      recentCapacitySignal: null,
+      clearRecentCapacitySignal: () => {},
+      newSession: async () => ({ sessionId: 'scratchpad-loop-sess' }),
+      cancelSession: (sessionId) => {
+        assert.equal(sessionId, 'scratchpad-loop-sess');
+        cancelCount++;
+      },
+      async *promptStream() {
+        yield {
+          sessionId: 'scratchpad-loop-sess',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Visible answer before compaction. ## Goal\n- summarize context\n\nConstraints & Preferences\n- continue',
+            },
+          },
+        };
+        for (let i = 0; i < 50; i++) {
+          yield {
+            sessionId: 'scratchpad-loop-sess',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `\n## Progress\n- compacting ${i}` },
+            },
+          };
+        }
+      },
+    };
+
+    const mockPool = {
+      acquire: async () => ({ client: fakeClient, release: () => {} }),
+      closeAll: async () => {},
+    };
+
+    const adapter = new GeminiAcpAdapter({
+      catId: 'gemini',
+      pool: mockPool,
+      poolKey: TEST_POOL_KEY,
+      projectRoot: '/tmp',
+    });
+
+    const messages = [];
+    for await (const msg of adapter.invoke('hello')) {
+      messages.push(msg);
+    }
+
+    assert.equal(cancelCount, 1, 'Compaction loop breaker must cancel the ACP session exactly once');
+    const errorMsg = messages.find((m) => m.type === 'error');
+    assert.ok(errorMsg, `Expected compaction cancellation error, got: ${JSON.stringify(messages.map((m) => m.type))}`);
+    assert.equal(errorMsg.errorCode, 'prompt_failure');
+    assert.ok(errorMsg.error.includes('compaction'), `Error should explain compaction cancellation: ${errorMsg.error}`);
+
+    const doneIdx = messages.findIndex((m) => m.type === 'done');
+    const errorIdx = messages.indexOf(errorMsg);
+    assert.ok(doneIdx > errorIdx, 'done should be emitted only after the compaction error');
+  });
+
   it('F149: liveness_signal warning appears before stream_idle_stall error', async () => {
     const fakeClient = {
       isAlive: true,
@@ -1799,9 +2490,8 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
     pool = p;
 
     const mcpServers = [
-      { name: 'cat-cafe-collab', command: 'node', args: ['collab.js'], env: [{ name: 'EXISTING', value: 'keep' }] },
+      { name: 'cat-cafe-collab', command: 'node', args: ['collab.js'], env: [] },
       { name: 'cat-cafe-memory', command: 'node', args: ['memory.js'], env: [] },
-      { name: 'playwright', command: 'npx', args: ['@playwright/mcp'], env: [] },
     ];
     const adapter = new GeminiAcpAdapter({
       catId: 'gemini',
@@ -1815,6 +2505,7 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
       CAT_CAFE_API_URL: 'http://localhost:3004',
       CAT_CAFE_INVOCATION_ID: 'inv-123',
       CAT_CAFE_CALLBACK_TOKEN: 'tok-abc',
+      CAT_CAFE_THREAD_ID: 'thread-acp-123',
       CAT_CAFE_USER_ID: 'user-1',
       CAT_CAFE_CAT_ID: 'gemini',
       CAT_CAFE_SIGNAL_USER: 'gemini',
@@ -1828,23 +2519,21 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
     assert.ok(sessionNew, 'Expected session/new');
     const servers = sessionNew.params.mcpServers;
 
-    // cat-cafe-collab should have callback env merged + keep existing
+    // cat-cafe-collab should have callback env merged
     const collab = servers.find((s) => s.name === 'cat-cafe-collab');
     assert.ok(collab, 'cat-cafe-collab should be present');
     const collabEnvMap = Object.fromEntries(collab.env.map((e) => [e.name, e.value]));
     assert.equal(collabEnvMap.CAT_CAFE_API_URL, 'http://localhost:3004');
     assert.equal(collabEnvMap.CAT_CAFE_INVOCATION_ID, 'inv-123');
     assert.equal(collabEnvMap.CAT_CAFE_CALLBACK_TOKEN, 'tok-abc');
-    assert.equal(collabEnvMap.EXISTING, 'keep', 'Existing env entries should be preserved');
+    assert.equal(collabEnvMap.CAT_CAFE_THREAD_ID, 'thread-acp-123');
 
     // cat-cafe-memory should also get callback env
     const memory = servers.find((s) => s.name === 'cat-cafe-memory');
+    assert.ok(memory, 'cat-cafe-memory should be present');
     const memoryEnvMap = Object.fromEntries(memory.env.map((e) => [e.name, e.value]));
     assert.equal(memoryEnvMap.CAT_CAFE_API_URL, 'http://localhost:3004');
-
-    // playwright (non cat-cafe) should be unchanged
-    const pw = servers.find((s) => s.name === 'playwright');
-    assert.deepStrictEqual(pw.env, [], 'Non-cat-cafe servers should not get callback env');
+    assert.equal(memoryEnvMap.CAT_CAFE_THREAD_ID, 'thread-acp-123');
   });
 
   it('injects into exact "cat-cafe" server name (not just prefixed)', async () => {
@@ -1877,15 +2566,18 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
     }
 
     const sessionNew = captured.find((m) => m.method === 'session/new');
+    assert.ok(sessionNew, 'Expected session/new');
     const sentServers = sessionNew.params.mcpServers;
 
     const catCafe = sentServers.find((s) => s.name === 'cat-cafe');
+    assert.ok(catCafe, 'cat-cafe should be present');
     const catCafeEnv = Object.fromEntries(catCafe.env.map((e) => [e.name, e.value]));
     assert.equal(catCafeEnv.CAT_CAFE_API_URL, 'http://127.0.0.1:3004');
     assert.equal(catCafeEnv.CAT_CAFE_CALLBACK_TOKEN, 'token-acp-123');
     assert.equal(catCafeEnv.EXISTING, 'keep');
 
     const pencil = sentServers.find((s) => s.name === 'pencil');
+    assert.ok(pencil, 'pencil should be present');
     const pencilEnv = Object.fromEntries(pencil.env.map((e) => [e.name, e.value]));
     assert.equal(pencilEnv.CAT_CAFE_INVOCATION_ID, undefined, 'pencil should not get callback env');
     assert.equal(pencilEnv.UNCHANGED, 'yes');
@@ -1924,6 +2616,7 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
     }
 
     const sessionNew = captured.find((m) => m.method === 'session/new');
+    assert.ok(sessionNew, 'Expected session/new');
     const collab = sessionNew.params.mcpServers[0];
     const envMap = Object.fromEntries(collab.env.map((e) => [e.name, e.value]));
     assert.equal(envMap.CAT_CAFE_API_URL, 'http://localhost:3004', 'Placeholder should be overwritten');
@@ -1934,9 +2627,7 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
     const { pool: p, captured } = createPoolWithAutoRespond();
     pool = p;
 
-    const mcpServers = [
-      { name: 'cat-cafe-collab', command: 'node', args: ['collab.js'], env: [{ name: 'FOO', value: 'bar' }] },
-    ];
+    const mcpServers = [{ name: 'cat-cafe-collab', command: 'node', args: ['collab.js'], env: [] }];
     const adapter = new GeminiAcpAdapter({
       catId: 'gemini',
       pool,
@@ -1950,6 +2641,97 @@ describe('GeminiAcpAdapter callbackEnv passthrough', () => {
     }
 
     const sessionNew = captured.find((m) => m.method === 'session/new');
-    assert.deepStrictEqual(sessionNew.params.mcpServers, mcpServers, 'Should pass through unchanged');
+    assert.ok(sessionNew, 'Expected session/new');
+    const collab = sessionNew.params.mcpServers.find((s) => s.name === 'cat-cafe-collab');
+    assert.ok(collab, 'cat-cafe-collab should be present');
+    assert.deepStrictEqual(collab.env, [], 'No callbackEnv = empty env on builtin servers');
+  });
+
+  // F161 architecture change: capabilities.json-aware filtering (disabled capabilities,
+  // legacy cat-cafe expansion, expandManagedMcpNamesForUserMerge) moved from adapter
+  // invoke-time to factory-level resolveAcpMcpServers(). AcpAgentService.invoke() only
+  // does simple name-based user project exclusion via resolveUserProjectMcpServers().
+  // Factory/resolver-level tests: acp-mcp-resolver.test.js (37 tests covering disabled
+  // capabilities, whitelist expansion, user project merge with managed name exclusion).
+
+  it('user project servers with names not in base servers pass through', async () => {
+    const { pool: p, captured } = createPoolWithAutoRespond();
+    pool = p;
+    const projectRoot = mkdtempSync(join(tmpdir(), 'gemini-acp-user-passthrough-root-'));
+    const userRoot = mkdtempSync(join(tmpdir(), 'gemini-acp-user-passthrough-user-'));
+    try {
+      writeFileSync(
+        join(userRoot, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: {
+            filesystem: { command: 'npx', args: ['-y', '@mcp/fs'] },
+            'my-tool': { command: 'node', args: ['tool.js'] },
+          },
+        }),
+        'utf8',
+      );
+
+      // No base mcpServers — simulates factory excluding disabled capabilities
+      const adapter = new GeminiAcpAdapter({
+        catId: 'gemini',
+        pool,
+        poolKey: TEST_POOL_KEY,
+        projectRoot,
+      });
+
+      for await (const _ of adapter.invoke('test', { workingDirectory: userRoot })) {
+        /* drain */
+      }
+
+      const sessionNew = captured.find((m) => m.method === 'session/new');
+      assert.ok(sessionNew, 'Expected session/new');
+      const names = sessionNew.params.mcpServers.map((s) => s.name);
+      // Without base servers, all user servers pass through (no name exclusion)
+      assert.deepStrictEqual(names, ['filesystem', 'my-tool']);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(userRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('user project servers with names matching base servers are excluded', async () => {
+    const { pool: p, captured } = createPoolWithAutoRespond();
+    pool = p;
+    const projectRoot = mkdtempSync(join(tmpdir(), 'gemini-acp-user-exclude-root-'));
+    const userRoot = mkdtempSync(join(tmpdir(), 'gemini-acp-user-exclude-user-'));
+    try {
+      writeFileSync(
+        join(userRoot, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: {
+            'cat-cafe-collab': { command: 'python', args: ['override.py'] },
+            'my-tool': { command: 'node', args: ['tool.js'] },
+          },
+        }),
+        'utf8',
+      );
+
+      const adapter = new GeminiAcpAdapter({
+        catId: 'gemini',
+        pool,
+        poolKey: TEST_POOL_KEY,
+        projectRoot,
+        mcpServers: [{ name: 'cat-cafe-collab', command: 'node', args: ['collab.js'], env: [] }],
+      });
+
+      for await (const _ of adapter.invoke('test', { workingDirectory: userRoot })) {
+        /* drain */
+      }
+
+      const sessionNew = captured.find((m) => m.method === 'session/new');
+      assert.ok(sessionNew, 'Expected session/new');
+      const names = sessionNew.params.mcpServers.map((s) => s.name);
+      assert.ok(names.includes('cat-cafe-collab'), 'base server retained');
+      assert.ok(!names.some((n, i) => n === 'cat-cafe-collab' && i > 0), 'user duplicate excluded');
+      assert.ok(names.includes('my-tool'), 'non-conflicting user server included');
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(userRoot, { recursive: true, force: true });
+    }
   });
 });

@@ -24,7 +24,6 @@ export const CAT_COLORS: Record<string, CatColorPair> = {
   codex: { primary: '#5B8C5A', secondary: '#D4E6D3' },
   gemini: { primary: '#5B9BD5', secondary: '#D6E9F8' },
   kimi: { primary: '#4B5563', secondary: '#E5E7EB' },
-  dare: { primary: '#D4A76A', secondary: '#FFF8F0' },
 };
 
 /** Fallback when catId is unknown or color data is missing entirely. */
@@ -33,7 +32,7 @@ export const UNKNOWN_CAT_COLOR: CatColorPair = { primary: '#9B7EBD', secondary: 
 /** Neutral gray for status dots when no cat color is available (PlanBoard, etc.). */
 export const NEUTRAL_DOT_COLOR = '#9CA3AF';
 
-/** Co-creator (铲屎官) default colors — matches cat-persona-tokens.css hue=40 chroma=0.13. */
+/** Co-creator (co-creator) default colors — matches cat-persona-tokens.css hue=40 chroma=0.13. */
 export const CO_CREATOR_COLOR: CatColorPair = { primary: '#D4A76A', secondary: '#FFF8F0' };
 
 /** Co-creator @mention highlight (warm gold, visually distinct from bubble primary). */

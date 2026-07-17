@@ -8,14 +8,14 @@ created: 2026-05-25
 
 # F212: CLI Error Diagnostics — 结构化 CLI 错误诊断 + 受控前端展示
 
-> **Status**: done | **Phase A-C done**: 2026-05-27 | **Phase D done**: 2026-05-29 (PR #1950 merged 40af2b82e) | **Owner**: Ragdoll/Ragdoll (Opus-47) | **Priority**: P1
+> **Status**: done | **Phase A-C done**: 2026-05-27 | **Phase D done**: 2026-05-29 (PR #1950 merged 40af2b82e) | **Phase G done**: 2026-06-09 (PR #2150 merged a22164f58) | **Owner**: Ragdoll/Ragdoll (Opus-47) | **Priority**: P1
 
 ## Why
 
 社区小伙伴遇到 `codex exec` 退出，前端只显示 `Error: Codex CLI: CLI 异常退出 (code: 1, signal: none)`——**没有任何定位信息**。GLM-5 顺着代码 + 注释**编造**了一套 "invalid transport" 因果链，我在本地实测复现失败（codex-cli 0.133.0 不报错），这次"自信但错"的报告恰恰最危险。
 
-team experience（2026-05-25 19:14）：
-> 我们这里前端显示的不完整？这样让team lead很迷惑，我们能不能打印完整的报错啊 而不是那一行 codex cli 退出了
+operator experience（2026-05-25 19:14）：
+> 我们这里前端显示的不完整？这样让operator很迷惑，我们能不能打印完整的报错啊 而不是那一行 codex cli 退出了
 
 ### 当前代码事实
 
@@ -31,7 +31,7 @@ team experience（2026-05-25 19:14）：
 - ⚠️ stderr 实际承载：config 解析错误 / auth / quota / network / spawn error / model_not_found / panic 堆栈
 - ⚠️ 真威胁是 **path + token 残留 + panic stack 内部 module path**，全部可分类化处理
 
-**当前设计代价**：CVO 自己 + 全部社区用户失明 100%；真威胁也没堵住（panic 仍带堆栈）。
+**当前设计代价**：operator 自己 + 全部社区用户失明 100%；真威胁也没堵住（panic 仍带堆栈）。
 
 ### 历史教训（2026-02-08 Maine Coon review）
 
@@ -134,7 +134,7 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 
 ### Phase D: result-error 诊断完整性 follow-up（2026-05-28 organic 验证发现）
 
-**触发**：team lead organic 验证（claude-opus-4-8 实跑）发现——CC 已在 stream 最后吐明确原因 `The model's tool call could not be parsed (retry also failed)`，但 cliDiagnostics 标"未识别的 CLI 错误"，给社区"猫咖 bug"错觉（实为 CC/model 报错）。
+**触发**：operator organic 验证（claude-opus-4-8 实跑）发现——CC 已在 stream 最后吐明确原因 `The model's tool call could not be parsed (retry also failed)`，但 cliDiagnostics 标"未识别的 CLI 错误"，给社区"猫咖 bug"错觉（实为 CC/model 报错）。
 
 **根因（两层）**：
 1. Phase A AC-A8 声称"Classifier 同时扫 stderr + NDJSON stream error events"，但 `maybeCollectStreamError` (cli-spawn.ts:47) 只收 `type==='error'` event，**漏了 Claude CLI 的 result event**。result 被 `isResultErrorEvent` (claude-ndjson-parser.ts:250) yield 到消息气泡但未进 cliDiagnostics 的 rawText → classifyCliError 无输入 → unknown → "未识别"。
@@ -156,14 +156,14 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 
 ### Phase F: Empty-stderr observability follow-up（2026-05-30 organic 验证发现）
 
-**触发**：社区小伙伴贴截图——Windows `codex.cmd` exit 1 + stderr empty + 配了 `LOG_CLI_STDERR=1`/`debug`/`err=1` 都没用 → cliDiagnostics 让用户去看后端日志但**日志里啥也没有** = 死胡同 UX。Maine Coon（@codex，F212 历史 reviewer）跨 thread 投诉 + 5 AC refined plan，team lead directive：F212 status 不动，feat doc 加 Phase F section + worktree implement。
+**触发**：社区小伙伴贴截图——Windows `codex.cmd` exit 1 + stderr empty + 配了 `LOG_CLI_STDERR=1`/`debug`/`err=1` 都没用 → cliDiagnostics 让用户去看后端日志但**日志里啥也没有** = 死胡同 UX。Maine Coon（@codex，F212 历史 reviewer）跨 thread 投诉 + 5 AC refined plan，operator directive：F212 status 不动，feat doc 加 Phase F section + worktree implement。
 
 **根因（三层 verified in main `eddadf97c`）**：
 1. `cli-spawn.ts:647-653` `formatCliStderrForLog(stderrBuffer)` empty returns null → `if (stderrForLog)` gate → abnormal exit + stderr empty = **静默无后端 log**。`LOG_CLI_STDERR` env gate 和 "是否写诊断 log" 这两个 scope 被错误合并。
 2. `cli-spawn.ts:649-652` log payload `{ command, stderr, reasonCode }` — **缺 `invocationId`**。用户拿前端截图里的 invocationId 搜后端 log 搜不到。
 3. `cli-diagnostics.ts:97` `UNKNOWN_TEXT.hint = '详细诊断信息见后端日志（启用：环境变量 LOG_CLI_STDERR=1）。'` — empty-stderr case 这是骗人的死胡同（**hint 暗示设了 env 就有更多信息，但 stderr empty 时根本没东西可显**）。
 
-**与 F212 愿景的关系**：F212 Why 段原话 "CVO 自己 + 全部社区用户失明 100%；真威胁也没堵住"——Phase A-D 修了大部分 case，但 **`exit 1 + empty stderr` 这个 case 仍 100% 失明**。Maine Coon定性："F212 done scope 漏验 case，不是新 feature"。Phase F = 在 F212 内闭环这个漏 case，status 仍 done（同 Phase E pattern）。
+**与 F212 愿景的关系**：F212 Why 段原话 "operator 自己 + 全部社区用户失明 100%；真威胁也没堵住"——Phase A-D 修了大部分 case，但 **`exit 1 + empty stderr` 这个 case 仍 100% 失明**。Maine Coon定性："F212 done scope 漏验 case，不是新 feature"。Phase F = 在 F212 内闭环这个漏 case，status 仍 done（同 Phase E pattern）。
 
 **修复（按Maine Coon refined plan + 2 个执行提醒）**：
 1. **结构化 exit diagnostic log 独立于 stderr gate**（F1）：`cli-spawn.ts` abnormal exit 分支无条件打一条 `'CLI abnormal exit'` log，字段：`invocationId / command / exitCode / signal / reasonCode / stderrEmpty (boolean) / streamErrorCount`。**cwd 字段不收录**（R1 Maine Coon P1-2 + cloud codex R1 P2 双源 catch: `sanitizeCliStderr` 只覆盖 HOME/userprofile/`C:\Users`/`/tmp`，非 HOME server installs `/srv` / `/workspace` / `/var/lib` / `D:\work` 会原样 leak — 安全 > 诊断 redundancy with `command`+`invocationId`）。`LOG_CLI_STDERR=1` env gate 仍**只控** raw/sanitized stderr 字段的内容（含/不含），**不控**这条 diagnostic log 是否写——scope 边界严格收窄（避免之前 gate 混淆 bug 复发）。
@@ -172,6 +172,39 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 4. **publicHint 不暴露 absolute log path**（F5，Maine Coon安全 push back）：classifier unknown + stderr 非 empty 时给 "查路径的方法"——hint 提示用户去 `/api/config/env-summary` 看 `paths.dataDirs.runtimeLogs` 再用 invocationId 搜，**不在 payload 里塞 absolute path**（保 F212 之前的安全边界：no raw path / no path leak）。
 
 **与 F215 / F210 边界**：F215 是 malformed tool-call 检测 + 接力兜底（模型行为），F210 是 Antigravity migration（runtime 切换），都与 F212 平行。Phase F 只动 `cli-spawn.ts` + `cli-diagnostics.ts` + 对应 web 文案，不碰 F215 / F210 路径。
+
+### Phase G: Silent-stdout observability follow-up（2026-06-08 Maine Coon cross-thread packet 自 clowder-ai#875）
+
+**触发**：社区 issue clowder-ai#875 — OpenCode + DeepSeek 用户撞到 silent-stdout case：fresh OpenCode CLI 直接 reproduce — NDJSON stream 只有 1 个 `{"type":"step_start"}` event，无 text，无 explicit error。新 API key/新猫 rebind 不解决。当前 Cat Cafe surface 给用户 generic `"{catName} completed without textual output."`（route-serial:2165 + route-parallel:1193），**所有诊断证据丢失**：event count、event 类型、model/provider、session id prefix、exit status、stderr presence 都拿不到。Maine Coon跨 thread 投递完整 packet + verify scope。
+
+**根因（verified in main `92433bcc0`）**：
+1. `OpenCodeAgentService.ts:322` — `textEventCount === 0` 只 backend `log.warn`，**不 yield 任何 cliDiagnostics surface** 给前端
+2. `ClaudeAgentService.ts:721` — sibling same pattern，同病同治
+3. `route-serial.ts:2165` + `route-parallel.ts:1193` — fallback collapse 到 generic message，丢失所有诊断证据
+4. F212 当前 scope 只覆盖 stderr-error 路径（Phase A-D + E + F），**silent-stdout 路径完全 lossy**
+
+**Scope（不动 OpenCode/DeepSeek upstream，只动 Cat Cafe diagnostics surface）**：
+1. 触发条件: `eventCount > 0 && textEventCount === 0`
+2. Track + surface safe fields:
+   - `eventCount` (total events received)
+   - `eventTypes` (unique set seen, e.g. `['step_start']`)
+   - `model` / provider name
+   - `sessionId` prefix (前 8 char only, 不暴露 full session id)
+   - exit status (如有)
+   - stderr presence (boolean) + safe excerpt if available (走现有 sanitizer)
+3. 安全边界（保持 F212 安全约束）: no provider secrets, no full session id, no prompt/body content, no absolute paths
+4. Frontend: 既有 `CliDiagnosticsPanel` 自动 render 新 reasonCode `silent_completion`，不需新组件
+
+**Sibling sweep 覆盖（LL-069 应用）**：
+- ✅ `OpenCodeAgentService.ts:322`（primary anchor from packet）
+- ✅ `ClaudeAgentService.ts:721`（sibling same pattern）
+- ✅ Codex / Antigravity / Gemini / Dare / CatAgent grep 确认无 `textEventCount === 0` 同 pattern（不同 event tracking model，不在 Phase G scope）
+
+**修复（与 Phase F/E 同 surface 机制）**：
+1. **扩 reasonCode**：加 `silent_completion`（"CLI 完成但无文字输出 — 通常是 step_start-only event stream，常见于 OpenCode/DeepSeek upstream issue"）
+2. **新 helper `buildSilentCompletionDiagnostic`**（`cli-diagnostics.ts`）：输入 `{eventCount, eventTypes, model, sessionIdPrefix, exitStatus, stderrPresent, stderrExcerpt?}`，返回 structured `CliDiagnostics`
+3. **OpenCode + Claude no-text branch**: track `Set<string>` of unique event types during stream，textEventCount===0 时 build diagnostic + yield `type: 'system_info'` event with `metadata.cliDiagnostics`（observability-only，不走 provider error path；cloud R1 P1 修正）
+4. **REASON_TEXT entry**: publicSummary `"CLI 完成但无文字输出"`, publicHint 解释 step_start-only pattern + 建议（换猫 / 换 model / 直接跑 CLI 看 raw output）
 
 ## Acceptance Criteria
 
@@ -195,9 +228,9 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 - [x] AC-B4: All 9 reasonCodes mapped to inline-SVG icons (KD-4 — Lucide source, no emoji). 4-tier severity color grouping (KD-5 author 自决): user-fix→red / transient→amber / system→slate / cognitive→violet. Fallback `UnknownReasonIcon` for undefined reasonCode.
 - [x] AC-B5: i18n hint generation stays in Phase A `REASON_TEXT` map (api side). Frontend only renders the already-humanized `publicSummary` / `publicHint` — no UI-layer regex.
 
-### Phase C（Close + organic validation）— CVO directive 2026-05-27 调整：跳过手动 alpha smoke，让 production 使用 organic 触发各错误自然验证
+### Phase C（Close + organic validation）— operator directive 2026-05-27 调整：跳过手动 alpha smoke，让 production 使用 organic 触发各错误自然验证
 
-- [x] AC-C1: ~~故意触发各错误截图~~ → **organic validation strategy**（CVO directive 2026-05-27 "测试我们可以等我之后重启 runtime 在使用过程中帮你测，自然而然发生"）。Production 用户使用过程中遇到 CLI 错误时，folded panel 应自动渲染；任何回归 / 视觉问题 / reasonCode 误分类发生时单独 hotfix 处理。**理由**：手动模拟各 provider 错误成本高（需要构造各 provider 的边界条件），自然触发的覆盖率反而更高（真实 user input、真实 model name 拼错、真实 network 抖动），且能覆盖 19 + 40 automated tests 未覆盖的 long-tail edge case。
+- [x] AC-C1: ~~故意触发各错误截图~~ → **organic validation strategy**（operator directive 2026-05-27 "测试我们可以等我之后重启 runtime 在使用过程中帮你测，自然而然发生"）。Production 用户使用过程中遇到 CLI 错误时，folded panel 应自动渲染；任何回归 / 视觉问题 / reasonCode 误分类发生时单独 hotfix 处理。**理由**：手动模拟各 provider 错误成本高（需要构造各 provider 的边界条件），自然触发的覆盖率反而更高（真实 user input、真实 model name 拼错、真实 network 抖动），且能覆盖 19 + 40 automated tests 未覆盖的 long-tail edge case。
 - [x] AC-C2: Fuzz stderr smoke — **Phase A 40 个 unit fuzz tests 已覆盖**（`sanitize-cli-stderr.test.js` 21 fuzz 含 ANSI/NFKC/path/JWT/PEM/5 类 provider token/generic high-entropy；`cli-error-patterns.test.js` 4 classifier；`cli-diagnostics.test.js` 15 含 panic stack stripping + bounded helpers + LOG_CLI_STDERR gate）。alpha 环境额外 fuzz 不再要求 — automated layer 已达 AC 强度。
 - [x] AC-C3: CloseGateReport（见下方 §CloseGateReport）+ 跨族愿景守护 @gemini25（非作者 = 非 47，非 reviewer = 非Maine Coon，跨族 = Siamese，符合 F073 守护原则）。
 
@@ -207,7 +240,7 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 - [x] AC-D2: 新增 reasonCode `tool_call_parse_failed`（"tool call could not be parsed"）+ REASON_TEXT summary/hint（"模型工具调用解析失败 / Claude Code 报告：…非猫咖配置"）
 - [x] AC-D3: unknown fallback 措辞：rawText 含 CC structured result error（structuredErrorText）时显示 `Claude Code 报告：<原因>`，区分 CC/模型报错（非猫咖 bug）vs 猫咖真未分类；KD-1 白名单放行 CC structured result error（安全，CC 标准措辞）
 - [x] AC-D4: 红测先行（先红后绿）：用**真实 A2 结构**（`subtype:success+is_error:true+result文本`，非想象的 subtype:error）做 fixture → maybeCollectStreamError 收集 + buildCliDiagnostics 分类/措辞回归；验证旧 subtype-only guard 对真实数据必 false（红）、is_error guard 收集（绿）、正常 success（is_error:false）不误收；守 AC-A9 红线（raw stderr 不进 user-facing）
-- [x] AC-D5: 跨族 review + 云端 review + 愿景守护 — @gpt52（Maine Coon GPT-5.4）跨族 3 轮 delta APPROVE（6d07ef377 → da1f81763 → 61665f350）；云端 codex 3 轮 review（R1 P2 excerptSource white-list → R2 P1 isResultError gate → R3 Bravo on 61665f350）；merge commit 40af2b82e；愿景守护 cross-post @gemini25 跨族暹罗（非作者非 reviewer）
+- [x] AC-D5: 跨族 review + remote review + 愿景守护 — @gpt52（Maine Coon GPT-5.4）跨族 3 轮 delta APPROVE（6d07ef377 → da1f81763 → 61665f350）；云端 codex 3 轮 review（R1 P2 excerptSource white-list → R2 P1 isResultError gate → R3 Bravo on 61665f350）；merge commit 40af2b82e；愿景守护 cross-post @gemini25 跨族暹罗（非作者非 reviewer）
 
 ### Phase F（Empty-stderr observability follow-up）— implementation merged, review pending (2026-05-31)
 
@@ -217,7 +250,17 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 - [x] AC-F4: classifier unknown + `stderrEmpty===true` 时 publicHint = "CLI 已退出但没有输出 stderr。请在后端日志中用 debugRef.invocationId 搜索；如仍无结果，请直接运行该 CLI 并分别捕获 stdout/stderr。" Maine Coon原文案，**不暗示** `LOG_CLI_STDERR=1` 给假希望。
 - [x] AC-F5: classifier unknown + `stderrEmpty===false` 时 publicHint 提示用户调 `/api/config/env-summary` 看 `paths.dataDirs.runtimeLogs` 再用 invocationId 搜，**不在 payload 里塞 absolute path`（Maine Coon跨族 push back 守 F212 no-path-leak 安全边界）。
 - [x] AC-F6: 红测先行（先红后绿）：unit tests in `cli-diagnostics.test.js` (helper shape + hint variants + backward-compat); integration tests in `cli-spawn.test.js` (3 tests using `diagnosticLogger` stub assert real log payloads + 2 tests assert publicHint via `__cliError` yield). 137/137 pass.
-- [ ] AC-F7: 跨族 review + 云端 review — Maine Coon @codex R1 BLOCKING (2 P1s caught, both fixed at `6b1bfb82d`) → R2 pending. 云端 codex R1 P2 cwd leak (双源 same as Maine Coon P1-2, both fixed) → R2 P2 spec checkbox staleness (this update fixes it) → R3 pending. Phase F merge 不 reopen F212 status（仍 done），同 Phase E follow-up pattern.
+- [ ] AC-F7: 跨族 review + remote review — Maine Coon @codex R1 BLOCKING (2 P1s caught, both fixed at `6b1bfb82d`) → R2 pending. 云端 codex R1 P2 cwd leak (双源 same as Maine Coon P1-2, both fixed) → R2 P2 spec checkbox staleness (this update fixes it) → R3 pending. Phase F merge 不 reopen F212 status（仍 done），同 Phase E follow-up pattern.
+
+### Phase G（Silent-stdout observability）— merged PR #2150 (2026-06-09)
+
+- [x] AC-G1: 加 reasonCode `silent_completion` 到 `CliErrorReasonCode` union (`packages/shared/src/types/cli-diagnostics.ts`) + `REASON_TEXT` entry (publicSummary "CLI 完成但无文字输出" + publicHint 解释 step_start-only pattern + 建议路径)
+- [x] AC-G2: 新 helper `buildSilentCompletionDiagnostic` 在 `packages/api/src/utils/cli-diagnostics.ts`，输入 `{eventCount, eventTypes (string[]), model, sessionIdPrefix (前 8 char), exitStatus?, stderrPresent (boolean), stderrExcerpt?}`，返回 structured `CliDiagnostics`。安全边界：no full session id (只前 8 char) / no provider secrets / no prompt content / stderrExcerpt 走 sanitizer + generic absolute path scrub；eventTypes/model/stderr evidence 全部 bounded
+- [x] AC-G3: `OpenCodeAgentService.ts:322` no-text branch — track unique event types during stream（`Set<string>` of `result.type`），`textEventCount === 0` 时 build diagnostic + yield `type: 'system_info'` event with `metadata.cliDiagnostics`（cloud R1 P1 修正：silent_completion 不走 provider error path；tool-only turn 不误报）
+- [x] AC-G4: `ClaudeAgentService.ts:721` sibling same fix — track unique types + yield diagnostic event（LL-069 应用：sibling sweep from spec text 明示）；Claude result A2 `{subtype:'success', is_error:true}` 优先产出 `tool_call_parse_failed`，不误归 silent_completion
+- [x] AC-G5: 红测先行：fixture 1 用 step_start-only NDJSON (Maine Coon packet 第一 regression case) — OpenCode + Claude 两 providers 各一份；fixture 2 验证 sessionIdPrefix 只暴露前 8 char（full session id 不 leak）；fixture 3 验证 stderrExcerpt 不暴露 raw paths/tokens（走 sanitizer + generic path scrub）；fixture 4 验证 tool-only / Claude A2 result-error 不误报 silent_completion
+- [x] AC-G6: route-serial.ts:2165 + route-parallel.ts:1193 generic fallback — cliDiagnostics path dominates generic message；新增 serial/parallel route tests 证明 `silent_completion` system_info 不产生 provider error row / persisted `Error:`，前端 `ChatMessage` 可渲染 system_info 上的 cliDiagnostics
+- [x] AC-G7: 跨族 review (@codex) + 云端 codex review — Maine Coon R1/R2 blocking review（hint safeExcerpt vs debugRef）+ cloud codex 多轮 P1/P2（tool-only, exitCode, bounded evidence, successful-exit stderr, error-path, Claude A2 result-error）全部修复；`pnpm gate` 全绿；PR #2150 squash merged at `a22164f58`
 
 ## Dependencies
 
@@ -225,7 +268,7 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 - **Related**: F153（telemetry/log 脱敏，sanitizer 规则对齐 `TelemetryRedactor` Class A）
 - **Related**: F118（CLI Liveness Watchdog，已 done，错误通道在它之后）
 - **Related**: F173（前端消息管道统一，folded 面板复用既有透传机制）
-- **Evolved from**: 无（team lead 2026-05-25 提的真实 bug）
+- **Evolved from**: 无（operator 2026-05-25 提的真实 bug）
 - **Blocked by**: 无
 
 ## Risk
@@ -246,14 +289,14 @@ Maine Coon当时挡掉过同样的 `stderrTail` 直传方案：
 | KD-1 | 走 structured `cliDiagnostics` 而非 sanitized raw tail | 黑名单永远会漏 → 白名单准入更安全（Maine Coon 2026-02-08 + 2026-05-25 两次坚守） | 2026-05-25 |
 | KD-2 | Sanitizer 先 sanitize 再截断 | 反过来会从 token 中间截尾绕过黑名单 | 2026-05-25 |
 | KD-3 | 一个 feat 一次切完 Phase A + B + C，不拆 "hotfix + follow-up" | "层 1 hotfix + 层 2 follow-up" 是Ragdoll"下次一定"病 | 2026-05-25 |
-| KD-4 | Phase B reasonCode → icon **必须自画 SVG**，禁止 emoji（草案 / spec / 实现全场景）| team lead directive 2026-05-27 "必须自己画 svg！！！不然太丑了！！"；emoji 跨平台渲染不一致 + 视觉档次低；草案阶段也禁止（feedback_design_to_code_fidelity 升级 P0）| 2026-05-27 |
-| KD-5 | Phase B reasonCode → color palette 由 author (47) 自决（Tailwind 500 主调）| team lead directive 2026-05-27 "颜色你可以自己决定啦"；现有 OQ-5 一半自决（颜色）+ 一半 KD-4 约束（icon 必 SVG）| 2026-05-27 |
+| KD-4 | Phase B reasonCode → icon **必须自画 SVG**，禁止 emoji（草案 / spec / 实现全场景）| operator directive 2026-05-27 "必须自己画 svg！！！不然太丑了！！"；emoji 跨平台渲染不一致 + 视觉档次低；草案阶段也禁止（feedback_design_to_code_fidelity 升级 P0）| 2026-05-27 |
+| KD-5 | Phase B reasonCode → color palette 由 author (47) 自决（Tailwind 500 主调）| operator directive 2026-05-27 "颜色你可以自己决定啦"；现有 OQ-5 一半自决（颜色）+ 一半 KD-4 约束（icon 必 SVG）| 2026-05-27 |
 
 ## Review Gate
 
 - Phase A: Maine Coon（@codex GPT-5.5）review — 安全分析 / 测试覆盖（特别盯 sanitizer fuzz + 旧红线回归） ✓
 - Phase B: Maine Coon review — 前端透传 + i18n 边界 ✓ + 云端 codex 8 轮 P2 fix ✓
-- Phase C: 跨族愿景守护 — **@gemini25 (Gemini 3.5 Flash, Siamese)**（CVO directive 2026-05-27：3.5 不再是 3.1 时代的吴下阿蒙；视觉/UX 判断对口；跨族符合 F073；非作者非 reviewer）
+- Phase C: 跨族愿景守护 — **@gemini25 (Gemini 3.5 Flash, Siamese)**（operator directive 2026-05-27：3.5 不再是 3.1 时代的吴下阿蒙；视觉/UX 判断对口；跨族符合 F073；非作者非 reviewer）
 
 ## User Visibility Disclosure (Step 0.3.5)
 
@@ -298,7 +341,7 @@ close_gate_report:
 
     # Phase C — Close + organic validation
     - { ac_id: AC-C1, status: cvo_signed_off, evidence: [{ kind: message, ref: "0001779880784446-000335" }],
-        resolution: { kind: cvo_signoff, reason: "CVO directive 2026-05-27: production organic validation replaces manual alpha smoke",
+        resolution: { kind: cvo_signoff, reason: "operator directive 2026-05-27: production organic validation replaces manual alpha smoke",
                       cvo_signoff: { proposal_message_id: "0001779880330086-000330",
                                      cvo_message_id: "0001779880784446-000335",
                                      cvo_quote: "测试我们可以等我之后重启 runtime 在使用过程中帮你测，自然而然发生",
@@ -315,7 +358,7 @@ close_gate_report:
     - { ac_id: AC-D5, status: met, evidence: [{ kind: commit, ref: "40af2b82e", description: "cross-family @gpt52 review + cloud codex Bravo + merge" }] }
 
   harness_feedback: none
-  harness_feedback_reason: "F212 是普通后端+前端 feature，没改 harness/skill/MCP/shared-rules；无 trace anomaly；CVO 主动 directive 推进 organic validation 简化 close (vs CVO 不满意)；无抽样需求 — 教训通过 capsule + 3 个新 memory feedback 充分沉淀。"
+  harness_feedback_reason: "F212 是普通后端+前端 feature，没改 harness/skill/MCP/shared-rules；无 trace anomaly；operator 主动 directive 推进 organic validation 简化 close (vs operator 不满意)；无抽样需求 — 教训通过 capsule + 3 个新 memory feedback 充分沉淀。"
 ```
 
 ### AC 状态总览
@@ -324,7 +367,7 @@ close_gate_report:
 |---|---|---|---|
 | A | A1-A9 (9/9) | ✓ all met | PR #1907 merged; tests 40 (sanitize 21 + classifier 4 + diagnostics 15) |
 | B | B1-B5 (5/5) | ✓ all met | PR #1915 merged @ 539a2226d; tests 25 (panel 10 + router 7 + hydration 3 + bg 2 + reducer 1 + api persist 2) |
-| C | C1 organic / C2 unit / C3 守护 | ✓ all met | C1 organic strategy (CVO directive); C2 Phase A 40 fuzz unit; C3 ✓ signed off by @gemini25 |
+| C | C1 organic / C2 unit / C3 守护 | ✓ all met | C1 organic strategy (operator directive); C2 Phase A 40 fuzz unit; C3 ✓ signed off by @gemini25 |
 | **Total** | **17/17** | **✓** | **65 automated tests + 跨族 review + production organic validation** |
 
 ### 愿景对照三问

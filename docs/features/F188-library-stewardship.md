@@ -8,13 +8,13 @@ created: 2026-05-06
 
 # F188: Library Stewardship — 图书馆管护与成长
 
-> **Status**: done | **Completed**: 2026-05-26 | **Owner**: Ragdoll | **Priority**: P1
+> **Status**: done | **Completed (A-J)**: 2026-05-26 | **Reopened**: 2026-06-09 (Phase K) | **Phase K Closed**: 2026-06-19 (PR #2414, merge `1ec99732`) | **Infra Fix**: 2026-06-19 (PR #2419 — alpha:start build-freshness gate, ADR-039 parity) | **Owner**: Ragdoll | **Priority**: P1
 
 ## Why
 
 F186 建成了图书馆的骨架（Collection 联邦 + Scanner + Security + Graph + Query Replay + Lens），但 GBrain teardown 复盘发现：图书馆**建完了不等于能用好**。
 
-team experience（2026-05-06）："Memory Health Dashboard 感觉很鸡肋，开发完成到现在好像没啥用到"、"全量重建索引！我们现在好像是启动的时候才会？"、"graph 到底是如何 link 起文档的？只看 frontmatter？还是会看文档里面的 ref？"、"聊天产出当然是你们自己来放呀"。
+operator experience（2026-05-06）："Memory Health Dashboard 感觉很鸡肋，开发完成到现在好像没啥用到"、"全量重建索引！我们现在好像是启动的时候才会？"、"graph 到底是如何 link 起文档的？只看 frontmatter？还是会看文档里面的 ref？"、"聊天产出当然是你们自己来放呀"。
 
 核心问题：知识进来没有管道、索引坏了没人知道、graph 连接稀疏、recall 质量没有反馈闭环。
 
@@ -26,7 +26,7 @@ team experience（2026-05-06）："Memory Health Dashboard 感觉很鸡肋，开
 
 运行期全量 rebuild API + Hub 按钮 + 最小状态可见面。不做完整 Durable Job Ledger，只做 memory jobs 的最小状态表（task id / status / progress / error / result）。
 
-team lead/猫猫能在不重启服务的情况下触发全量重建索引，并看到进度。
+operator/猫猫能在不重启服务的情况下触发全量重建索引，并看到进度。
 
 ### Phase B: Library Health Dashboard ✅
 
@@ -36,33 +36,33 @@ Memory Health Dashboard 增强：从"有多少东西"升级到"哪里脏了、�
 
 ### Phase J: Health Debt Governance（2026-05-20 reopen）
 
-PR #1790 把 Health Dashboard 的问题数主动 surfacing 到 MemoryNav 后，team lead第一次在日常路径看到真实债务：
+PR #1790 把 Health Dashboard 的问题数主动 surfacing 到 MemoryNav 后，operator第一次在日常路径看到真实债务：
 
 - `201` 条 orphan edges：孤立边引用不存在的文档
 - `724` 篇 unverified docs：非 `observed` authority 但 `verified_at IS NULL`
 - `12` 条 Knowledge Feed pending：待处理知识动态
 
-这证明 Phase B 的 badge 在跑，但也暴露出新的闭环缺口：**指标可信以后，系统必须告诉猫猫如何治理，而不是把数字扔给team lead。** Phase J 不重做 Health Dashboard，也不改变 F200；它把 Phase B 暴露出来的两类核心 health debt（orphan edges / verification debt）变成可解释、可 dry-run、可修复、可回归的治理流程。
+这证明 Phase B 的 badge 在跑，但也暴露出新的闭环缺口：**指标可信以后，系统必须告诉猫猫如何治理，而不是把数字扔给operator。** Phase J 不重做 Health Dashboard，也不改变 F200；它把 Phase B 暴露出来的两类核心 health debt（orphan edges / verification debt）变成可解释、可 dry-run、可修复、可回归的治理流程。
 
 **Maine Coon独立判断（2026-05-20）**：
 
 1. **orphan edges 是 F188 该管的结构债**：它来自 F188 Phase C edge extraction / graph health，当前抽样显示大头是 `F20` vs `F020` 这类 feature anchor canonicalization 缺失。修复必须包含一次性 migration + 写入时 normalize，不能只在 dashboard 上解释数字。
 2. **unverified 不是 F200 能自动清零的问题**：F200 consumption / trajectory 证明“这篇被用过、对导航有用”，不等于“这篇内容被验证为真”。F200 信号可以作为 review candidate / usage prior，但**不能直接写 `verified_at` 或提升 authority**。
 3. **不能盲降级 legacy authority**：`validated` / `constitutional` 且 `verified_at IS NULL` 是历史数据语义不完整，不等于内容不可信。Phase J 必须先区分 `authority`（来源/治理层级）、`verified_at`（验证事件时间）、`usage_signal`（被猫用过）三件事，再决定迁移策略。
-4. **team lead不做 724 次点击**：治理默认由猫猫批处理 / 抽样 / dry-run / 自动修复承担，只有高风险、语义冲突、跨 feature 决策才升级给team lead。
+4. **operator不做 724 次点击**：治理默认由猫猫批处理 / 抽样 / dry-run / 自动修复承担，只有高风险、语义冲突、跨 feature 决策才升级给operator。
 
 **Scope**：
 
 - orphan edge detail + repair：列出具体 from/to/relation/provenance，分类 feature-ref canonicalization / true ghost / non-doc wikilink / related-field drift，支持 dry-run 和 apply。
 - edge write prevention：所有 edge writer（frontmatter `related_features`、WikiLink、Markdown link、body F-ref）统一走 canonical target resolver。
 - verification semantics cleanup：明确 authority / verification / usage 三层语义，迁移 legacy NULL `verified_at`，但不把 F200 consumption 当 truth verification。
-- cat-owned review workflow：猫猫能批量确认、标记需复查、或上升少量关键问题；team lead只看到需要愿景/事实判断的少数项。
+- cat-owned review workflow：猫猫能批量确认、标记需复查、或上升少量关键问题；operator只看到需要愿景/事实判断的少数项。
 
 ### Phase C: Graph Fidelity ✅
 
 提升 Typed Evidence Graph 的连接密度 + 修复 graph 运行期 bug + 让 graph 变成人能读懂、愿意看的知识工作台。
 
-**Bug fixes（team lead实测 + Maine Coon代码分析）**：
+**Bug fixes（operator实测 + Maine Coon代码分析）**：
 1. edges 表 schema 不一致：root evidence.sqlite 只有 3 列（from_anchor/to_anchor/relation），代码 getRelated() 查 6 列 → 查询报错导致 graph 无边
 2. `inferCollectionId` silent skip：anchor 无法推断 collection 时整个节点 + 边被静默丢弃，无日志
 3. `inferCollectionIdSync` 设计缺陷：collection ID 是 `project:cat-cafe` 但 anchor 是裸 `"F188"`，sync 路径永远匹配不上
@@ -74,7 +74,7 @@ PR #1790 把 Health Dashboard 的问题数主动 surfacing 到 MemoryNav 后，t
 2. Markdown 链接 `[text](path)` → edge
 3. F 编号引用（文档体里的 `F186` 等）→ edge
 
-**Graph 信息可读性 + 感官质量**：team experience"F186 天知道是什么东西"、"显示的信息很让人费解"、"太丑了"、"字突破了那个椭圆"。Graph 展示不是把 anchor 和边画出来就算完成；用户必须一眼看出节点是什么、为什么相连、当前选中了什么。
+**Graph 信息可读性 + 感官质量**：operator experience"F186 天知道是什么东西"、"显示的信息很让人费解"、"太丑了"、"字突破了那个椭圆"。Graph 展示不是把 anchor 和边画出来就算完成；用户必须一眼看出节点是什么、为什么相连、当前选中了什么。
 
 **补充设计约束（Phase C readability follow-up）**：
 - 节点主显示信息必须是 `anchor + 人可读短标题`，不能只显示裸 anchor；中心节点/选中节点必须显示完整 title。
@@ -84,7 +84,7 @@ PR #1790 把 Health Dashboard 的问题数主动 surfacing 到 MemoryNav 后，t
 - 稀疏图应能直接解释关系（边标签或 Inspector 关系列表）；密集图可以隐藏边标签，但必须能通过 hover/click 获得 relation/provenance。
 
 **Graph Query Resolution（Phase C query follow-up）**：
-当前 Graph 输入框实际是精确 anchor lookup，但用户会自然把它当成搜索框使用。`harness`、`team lead的工资`、`landy 最喜欢什么猫` 这类输入不是 anchor，却代表用户想从记忆库里找到一个可画图的知识节点。Graph 入口必须先定义从自然查询到 graph anchor 的解析契约，不能再用 "No graph data for this anchor" 把搜索失败伪装成 graph 为空。
+当前 Graph 输入框实际是精确 anchor lookup，但用户会自然把它当成搜索框使用。`harness`、`operator的工资`、`landy 最喜欢什么猫` 这类输入不是 anchor，却代表用户想从记忆库里找到一个可画图的知识节点。Graph 入口必须先定义从自然查询到 graph anchor 的解析契约，不能再用 "No graph data for this anchor" 把搜索失败伪装成 graph 为空。
 
 输入语义：
 - 精确 anchor：`F186` / `f186` / `doc:...` / `thread-...` / `global:...` 等已存在 anchor，直接解析为 graph center。
@@ -114,7 +114,7 @@ Privacy Contract：
 
 ### Phase E: Replay Seed / Pin — Superseded by F200 ✅
 
-**关闭结论（2026-05-19）**：不单独实现 F188 Phase E。原方案依赖team lead或猫猫主动给 recall 结果打 `useful / wrong / missing / stale` 标签；实际 dogfood 后确认这个交互不成立——team lead不会逐条 pin，猫猫干活时也没有动机停下来评价记忆系统。
+**关闭结论（2026-05-19）**：不单独实现 F188 Phase E。原方案依赖operator或猫猫主动给 recall 结果打 `useful / wrong / missing / stale` 标签；实际 dogfood 后确认这个交互不成立——operator不会逐条 pin，猫猫干活时也没有动机停下来评价记忆系统。
 
 该反馈闭环由 **F200 Memory Recall Eval** 接管：F200 用真实猫行为采集 `RecallEvent` / candidates / consumed / trajectory / outputVerified 等隐式信号，覆盖“搜索结果是否被读、是否被用、是否产出被验证”的 replay seed 需求。F188 不再新增手动 Pin UI 或 MCP。
 
@@ -151,7 +151,7 @@ Maine Coon Design Gate 一审 P1×3 退回原 G.1/G.2/G.3 三件套：G.3 schema
 
 ### Phase I: Collection Lifecycle Management ✅
 
-team lead实操暴露：想手动创建 `domain:finance` collection 绑定 `docs/library/finance/` 下 5+ 篇理财知识文档，**找不到任何入口**。当前 Collection 唯一创建路径是 `POST /api/library/register`（localhost REST，需手工拼 JSON body），无 MCP/CLI/UI 创建方式。Phase D (Chat→Collection materialization) 也依赖"Collection 已存在"前提——lifecycle 不闭环，D 无法独立 ship。
+operator实操暴露：想手动创建 `domain:finance` collection 绑定 `docs/library/finance/` 下 5+ 篇理财知识文档，**找不到任何入口**。当前 Collection 唯一创建路径是 `POST /api/library/register`（localhost REST，需手工拼 JSON body），无 MCP/CLI/UI 创建方式。Phase D (Chat→Collection materialization) 也依赖"Collection 已存在"前提——lifecycle 不闭环，D 无法独立 ship。
 
 **核心命题**：Collection CRUD 全生命周期缺失。建了图书馆但没有「登记新书架」的柜台。
 
@@ -164,10 +164,10 @@ team lead实操暴露：想手动创建 `domain:finance` collection 绑定 `docs
 - `archived`：unbind/归档，compiled index 保留但标记不活跃
 
 **两种源模式**：
-1. **Bind existing root**（team lead场景）：绑定已存在的目录（如 `docs/library/finance/`），Collection 配置指向该路径，scanner 扫描生成索引
+1. **Bind existing root**（operator场景）：绑定已存在的目录（如 `docs/library/finance/`），Collection 配置指向该路径，scanner 扫描生成索引
 2. **Managed markdown vault**：在 `~/.cat-cafe/library/sources/{collection-id}/` 创建托管目录，适合"从零开始积累"的知识域。Phase D materialize 的文件落到这里
 
-**Dry-run 先行**：创建前必须 dry-run——扫描源目录，报告文件数/scanner level/exclude patterns/secret findings。team lead和猫猫据此决定是否继续创建。
+**Dry-run 先行**：创建前必须 dry-run——扫描源目录，报告文件数/scanner level/exclude patterns/secret findings。operator和猫猫据此决定是否继续创建。
 
 **安全边界**（继承Maine Coon brainstorm 约束）：
 - sensitivity 变更有 widening（放宽）/ narrowing（收紧）双向流，widening 需确认
@@ -182,7 +182,7 @@ team lead实操暴露：想手动创建 `domain:finance` collection 绑定 `docs
 
 **核心命题（2026-05-10 立项）**：能力 ≠ 猫能用。F188 Phase C 完整做出来的 graph resolver、candidate selection、no-match UX、edge filter，全部锁在 `/api/library/graph` HTTP endpoint 给 Web UI 用——猫的 MCP 工具列表里没有 graph 入口，也没有 time-based browse 入口。猫的"开工前先 recall" hook 只提醒 `search_evidence` one trick，所有零先验/精确 anchor/时间扫描场景都被强制走语义检索。
 
-team experience（2026-05-10）：「如果你们做了能力 这个能力猫不知道 = 没有。所以配套的 harness（系统提示词 / skills / mcp / sop）等等的放置要跟上」。
+operator experience（2026-05-10）：「如果你们做了能力 这个能力猫不知道 = 没有。所以配套的 harness（系统提示词 / skills / mcp / sop）等等的放置要跟上」。
 
 **Phase F 硬约束（必须一个 PR 内全部交付）**：
 
@@ -210,6 +210,44 @@ Architecture cell: memory
 Map delta: none — extends existing memory cell（复用 GraphResolver + 新增 RecentBrowseResolver / ToolEventLog / SkillLoadEventLog 等独立 read-models / append-only logs）。Skill 和 canonical .md 配套 (CLAUDE/AGENTS/GEMINI/OPENCODE.md + cat-cafe-skills/memory-navigation/) 同步更新 — 这是 cross-cutting documentation sync，不引入新架构 cell。
 Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复用 F188 Phase C 的 GraphResolver；list_recent 是 metadata browse read-model（不扩 F102 IEvidenceStore，Maine Coon 二审 P2 boundary）；ToolEventLog / SkillLoadEventLog 是 ToolUsageCounter 旁支的 append-only sequence 日志（cross-cutting telemetry，4.6 review #1）。
 
+### Phase K: Memory Center Config Health Surface（2026-06-09 reopen）
+
+社区 clowder-ai 用户 #880（`funkdog`）dogfood 后报告：**Memory Center 显示 `healthy=true` 但实际半瘫**（`vectors=0`、`edges=0`、`embedding_model=null`、docs scope 可疑）。截图状态 = API 活着 + 记忆能力实际不可用，但 UI 显示绿勾误导用户。
+
+外部 healthcheck 客户端依赖 `healthy` 字段做 liveness 判断，**不能动它的语义**；但内部 Memory Center health panel 必须把 "API running" 和 "Memory capabilities degraded" 区分开。
+
+Phase B/J 解决**内部 health debt**（orphan edges / verification debt，系统已运行后的治理）。Phase K 解决**配置健康**——用户 setup / onboard 阶段的"配错了但绿灯亮"问题，是 **user-actionable warning**，不是 system debt。
+
+**Scope**：
+
+- 保留 `healthy: boolean` 作为 API/DB liveness（语义不变，外部 healthcheck 客户端无感）
+- 新增 `functionalStatus: 'ok' | 'degraded'`——综合判断记忆能力实际可用性
+- 新增 `configWarnings: ConfigWarning[]`——具体可执行 warnings，每条 `{ code, message, suggestedAction }`
+- Memory Center frontend `IndexStatus` 组件（`/memory/status`）顶部黄色 degraded banner，显示 warnings + clickable next steps；F163/F188 `HealthReport` debt panel **不混入**，可加入口跳转
+- 不引入新 background job——evaluator 在 `/api/evidence/status` 同步评估（复用既有 db reads + catalog metadata）
+- regression fixture：reporter #880 截图状态必须 trigger ≥3 warnings
+
+**EvidenceStatusSignals 输入契约（evaluator 数据源显式分层）**：
+
+| 信号 | 数据源 | 取自 |
+|---|---|---|
+| `docs_count` / `edges_count` / `vectors_count` / `passage_vectors_count` | evidence.sqlite | `db.prepare('SELECT count(*) ...')` (已有 reads) |
+| `embedding_model` (实际字段名，非 `embedding_model_id`) | embedding_meta table | `db.prepare("SELECT value FROM embedding_meta WHERE key = 'embedding_model_id'")` 但返回 key 是 `embedding_model` (line 369-377 of evidence.ts) |
+| `passage_vectors_supported` | embedding service runtime state | `opts.embeddingService?.isReady() === true` (line 360) |
+| `docsRoot` 配置（用于 `docs_root_suspicious` 检测） | LibraryCatalog / collection manifest | `opts.libraryCatalog?.getCollections()` (read manifest), 非 evidence.sqlite |
+
+evaluator 在 status endpoint handler 里聚合**四类**输入 → 计算 warnings → 输出。
+
+**Warning codes (v1)**：
+
+| code | trigger condition | input source | suggestedAction |
+|---|---|---|---|
+| `docs_root_suspicious` | configured docs root 不存在 / 为空 / 非目录 | LibraryCatalog | 检查 collection manifest 中的 `root` 路径 |
+| `embedding_disabled` | `embedding_model == null` (字段名 per evidence.ts:369-377) | evidence_meta | 配置 `embedding.provider` + `embedding.model` 启用 semantic recall |
+| `vectors_empty` | `vectors_count == 0` 但 `docs_count > 0` | evidence.sqlite counts | 触发 rebuild 重新 embed 现有 docs |
+| `graph_empty` | `edges_count == 0` 但 `docs_count > 0` | evidence.sqlite counts | 检查 frontmatter `related_features` / WikiLink / Markdown link 是否启用 |
+| `vec_table_missing` | `passage_vectors_supported == false` | embedding service state | 安装 sqlite-vec 或确认 native extension 路径 |
+
 ## Acceptance Criteria
 
 ### Phase A（运行期维护入口）✅
@@ -231,10 +269,19 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 - [x] AC-J3: Orphan edge repair dry-run：提供 dry-run 报告，分类至少覆盖 `feature_ref_missing_zero_padding`、`feature_ref_true_ghost`、`wikilink_non_doc_target`、`related_target_missing`；报告包含 before/after count 和拟执行 SQL/edge changes 摘要
 - [x] AC-J4: Orphan edge repair apply：只对 dry-run 可证明安全的项自动修复（如 `F20 → F020` 且 canonical anchor 存在）；true ghost / non-doc wikilink 进入 review bucket 或按策略删除；修复同时清理 edges / vectors / derived graph read-model，不留下 dangling rows
 - [x] AC-J5: Edge write prevention：所有 edge 写入路径统一调用 canonical target resolver；body F-ref 抽取不得把年份 `F2025`、`F32-b` 等误写成 feature anchor；regression tests 覆盖 `F20→F020`、`F020` no-op、`F2025` no edge、missing target 分类
-- [x] AC-J6: Verification debt migration：对 `authority != observed AND verified_at IS NULL` 做迁移 dry-run，输出 buckets（trusted legacy / needs cat review / stale candidate / escalate to CVO）；禁止仅因 `verified_at IS NULL` 盲降级 `validated` / `constitutional`
-- [x] AC-J7: Cat-owned verification workflow：猫猫可批量确认低风险 legacy docs、标记 review-needed、或上升少量高风险项；team lead不承担逐篇点击，只有语义冲突、事实判断、愿景级取舍才升级
+- [x] AC-J6: Verification debt migration：对 `authority != observed AND verified_at IS NULL` 做迁移 dry-run，输出 buckets（trusted legacy / needs cat review / stale candidate / escalate to operator）；禁止仅因 `verified_at IS NULL` 盲降级 `validated` / `constitutional`
+- [x] AC-J7: Cat-owned verification workflow：猫猫可批量确认低风险 legacy docs、标记 review-needed、或上升少量高风险项；operator不承担逐篇点击，只有语义冲突、事实判断、愿景级取舍才升级
 - [x] AC-J8: F200 integration boundary：F200 consumption 可写入 usage fields（如 last_consumed_at / consumption_count / review_candidate_reason）或生成 review candidate，但不能作为 truth verification；F200 → F188 的接口有单向边界测试
-- [x] AC-J9: Dogfood acceptance report：在 runtime DB 副本或 dry-run 环境验证当前 `201 orphanEdges` 和 `724 unverified` 的拆解；报告包含抽样证据、修复前后 count、不可自动修复列表、以及是否需要 CVO 介入的具体项数
+- [x] AC-J9: Dogfood acceptance report：在 runtime DB 副本或 dry-run 环境验证当前 `201 orphanEdges` 和 `724 unverified` 的拆解；报告包含抽样证据、修复前后 count、不可自动修复列表、以及是否需要 operator 介入的具体项数
+
+### Phase K（Memory Center Config Health Surface — reopened 2026-06-09）
+- [x] AC-K1: `/api/evidence/status` 返回 schema 扩展 `{ healthy, functionalStatus, configWarnings[] }`；`healthy` 字段语义不变（API/DB liveness），外部 healthcheck client 不破坏（snapshot test 锁住）
+- [x] AC-K2: 5 个 warning detector 实现：`docs_root_suspicious` / `embedding_disabled` / `vectors_empty` / `graph_empty` / `vec_table_missing`；每条产出 `{ code, message, suggestedAction }`（v1 不分 severity——KISS，未来需要 `info`/`error` 等级 v2 再扩展，避免 v1 公式歧义）；trigger 条件 + input source 按 Phase K "Warning codes" 表，**evaluator 输入显式分层**为 evidence.sqlite counts / evidence_meta / embedding service / LibraryCatalog 四类，不允许 implicit 猜测
+- [x] AC-K3: `functionalStatus = configWarnings.length > 0 ? 'degraded' : 'ok'`（v1 无 severity 字段，length-based 公式无歧义；未来 v2 加 severity 时改 `some(w => w.severity === 'warn')`）；evaluator 在同一个 `/api/evidence/status` 请求内同步算（复用既有 db reads + 新增 catalog read，不引入新 background job）
+- [x] AC-K4: Memory Center `IndexStatus` 组件（`/memory/status` route）顶部显示 degraded 黄色 banner（`functionalStatus === 'degraded'` 时），区分 "API running" 和 "Memory capabilities degraded"；每条 warning 显示 `message` + clickable `suggestedAction`（**R6 Maine Coon P1-1**: `<button type="button">` + `onClick → handleWarningClick(code)` → scroll target section + 1.5s amber focus ring，drift 回 `<span>` 即 vitest RED）；`healthy=false` 时仍显示红色 fatal banner（向后兼容）。F163/F188 `HealthReport` debt panel **不混入** Phase K warnings（Phase J system debt 治理 vs Phase K config health 是两个 surface），可在 HealthReport 加入口链接跳转 `/memory/status`
+- [x] AC-K5: regression fixture：reporter #880 截图状态（`healthy=true` + `vectors_count=0` + `edges_count=0` + `embedding_model=null` — 字段名按 evidence.ts:369-377 实际返回）必须 trigger ≥3 warnings（`vectors_empty` + `graph_empty` + `embedding_disabled`），且 `functionalStatus='degraded'`
+- [x] AC-K6: external healthcheck 兼容测试：`healthy` 字段在 Phase K 前后**返回值 + 语义完全一致**（snapshot test 跑 healthy/unhealthy 两条 path，无新字段污染 `healthy` 计算）
+- [x] AC-K7: dogfood report：本地 runtime DB 跑 `/api/evidence/status`，文档化实际产出的 warnings 数 + 截图 + 用户 actionable next steps；至少有一个 warning 状态被验证（不是全绿）。**R6 Maine Coon P1-2 fix**：pre-merge UI screenshot 入档于 `docs/harness-feedback/2026-06-09-f188-phase-k-screenshots/reporter-880-degraded-banner.png`（4 warnings + clickable action buttons，amber tokens 与 connector-tokens.css 一致）；browser blocker（Next dev sync-vendor-assets watch + first-compile >5min）记录在 dogfood report，走Maine Coon明确允许的"等价组件证物"fallback；dev preview page `/dev/memory-status-preview` ship 在 PR 内（production 返回 404）给后续真 React render 归档
 
 ### Phase C（Graph Fidelity）✅
 - [x] AC-C0a: edges 表 schema 迁移（补 from_collection_id / to_collection_id / edge_sensitivity / provenance / created_at 列）
@@ -244,7 +291,7 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 - [x] AC-C2: Markdown 链接 `[text](path)` 在 rebuild 时生成 edge（type: `doc_link`）
 - [x] AC-C3: F 编号引用 `F186` 在 rebuild 时生成 edge（type: `feature_ref`）
 - [x] AC-C4: orphan edges 统计接入 Health Dashboard
-- [x] AC-C5: Graph 可视化美化（节点样式 + 布局 + 交互体验达到"team lead不说丑"标准）
+- [x] AC-C5: Graph 可视化美化（节点样式 + 布局 + 交互体验达到"operator不说丑"标准）
 
 ### Phase C Follow-up（Graph 信息可读性 + 感官验收）✅
 - [x] AC-C6a: 节点在图上显示 `anchor + 短标题`；中心/选中节点显示完整 title，用户能看懂 `F186` 是什么
@@ -269,7 +316,7 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 - [x] AC-D3: materialize 产出的文件有 frontmatter（至少 doc_kind + created）
 
 ### Phase E（Replay Seed / Pin — Superseded by F200）✅
-- [x] AC-E1: Closed/no-op — team lead手动 Pin UI 不做；F200 用隐式 consumption / trajectory 信号替代逐条人工标注
+- [x] AC-E1: Closed/no-op — operator手动 Pin UI 不做；F200 用隐式 consumption / trajectory 信号替代逐条人工标注
 - [x] AC-E2: Closed/no-op — 猫猫 API/MCP 手动 Pin 不做；F200 自动记录 recall → read/use/verify 行为链，猫猫不需要额外停下来打标签
 - [x] AC-E3: Closed/no-op — Pin → Query Replay seed 不做；F200 Phase D trajectory 数据是 replay seed 的更高保真输入，人工纠偏入口如需补充应进入 F200 backlog，不回流到 F188
 
@@ -315,7 +362,7 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 - [x] AC-I6: internal-archive/unbind 不等于 hard delete——compiled index 归档到 `~/.cat-cafe/library/archives/{collection-id}/`，manifest 标记 `archived`，search/graph 不再返回该 Collection 结果；**可恢复**（unarchive → rebuild）
 - [x] AC-I7: sensitivity 变更双向流——widening（`private → internal → public`）需确认提示；narrowing（`public → private`）立即生效 + 触发 reindex 刷新可见性
 - [x] AC-I8: Phase D（Chat→Collection materialization）只消费 lifecycle API 创建/选择 Collection，**不自行绕过 lifecycle 直接写 manifest**——Phase I 是 Phase D 的前置依赖
-- [x] AC-I9: 端到端验收场景：team lead通过 MCP/UI 创建 `domain:finance`，bind `docs/library/finance/` 下 5+ 篇理财知识 .md 文件，触发 rebuild，search/graph/catalog 全部能查到 finance 内容，默认 `private` sensitivity
+- [x] AC-I9: 端到端验收场景：operator通过 MCP/UI 创建 `domain:finance`，bind `docs/library/finance/` 下 5+ 篇理财知识 .md 文件，触发 rebuild，search/graph/catalog 全部能查到 finance 内容，默认 `private` sensitivity
 
 ## Eval / Tracking Contract
 
@@ -326,7 +373,7 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 - **Users**：
   - Cats：所有猫，特别是 cold-start 的新分身——进 thread 时需要快速建上下文
   - Runtime：MCP tool `cat_cafe_graph_resolve` / `cat_cafe_list_recent`；SessionStart hook 路由表注入；`search_evidence` payload 内 deterministic nudge
-  - CVO：受益方（猫更快接住 baton，不用 CVO 反复重传 context），不直接操作
+  - operator：受益方（猫更快接住 baton，不用 operator 反复重传 context），不直接操作
 - **Activation signal**（trace 可观察事件）：
   - **AS-1 三入口分布**：在任意 thread 前 5 次 memory-class MCP 调用中，至少 1 次是 `graph_resolve` 或 `list_recent`（即不再 100% 走 search_evidence）
   - **AS-2 cold-start 缩短**：`turns-to-baton`（从进 thread 到首次接球 / 交付动作的 tool call 数）对比 baseline（only-search）≥30% 减少。**Baton 事件定义**（防止 baseline 不可复现）：以 F167 worklist registry 的 mention 入站事件作为"进 thread"锚点；以首次出现以下任一作为"接球 / 交付"：(a) 行首 @ 路由出站；(b) `cat_cafe_hold_ball` 调用；(c) 文件 edit / git commit / PR action；分母 N ≥ 10 cold-start session
@@ -343,7 +390,7 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 
 ### 3. Regression Fixture
 
-- `cold-start/only-search-spike` → `thread_mp0i4nfau5hz0mr6` opus-47 5 次 search_evidence 才建上下文（team lead 2026-05-10 trigger 原话）
+- `cold-start/only-search-spike` → `[thread-id]` opus-47 5 次 search_evidence 才建上下文（operator 2026-05-10 trigger 原话）
 - `graph-locked-in-http-api` → commit `d0f0e8437` 之前的现状：`GraphResolver` 只通过 `/api/library/graph` HTTP endpoint 暴露，MCP 工具列表无 graph 入口
 - `harness-mismatch-canonical-sources` → Maine Coon review P1-2 finding：hook/SOP 只更 `CLAUDE.md` + `.claude/settings*.json`，漏 `AGENTS.md` / `GEMINI.md` / `OPENCODE.md`；修复后 fixture：sync 脚本/CI 检查所有 canonical source 三入口一致
 - `privacy-leak-via-mcp-wrapper` → Maine Coon P1-3 finding 验证 fixture：F186 privacy contract 在 HTTP API 已落实，MCP wrapper 不传 `callerCollections` 时绕过——unit test 验证 private collection redaction
@@ -364,11 +411,11 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 | 项 | 理由 | 触发条件（何时重新考虑） |
 |----|------|------------------------|
 | Scanner L2/L3 智能建议 | 对我们自家 docs 不值（docs 都是猫猫生成的，已有结构） | 外部 Collection ≥3 或单 Collection 大量缺 metadata |
-| 空状态跨域扩搜引导 | 做不好都是噪音（team experience） | Health Dashboard 证明存在 repeated search miss 后再考虑，且只能 title-only / ≤3 条 |
+| 空状态跨域扩搜引导 | 做不好都是噪音（operator experience） | Health Dashboard 证明存在 repeated search miss 后再考虑，且只能 title-only / ≤3 条 |
 | 完整 Durable Job Ledger | Phase A 的最小状态表足够 | memory jobs 类型 ≥3（reindex / graph extraction / health report / replay）且最小状态表不够支撑 retry / queue / parent-child 时 |
-| GBrain compiled wiki / dream cycle 自动写回 | 永久 non-goal | 我们只做 derived read-model，不让它写回真相源。除非team lead明确推翻治理约束 |
+| GBrain compiled wiki / dream cycle 自动写回 | 永久 non-goal | 我们只做 derived read-model，不让它写回真相源。除非operator明确推翻治理约束 |
 | F200 consumption 自动等同 truth verification | F200 明确只评估 navigation utility，不评估文档真伪/authority | 如需让 usage signal 参与 verification，必须先在 F188/F200 之间定义人工/猫审确认边界 |
-| team lead逐篇验证 unverified docs | 724 次点击不是可用 workflow，且违背 Phase E dogfood 结论 | 仅当猫猫批处理后剩下少量高风险/事实争议项，才上升给team lead |
+| operator逐篇验证 unverified docs | 724 次点击不是可用 workflow，且违背 Phase E dogfood 结论 | 仅当猫猫批处理后剩下少量高风险/事实争议项，才上升给operator |
 | 无 dry-run 直接批量改 runtime evidence DB | edge/authority migration 都可能影响 recall/graph 结果，必须可解释可回滚 | 只允许在 dry-run report + 备份/副本验证后 apply |
 
 ## Dependencies
@@ -389,19 +436,22 @@ Why: Phase F 不创建新 store/queue/router/adapter cell — graph_resolve 复�
 
 | # | 决策 | 理由 | 日期 |
 |---|------|------|------|
-| KD-1 | ~~不做自动置信度标记，只做手动 Pin~~ → 被 KD-10 取代 | 早期判断：team lead否决“猫猫自动置信度标记”；后续 dogfood 证明手动 Pin 本身也不现实 | 2026-05-06 |
-| KD-2 | 不拆成多个小 feature，合成一个 Stewardship | team lead + GPT-5.5 收敛：价值链是一条线，拆碎了每个都是半截能力 | 2026-05-06 |
+| KD-1 | ~~不做自动置信度标记，只做手动 Pin~~ → 被 KD-10 取代 | 早期判断：operator否决“猫猫自动置信度标记”；后续 dogfood 证明手动 Pin 本身也不现实 | 2026-05-06 |
+| KD-2 | 不拆成多个小 feature，合成一个 Stewardship | operator + GPT-5.5 收敛：价值链是一条线，拆碎了每个都是半截能力 | 2026-05-06 |
 | KD-3 | Phase A 做最小状态表，不做完整 Job Ledger | GPT-5.5 建议中间态：够看够用，等 job 类型多了再抽象 | 2026-05-06 |
-| KD-4 | Graph UI 质量以信息可读性和感官验收为准，不以"画出了节点和边"为准 | team lead反馈：裸 anchor、文字溢出、控件被裁会让 graph 虽然功能正常但不可用 | 2026-05-08 |
+| KD-4 | Graph UI 质量以信息可读性和感官验收为准，不以"画出了节点和边"为准 | operator反馈：裸 anchor、文字溢出、控件被裁会让 graph 虽然功能正常但不可用 | 2026-05-08 |
 | KD-5 | Graph 入口是 query resolution，不是裸 anchor lookup | 用户会输入 `harness`/自然语言问题；必须先解析候选 anchor，再画图，不能用 search fallback 当 hotfix 糊过去 | 2026-05-09 |
-| KD-6 | Phase F 立项硬约束：能力 + harness 配套（hook / SOP / skill / tool description）**必须同 PR**，不允许"能力先合配套后补"；P1/P2 候选项必须**预先固化量化触发阈值**（不靠感觉拉扯） | team experience（2026-05-10）：「能力猫不知道 = 没有」；eval 缺失会让后续 P1/P2 决策"跑了半天没观测"，复现 LL-051 类空转 | 2026-05-10 |
+| KD-6 | Phase F 立项硬约束：能力 + harness 配套（hook / SOP / skill / tool description）**必须同 PR**，不允许"能力先合配套后补"；P1/P2 候选项必须**预先固化量化触发阈值**（不靠感觉拉扯） | operator experience（2026-05-10）：「能力猫不知道 = 没有」；eval 缺失会让后续 P1/P2 决策"跑了半天没观测"，复现 LL-051 类空转 | 2026-05-10 |
 | KD-7 | Phase F **不上 PostToolUse hook 作为 v1 必交付**，用 `search_evidence` return payload 末尾 deterministic nudge 替代；FM-5（nudge 失效率 ≥40%）是回到 hook 选项的触发条件 | Maine Coon Design Gate 建议：PostToolUse hook 是 cross-cutting harness 改动，单 Phase F 不该带；payload 内 nudge 是同入口同 trace 的最小可达方案，FM-5 验证有效性；v2 nudge 失效再上 hook | 2026-05-10 |
 | KD-8 | **MCP visibility 边界服务端派生**：`callerCollections` / `allowedCollections` 等决定 private/restricted 可见性的 ACL 字段**必须由服务端从 agent identity / session 派生**，**禁止**作为 MCP 输入参数；client-supplied `collections` 仅作请求范围 filter，不能扩展可见性；任何 MCP wrapper 暴露 ACL 类参数 = privilege escalation = 直接 reject PR | Maine Coon 二次 review P1-1：把 `callerCollections` 写进 MCP schema = 让模型自授权 private collection visibility；GraphResolver/GraphQueryResolver 都把它当"调用方可见集合"，server-side option 不能下放到 client | 2026-05-10 |
-| KD-9 | Phase F 实现 **1 个 PR 一次合入**（不拆碎）：AC-F1~F11 + event log + harness 同步 + skill + Dashboard 全做完；baseline 采集用 4.6 review #2 (b) 单方案——event log 上线即开始采，AC-F8 的 30% 改善阈值标 **provisional**，PR merge 后首次 eval 用真实数据校准（不要 pre-launch baseline 窗口） | team lead push back（2026-05-10）：「拆碎 PR 导致原本一天的事五天才搞完」；重读 4.6 review #2 原文 (a)/(b) 是两选一不是组合，(b) 单选已够解 baseline 循环；KD-6「能力+harness 同 PR」也天然兼容 | 2026-05-10 |
-| KD-10 | Phase E 手动 Pin 关闭，Replay/feedback 闭环归 F200 | team lead指出“team lead逐条 pin 不现实，猫猫干活时也没动机 pin”；Maine Coon + 47 独立读 F200 后确认：F200 的 RecallEvent / consumption / trajectory / outputVerified pipeline 已覆盖 F188 E 的真实目标。F188 只保留 library navigation / collection 管护职责 | 2026-05-19 |
-| KD-11 | F188 reopen Phase J：Health Dashboard 指标必须走向治理闭环 | PR #1790 让 health issue count 主动可见后，team lead dogfood 看到 `201 orphanEdges` / `724 unverified` 并追问可信度与治理。结论：Phase B badge 完成 awareness，但 F188 还需要把可信诊断变成 dry-run / repair / cat-owned review workflow | 2026-05-20 |
+| KD-9 | Phase F 实现 **1 个 PR 一次合入**（不拆碎）：AC-F1~F11 + event log + harness 同步 + skill + Dashboard 全做完；baseline 采集用 4.6 review #2 (b) 单方案——event log 上线即开始采，AC-F8 的 30% 改善阈值标 **provisional**，PR merge 后首次 eval 用真实数据校准（不要 pre-launch baseline 窗口） | operator push back（2026-05-10）：「拆碎 PR 导致原本一天的事五天才搞完」；重读 4.6 review #2 原文 (a)/(b) 是两选一不是组合，(b) 单选已够解 baseline 循环；KD-6「能力+harness 同 PR」也天然兼容 | 2026-05-10 |
+| KD-10 | Phase E 手动 Pin 关闭，Replay/feedback 闭环归 F200 | operator指出“operator逐条 pin 不现实，猫猫干活时也没动机 pin”；Maine Coon + 47 独立读 F200 后确认：F200 的 RecallEvent / consumption / trajectory / outputVerified pipeline 已覆盖 F188 E 的真实目标。F188 只保留 library navigation / collection 管护职责 | 2026-05-19 |
+| KD-11 | F188 reopen Phase J：Health Dashboard 指标必须走向治理闭环 | PR #1790 让 health issue count 主动可见后，operator dogfood 看到 `201 orphanEdges` / `724 unverified` 并追问可信度与治理。结论：Phase B badge 完成 awareness，但 F188 还需要把可信诊断变成 dry-run / repair / cat-owned review workflow | 2026-05-20 |
 | KD-12 | F200 consumption 不是 truth verification | F200 明确评价 navigation utility，不评价文档真伪或 authority。消费记录可作为 usage prior / review candidate，不能直接写 `verified_at`、不能清空 unverified、不能提升 authority | 2026-05-20 |
 | KD-13 | Phase J 三维分离：authority / verified_at / usage_signal | authority（治理层级）/ verified_at（显式验证事件）/ usage_signal（F200 消费）三维独立。F200 consumption 不写 verified_at，不提升 authority。review_status 是 triage 状态（trusted_legacy / needs_review / reviewed / escalated），独立于 authority。Design Gate R4 通过 | 2026-05-21 |
+| KD-14 | Phase K 不改 `healthy` 字段语义 | 外部 healthcheck client（k8s probe / Prometheus / external monitor）依赖 `healthy: boolean` 做 API/DB liveness 判断。改语义 = break 集成。Phase K 新增 `functionalStatus` + `configWarnings[]` 做 user-facing 区分，`healthy` 保持原意 | 2026-06-09 |
+| KD-15 | `configWarnings` 是 user-actionable hints，不是 system debt | Phase J 已 cover system debt（orphan edges / verification）。Phase K 范围限定**用户 setup / onboard 阶段** 的 actionable warning。每条 warning **必须**带 `suggestedAction`（点击/复制即可执行的下一步），不允许只报"有问题"不给修复路径 | 2026-06-09 |
+| KD-16 | warning evaluator 在 `/api/evidence/status` 同步评估，不引入 background job | `/api/evidence/status` 本来就查 5 个 db count，evaluator 复用这些 reads，零额外 db cost。避免 Phase A `RebuildJobTracker` 后又开第二套 jobs 框架的 scope 膨胀；Phase K 只动 response shape + frontend display，不动 scheduling | 2026-06-09 |
 
 ## Review Gate
 

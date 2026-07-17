@@ -1,6 +1,5 @@
 import {
   builtinAccountFamilyForClient,
-  CLI_EFFORT_VALUES,
   type CliEffortValue,
   getCliEffortOptionsForProvider,
   builtinAccountIdForClient as sharedBuiltinAccountIdForClient,
@@ -8,11 +7,12 @@ import {
 import type { CatData } from '@/hooks/useCatData';
 import { UNKNOWN_CAT_COLOR } from '@/lib/color-defaults';
 import type { BuiltinAccountClient, ProfileItem } from './hub-accounts.types';
+import { defaultAcpCommandForClient, defaultAcpStartupArgsForClient } from './hub-cat-editor.acp';
+import { defaultMcpSupportForClient } from './hub-cat-editor.protocols';
 import type { CatStrategyEntry, StrategyType } from './hub-strategy-types';
 
-/** clowder-ai#340 P5: Renamed from ClientValue → ClientId (aligned with shared type). */
-export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'dare' | 'opencode' | 'antigravity' | 'catagent';
-/** @deprecated clowder-ai#340: Use {@link ClientId} instead. */
+export type ClientId = 'anthropic' | 'openai' | 'google' | 'kimi' | 'opencode' | 'antigravity' | 'catagent' | 'acp';
+/** @deprecated Use ClientId instead. */
 export type ClientValue = ClientId;
 export type SessionChainValue = 'true' | 'false';
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -40,8 +40,14 @@ export interface HubCatEditorFormState {
   commandArgs: string;
   cliConfigArgs: string[];
   cliEffort: CliEffortValue | '';
-  /** clowder-ai#340 P5: Model provider name (renamed from ocProviderName). */
   provider: string;
+  acpEnabled: boolean;
+  acpTransport: 'stdio' | 'httpstream';
+  acpCommand: string;
+  acpStartupArgs: string;
+  acpMaxLiveProcesses: string;
+  acpIdleTtlMinutes: string;
+  mcpSupport: boolean;
   sessionChain: SessionChainValue;
   maxPromptTokens: string;
   maxContextTokens: string;
@@ -92,10 +98,10 @@ export const CLIENT_OPTIONS: Array<{ value: ClientId; label: string }> = [
   { value: 'openai', label: 'Codex' },
   { value: 'google', label: 'Gemini' },
   { value: 'kimi', label: 'Kimi' },
-  { value: 'dare', label: 'Dare' },
   { value: 'opencode', label: 'OpenCode' },
   { value: 'antigravity', label: 'Antigravity' },
   { value: 'catagent', label: 'CatAgent' },
+  { value: 'acp', label: 'ACP Client' },
 ];
 
 export const SESSION_CHAIN_OPTIONS: Array<{ value: SessionChainValue; label: string }> = [
@@ -128,24 +134,29 @@ export const CODEX_AUTH_MODE_OPTIONS: Array<{ value: CodexAuthMode; label: strin
   { value: 'auto', label: 'auto' },
 ];
 
+export { defaultAcpCommandForClient, defaultAcpStartupArgsForClient };
+export {
+  ACP_TRANSPORT_OPTIONS,
+  type AcpTransportValue,
+  acpStartupArgsPlaceholder,
+  getAcpWarning,
+  isAcpOnlyClient,
+  showTransportSelector,
+} from './hub-cat-editor.acp';
+
 export const DEFAULT_ANTIGRAVITY_COMMAND_ARGS = '. --remote-debugging-port=9000';
 
 const GOOGLE_OWNED_DOMAINS = ['generativelanguage.googleapis.com', 'googleapis.com'];
 
-function isCliEffortValue(value: string | undefined): value is CliEffortValue {
-  return value !== undefined && CLI_EFFORT_VALUES.includes(value as CliEffortValue);
-}
-
-function optionalVoiceText(value: string | undefined): string {
-  return value == null ? '' : value;
-}
-
-function optionalVoiceNumberText(value: number | undefined): string {
+function voiceStr(value: string | number | undefined): string {
   return value == null ? '' : String(value);
 }
 
-export function getCliEffortOptionsForClient(client: ClientValue): readonly CliEffortValue[] | null {
-  return getCliEffortOptionsForProvider(client);
+export function getCliEffortOptionsForClient(
+  client: ClientValue,
+  defaultModel?: string | null,
+): readonly CliEffortValue[] | null {
+  return getCliEffortOptionsForProvider(client, defaultModel);
 }
 
 export function splitMentionPatterns(raw: string): string[] {
@@ -249,21 +260,21 @@ function isBuiltinClient(client: ClientId): client is BuiltinAccountClient {
     client === 'openai' ||
     client === 'google' ||
     client === 'kimi' ||
-    client === 'dare' ||
-    client === 'opencode'
+    client === 'opencode' ||
+    client === 'acp'
   );
 }
 
 function legacyProfileClient(profile: ProfileItem): BuiltinAccountClient | undefined {
   if (profile.clientId) return profile.clientId;
-  if (profile.oauthLikeClient === 'dare' || profile.oauthLikeClient === 'opencode') return profile.oauthLikeClient;
+  if (profile.oauthLikeClient === 'opencode') return profile.oauthLikeClient;
   const normalizedId = `${profile.id} ${profile.provider ?? ''} ${profile.displayName} ${profile.name}`.toLowerCase();
   if (normalizedId.includes('claude')) return 'anthropic';
   if (normalizedId.includes('codex')) return 'openai';
   if (normalizedId.includes('gemini')) return 'google';
   if (normalizedId.includes('kimi') || normalizedId.includes('moonshot')) return 'kimi';
-  if (normalizedId.includes('dare')) return 'dare';
   if (normalizedId.includes('opencode')) return 'opencode';
+  if (normalizedId.includes('acp')) return 'acp';
   return undefined;
 }
 
@@ -295,12 +306,14 @@ function resolveBuiltinClientFamily(client: ClientId): BuiltinAccountClient | nu
   if (client === 'catagent') return 'anthropic';
   return null;
 }
-
 export function builtinAccountIdForClient(client: ClientId): string | null {
   return sharedBuiltinAccountIdForClient(client);
 }
 
 export function filterAccounts(client: ClientId, profiles: ProfileItem[]): ProfileItem[] {
+  // F161: Generic ACP is a transport, not tied to any provider family.
+  // Any account (oauth or api_key, any client family) can supply credentials to the ACP carrier.
+  if (client === 'acp') return profiles;
   const effective = resolveBuiltinClientFamily(client);
   if (!effective || !isBuiltinClient(effective)) return [];
   const builtinProfiles = profiles.filter(
@@ -321,7 +334,6 @@ export function filterAccounts(client: ClientId, profiles: ProfileItem[]): Profi
 }
 
 export const filterProfiles = filterAccounts;
-
 export function autoSlug(name: string, currentId?: string): string {
   const slug = name
     .trim()
@@ -342,6 +354,7 @@ export function initialState(cat?: CatData | null, draft?: HubCatEditorDraft | n
   const createDraft = !cat ? draft : null;
   const persistedCliEffort = cat?.cli?.effort;
   const voiceConfig = cat?.voiceConfig;
+  const acpConfig = cat?.acp;
   const nameForCreate = createDraft?.templateName ?? '';
   const catId = cat?.id ?? (nameForCreate ? autoSlug(nameForCreate) : '');
   const mentionPatterns = cat?.mentionPatterns ?? [];
@@ -365,20 +378,38 @@ export function initialState(cat?: CatData | null, draft?: HubCatEditorDraft | n
     defaultModel: cat?.defaultModel ?? createDraft?.defaultModel ?? '',
     commandArgs: cat?.commandArgs?.join(' ') ?? createDraft?.commandArgs ?? '',
     cliConfigArgs: [...(cat?.cliConfigArgs ?? [])],
-    cliEffort: isCliEffortValue(persistedCliEffort) ? persistedCliEffort : '',
+    cliEffort: persistedCliEffort ?? '',
     provider: cat?.provider ?? '',
+    acpEnabled:
+      Boolean(acpConfig) || (cat?.clientId as ClientId | undefined) === 'acp' || createDraft?.clientId === 'acp',
+    acpTransport: (acpConfig?.transport as 'stdio' | 'httpstream' | undefined) ?? 'stdio',
+    acpCommand:
+      acpConfig?.command ??
+      defaultAcpCommandForClient((cat?.clientId as ClientId | undefined) ?? createDraft?.clientId ?? 'anthropic'),
+    acpStartupArgs:
+      acpConfig?.startupArgs?.join(' ') ??
+      defaultAcpStartupArgsForClient(
+        (cat?.clientId as ClientId | undefined) ?? createDraft?.clientId ?? 'anthropic',
+        (acpConfig?.transport as 'stdio' | 'httpstream' | undefined) ?? 'stdio',
+      ),
+    acpMaxLiveProcesses: acpConfig?.pool?.maxLiveProcesses !== undefined ? String(acpConfig.pool.maxLiveProcesses) : '',
+    acpIdleTtlMinutes:
+      acpConfig?.pool?.idleTtlMs !== undefined ? String(Math.round(acpConfig.pool.idleTtlMs / 60_000)) : '',
+    mcpSupport:
+      cat?.mcpSupport ??
+      defaultMcpSupportForClient((cat?.clientId as ClientId | undefined) ?? createDraft?.clientId ?? 'anthropic'),
     sessionChain: String(cat?.sessionChain ?? true) as SessionChainValue,
     maxPromptTokens: cat?.contextBudget ? String(cat.contextBudget.maxPromptTokens) : '',
     maxContextTokens: cat?.contextBudget ? String(cat.contextBudget.maxContextTokens) : '',
     maxMessages: cat?.contextBudget ? String(cat.contextBudget.maxMessages) : '',
     maxContentLengthPerMsg: cat?.contextBudget ? String(cat.contextBudget.maxContentLengthPerMsg) : '',
-    voiceVoice: optionalVoiceText(voiceConfig?.voice),
-    voiceLangCode: optionalVoiceText(voiceConfig?.langCode),
-    voiceSpeed: optionalVoiceNumberText(voiceConfig?.speed),
-    voiceRefAudio: optionalVoiceText(voiceConfig?.refAudio),
-    voiceRefText: optionalVoiceText(voiceConfig?.refText),
-    voiceInstruct: optionalVoiceText(voiceConfig?.instruct),
-    voiceTemperature: optionalVoiceNumberText(voiceConfig?.temperature),
+    voiceVoice: voiceStr(voiceConfig?.voice),
+    voiceLangCode: voiceStr(voiceConfig?.langCode),
+    voiceSpeed: voiceStr(voiceConfig?.speed),
+    voiceRefAudio: voiceStr(voiceConfig?.refAudio),
+    voiceRefText: voiceStr(voiceConfig?.refText),
+    voiceInstruct: voiceStr(voiceConfig?.instruct),
+    voiceTemperature: voiceStr(voiceConfig?.temperature),
   };
 }
 
@@ -450,8 +481,6 @@ export function buildCodexConfigPatches(
   return patches;
 }
 
-// Extracted to hub-cat-editor.payload.ts:
-// buildCatPayload, buildContextBudget, hintModelFormatForClient, validateModelFormatForClient
 export {
   buildCatPatchPayload,
   buildCatPayload,

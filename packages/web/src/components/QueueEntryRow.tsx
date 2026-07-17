@@ -8,6 +8,7 @@ const SOURCE_CATEGORY_LABEL: Record<string, string> = {
   ci: 'CI',
   review: 'Review',
   conflict: 'Conflict',
+  issue: 'Issue',
   scheduled: 'Scheduled',
   a2a: 'A2A',
 };
@@ -19,6 +20,7 @@ export interface QueueEntryRowProps {
   imageCount: number;
   ownerName: string;
   onRemove: (id: string) => void;
+  onRecallEdit: (id: string) => void;
   onSteer: (id: string) => void;
 }
 
@@ -41,12 +43,15 @@ function QueueEntryRow({
   imageCount,
   ownerName,
   onRemove,
+  onRecallEdit,
   onSteer,
   dragHandleProps,
 }: QueueEntryRowProps & { dragHandleProps?: Record<string, unknown> }) {
   const isAgent = entry.source === 'agent';
+  const canRecallEdit = entry.source === 'user';
   const isUrgent = entry.priority === 'urgent';
   const categoryLabel = entry.sourceCategory ? SOURCE_CATEGORY_LABEL[entry.sourceCategory] : null;
+  const rowToneClass = isPaused ? 'bg-conn-amber-bg/60' : isAgent ? 'bg-[var(--color-cocreator-surface)]' : '';
 
   const sourceLabel = isAgent
     ? `${entry.callerCatId ?? '猫猫'} → ${entry.targetCats[0] ?? '猫猫'}`
@@ -55,9 +60,7 @@ function QueueEntryRow({
       : ownerName;
 
   return (
-    <div
-      className={`flex items-center gap-2 px-3 py-2 rounded-lg ${isPaused ? 'bg-conn-amber-bg/60' : ''} ${isAgent ? 'bg-[var(--color-cocreator-surface)]' : ''} ${isUrgent ? 'bg-conn-red-bg/40' : ''}`}
-    >
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-lg ${rowToneClass}`}>
       {/* Drag handle */}
       <button
         className="p-0.5 text-cafe-muted hover:text-cafe-secondary cursor-grab active:cursor-grabbing shrink-0 touch-none"
@@ -141,12 +144,28 @@ function QueueEntryRow({
         Steer
       </button>
 
+      {canRecallEdit && (
+        <button
+          type="button"
+          onClick={() => onRecallEdit(entry.id)}
+          className="p-1 text-cafe-muted hover:text-cafe-primary hover:bg-cafe-surface rounded-full transition-colors shrink-0"
+          title="撤回编辑"
+          aria-label="撤回编辑"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <title>撤回编辑</title>
+            <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
+          </svg>
+        </button>
+      )}
+
       {/* Remove button */}
       <button
+        type="button"
         onClick={() => onRemove(entry.id)}
         className="p-1 text-cafe-muted hover:text-conn-red-text transition-colors shrink-0"
-        title="撤回"
-        aria-label="撤回"
+        title="删除"
+        aria-label="删除"
       >
         <svg className="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor">
           <path

@@ -19,11 +19,18 @@ export interface CapabilityBoardItem {
   type: 'mcp' | 'skill';
   source: 'cat-cafe' | 'external';
   enabled: boolean;
+  globalEnabled?: boolean;
   cats: Record<string, boolean>;
   description?: string;
   triggers?: string[];
   category?: string;
   mounts?: Record<string, boolean>;
+  mountHealth?: {
+    enabledMountPoints: string[];
+    mountedCount: number;
+    requiredCount: number;
+    allMounted: boolean;
+  };
   tools?: { name: string; description?: string }[];
   connectionStatus?: 'connected' | 'disconnected' | 'unknown';
   mcpServer?: {
@@ -40,12 +47,18 @@ export interface CapabilityBoardItem {
   ecosystem?: 'claude' | 'codex' | 'openclaw' | 'antigravity';
   lockVersion?: { source: string; version: string; installedAt: string; installedBy: string };
   pluginId?: string;
+  mountPaths?: string[];
+  requiresMcp?: Array<{ id: string; status: 'ready' | 'missing' | 'unresolved' }>;
+  /** Which external config file this MCP was discovered from (e.g. "claude"). */
+  discoveredFrom?: string;
 }
 
 export interface CatFamily {
   id: string;
   name: string;
   catIds: string[];
+  /** Optional display names keyed by catId — falls back to raw catId when absent. */
+  catNames?: Record<string, string>;
 }
 
 export interface SkillHealthSummary {
@@ -59,6 +72,8 @@ export interface CapabilityBoardResponse {
   items: CapabilityBoardItem[];
   catFamilies: CatFamily[];
   projectPath: string;
+  /** All known project paths for multi-project selector */
+  knownProjectPaths?: string[];
   skillHealth?: SkillHealthSummary;
 }
 
@@ -415,7 +430,7 @@ function CatFamilyToggles({
               {isOpen && (
                 <div className="px-3 pb-2 space-y-1">
                   {family.catIds.map((catId) => {
-                    // Sparse cats: if a skill is not relevant for a cat (provider mismatch),
+                    // Sparse cats: if a skill is not relevant for a cat (mount point mismatch),
                     // the backend omits the key entirely. Render a dash instead of a toggle.
                     if (!(catId in item.cats)) {
                       return (
@@ -523,9 +538,9 @@ function ToggleSwitch({
   );
 }
 
-/** Mount status badges for cat-cafe skills (provider list is explicit for stable ordering). */
+/** Mount status badges for cat-cafe skills (mount point list is explicit for stable ordering). */
 function MountStatusBadges({ mounts }: { mounts: Record<string, boolean> }) {
-  const providers = [
+  const mountPoints = [
     { key: 'claude', label: 'Claude' },
     { key: 'codex', label: 'Codex' },
     { key: 'gemini', label: 'Gemini' },
@@ -535,7 +550,7 @@ function MountStatusBadges({ mounts }: { mounts: Record<string, boolean> }) {
     <div>
       <span className="font-medium text-cafe-secondary mb-1.5 block">挂载状态:</span>
       <div className="flex flex-wrap gap-1.5">
-        {providers.map(({ key, label }) => {
+        {mountPoints.map(({ key, label }) => {
           const ok = mounts[key] ?? false;
           return (
             <span
@@ -582,7 +597,7 @@ export function SkillHealthBanner({ health, items }: { health: SkillHealthSummar
       id: i.id,
       failed: Object.entries(i.mounts!)
         .filter(([, ok]) => !ok)
-        .map(([provider]) => provider),
+        .map(([mountPoint]) => mountPoint),
     }));
 
   return (

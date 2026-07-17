@@ -50,6 +50,10 @@ export interface BubbleEvent {
  * dual-id message but reducer compares `extra.stream.invocationId` (parent) ≠ event.canonical (turn).
  */
 export function getStableInvocationKey(msg: ChatMessage): string | undefined {
+  // #814: explicit post_message is standalone — never match by stable key,
+  // so stream events from the same invocation can't replace this bubble.
+  // stream block is still preserved for #573 correlation after F5/hydration.
+  if (msg.extra?.isExplicitPost) return undefined;
   return msg.extra?.stream?.turnInvocationId ?? msg.extra?.stream?.invocationId;
 }
 
@@ -62,15 +66,16 @@ export function getStableInvocationKey(msg: ChatMessage): string | undefined {
  */
 export function buildStreamExtraFromEvent(
   event: BubbleEvent,
-): { stream: { invocationId: string; turnInvocationId?: string } } | undefined {
+): { stream: NonNullable<NonNullable<ChatMessage['extra']>['stream']> } | undefined {
   const turn = event.canonicalInvocationId;
   const parent = event.chainInvocationId;
+  const textMode = event.payload?.textMode === 'replace' ? 'replace' : undefined;
   if (parent && turn && parent !== turn) {
-    return { stream: { invocationId: parent, turnInvocationId: turn } };
+    return { stream: { invocationId: parent, turnInvocationId: turn, ...(textMode ? { textMode } : {}) } };
   }
   const id = parent ?? turn;
   if (!id) return undefined;
-  return { stream: { invocationId: id } };
+  return { stream: { invocationId: id, ...(textMode ? { textMode } : {}) } };
 }
 
 export interface BubbleReducerInput {
@@ -188,7 +193,7 @@ function findExistingByStableKey(
   //     placeholder（content="" && 无 toolEvents && 无 thinking），且当前 event 是其他
   //     kind（tool_or_cli/thinking/rich_block），就把 placeholder 当 same-turn container
   //     吸收掉（AC-Z14 reconcile，避免 helper 提前创建 assistant_text placeholder 后
-  //     被 reducer 别的 kind 事件分裂成两个 bubble = 铲屎官 alpha catch 的 Bug A 形态）
+  //     被 reducer 别的 kind 事件分裂成两个 bubble = co-creator alpha catch 的 Bug A 形态）
   //
   // F194 Phase Z5 R5 (cloud Codex P1): 吸收必须 gate 在 incoming kind 上 — 只允许
   // assistant 容器内的子事件（assistant_text / thinking / tool_or_cli / rich_block）。
@@ -299,7 +304,14 @@ function reduceStreamChunk(messages: ChatMessage[], event: BubbleEvent): ChatMes
   if (existing) {
     const next = [...messages];
     const nextContent = isReplace ? chunkContent : existing.message.content + chunkContent;
-    next[existing.index] = { ...existing.message, content: nextContent };
+    next[existing.index] = {
+      ...existing.message,
+      content: nextContent,
+      extra: {
+        ...existing.message.extra,
+        ...(buildStreamExtraFromEvent(event) ?? {}),
+      },
+    };
     return next;
   }
   const upgrade = findUpgradableLocalPlaceholder(messages, event);
@@ -516,6 +528,9 @@ function reduceCallbackFinal(messages: ChatMessage[], event: BubbleEvent): ChatM
     }
   }
 
+  // #814: explicit post_message callbacks are invocationless (adapter strips
+  // canonicalInvocationId) → ADR-033 #4 prevents findExistingByStableKey from
+  // matching. No additional guard needed here — invocationless path above handles it.
   const existing = findExistingByStableKey(messages, event);
   if (existing) {
     const next = [...messages];

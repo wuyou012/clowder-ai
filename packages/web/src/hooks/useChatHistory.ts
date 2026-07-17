@@ -11,12 +11,20 @@ import type { TaskItem } from '@/stores/taskStore';
 import { useTaskStore } from '@/stores/taskStore';
 import { crossesUserTurnBoundary } from '@/stores/turn-boundary';
 import { apiFetch } from '@/utils/api-client';
+import { resolveCrossPostScrollTarget } from '@/utils/crosspost-scroll-target';
 import {
   loadThreadMessages as loadCachedMessages,
   loadThreadActiveState,
   saveThreadMessages as saveMessagesSnapshot,
   saveThreadActiveState,
 } from '@/utils/offline-store';
+import { scrollToMessage } from '@/utils/scrollToMessage';
+import {
+  peekPendingTeleport,
+  resolvePendingTeleport,
+  shouldLoadOlderForTeleport,
+  TELEPORT_RESOLVE_EVENT,
+} from '@/utils/teleport';
 
 type SavedScrollState = {
   top: number;
@@ -83,8 +91,10 @@ type ReplaceHydrationMergeResult = {
 
 type MessageExtra = NonNullable<ChatMessageData['extra']>;
 type MessageRichPayload = MessageExtra['rich'];
+type MessageToolEvent = NonNullable<ChatMessageData['toolEvents']>[number];
 
 function getHistoryInvocationId(msg: ChatMessageData): string | undefined {
+  if (msg.extra?.isExplicitPost) return undefined;
   return getBubbleInvocationId(msg);
 }
 
@@ -93,6 +103,7 @@ export function getLocalPlaceholderInvocationId(
   msg: ChatMessageData,
   currentCatInvocations: Record<string, CatInvocationInfo>,
 ): string | undefined {
+  if (msg.extra?.isExplicitPost) return undefined;
   // F194 Phase Z3 P1-2 (砚砚 R): MUST share `getBubbleInvocationId` priority order
   // (turnInvocationId > invocationId > draft id slice). Otherwise current/local placeholder uses
   // parent key while history bubble uses turn key → 刷新前后 merge 路径不一致。
@@ -166,6 +177,9 @@ function mergeMessageExtra(
   const cliDiagnostics = preferred?.cliDiagnostics ?? fallback?.cliDiagnostics;
   const governanceBlocked = preferred?.governanceBlocked ?? fallback?.governanceBlocked;
   const systemKind = preferred?.systemKind ?? fallback?.systemKind;
+  // #814 P2: preserve isExplicitPost so F5/thread-switch doesn't lose the
+  // "don't merge by invocation" semantic for explicit post_message callbacks.
+  const isExplicitPost = preferred?.isExplicitPost ?? fallback?.isExplicitPost;
   if (
     !rich &&
     !crossPost &&
@@ -175,7 +189,8 @@ function mergeMessageExtra(
     !timeoutDiagnostics &&
     !cliDiagnostics &&
     !governanceBlocked &&
-    !systemKind
+    !systemKind &&
+    !isExplicitPost
   ) {
     return undefined;
   }
@@ -189,6 +204,7 @@ function mergeMessageExtra(
     ...(cliDiagnostics ? { cliDiagnostics } : {}),
     ...(governanceBlocked ? { governanceBlocked } : {}),
     ...(systemKind ? { systemKind } : {}),
+    ...(isExplicitPost ? { isExplicitPost: true as const } : {}),
   };
 }
 
@@ -209,6 +225,10 @@ function getComparableMessageText(msg: ChatMessageData): string {
     .filter((text): text is string => Boolean(text?.trim()))
     .join('\n')
     .trim();
+}
+
+function normalizeResidueText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function hasStreamActivity(msg: ChatMessageData): boolean {
@@ -234,6 +254,161 @@ function canBindInvocationlessLiveToDraft(current: ChatMessageData, draft: ChatM
   const draftActivityAt = getMessageActivityTimestamp(draft);
   if (Math.abs(currentActivityAt - draftActivityAt) > DRAFT_LIVE_MERGE_ACTIVITY_WINDOW_MS) return false;
   return hasContentProximity(current, draft);
+}
+
+function isActiveInvocationClaim(info: CatInvocationInfo): boolean {
+  const snapshotStatus = info.taskProgress?.snapshotStatus;
+  return snapshotStatus !== 'completed' && snapshotStatus !== 'interrupted';
+}
+
+function isClaimedByLiveInvocation(
+  invocationId: string,
+  parentInvocationId: string | undefined,
+  catId: string | undefined,
+  currentCatInvocations: Record<string, CatInvocationInfo>,
+): boolean {
+  const info = catId ? currentCatInvocations[catId] : undefined;
+  if (!info) return false;
+  if (!isActiveInvocationClaim(info)) return false;
+  if (info.invocationId && info.turnInvocationId === invocationId) {
+    return parentInvocationId ? info.invocationId === parentInvocationId : true;
+  }
+  return info.invocationId === invocationId;
+}
+
+function getStreamParentInvocationId(msg: ChatMessageData): string | undefined {
+  return msg.extra?.stream?.invocationId;
+}
+
+function getResidueBoundaryParentInvocationId(msg: ChatMessageData): string | undefined {
+  const streamParentInvocationId = getStreamParentInvocationId(msg);
+  if (streamParentInvocationId) return streamParentInvocationId;
+  return msg.extra?.a2aRouting?.invocationId;
+}
+
+function getToolResidueEvidenceKey(event: MessageToolEvent): string {
+  // Live and persisted tool events independently generate id/timestamp, so use
+  // only the stable payload fields shared across catch-up reconciliation.
+  return [event.type, event.label, event.detail ?? ''].join('\u0000');
+}
+
+function hasFullToolResidueEvidence(
+  persistedEvents: MessageToolEvent[] | undefined,
+  residueEvents: MessageToolEvent[],
+): boolean {
+  if (!persistedEvents?.length) return false;
+  const persistedCounts = new Map<string, number>();
+  for (const event of persistedEvents) {
+    const key = getToolResidueEvidenceKey(event);
+    persistedCounts.set(key, (persistedCounts.get(key) ?? 0) + 1);
+  }
+  for (const event of residueEvents) {
+    const key = getToolResidueEvidenceKey(event);
+    const count = persistedCounts.get(key) ?? 0;
+    if (count <= 0) return false;
+    persistedCounts.set(key, count - 1);
+  }
+  return true;
+}
+
+function isA2ARoutingBoundary(message: ChatMessageData): boolean {
+  return (
+    message.type === 'system' && (message.extra?.systemKind === 'a2a_routing' || Boolean(message.extra?.a2aRouting))
+  );
+}
+
+function isOtherCatAssistantBoundary(message: ChatMessageData, residueCatId: string): boolean {
+  return message.type === 'assistant' && Boolean(message.catId) && message.catId !== residueCatId;
+}
+
+function crossesResidueTurnBoundary(
+  messages: ChatMessageData[],
+  left: ChatMessageData,
+  right: ChatMessageData,
+  residueCatId: string,
+  parentInvocationId: string,
+): boolean {
+  if (crossesUserTurnBoundary(messages, left, right)) return true;
+
+  const leftTs = getMessageOrderTimestamp(left);
+  const rightTs = getMessageOrderTimestamp(right);
+  if (leftTs === rightTs) return false;
+
+  const earlier = Math.min(leftTs, rightTs);
+  const later = Math.max(leftTs, rightTs);
+  return messages.some((message) => {
+    if (!isA2ARoutingBoundary(message) && !isOtherCatAssistantBoundary(message, residueCatId)) return false;
+    if (getResidueBoundaryParentInvocationId(message) !== parentInvocationId) return false;
+    const ts = getMessageOrderTimestamp(message);
+    return ts > earlier && ts <= later;
+  });
+}
+
+function hasPersistedTextResidueSiblingEvidence(
+  historyMsgs: ChatMessageData[],
+  msg: ChatMessageData,
+  turnBoundaryMessages: ChatMessageData[],
+): boolean {
+  const catId = msg.catId;
+  const parentInvocationId = getStreamParentInvocationId(msg);
+  const residueText = normalizeResidueText(getComparableMessageText(msg));
+  if (!catId || !parentInvocationId || !residueText) return false;
+
+  for (const historyMsg of historyMsgs) {
+    if (historyMsg.catId !== catId) continue;
+    if (historyMsg.id.startsWith('msg-') || historyMsg.id.startsWith('draft-')) continue;
+    if (historyMsg.extra?.isExplicitPost) continue;
+    if (getStreamParentInvocationId(historyMsg) !== parentInvocationId) continue;
+    if (crossesResidueTurnBoundary(turnBoundaryMessages, historyMsg, msg, catId, parentInvocationId)) continue;
+    const persistedText = normalizeResidueText(getComparableMessageText(historyMsg));
+    if (persistedText.includes(residueText)) return true;
+  }
+
+  return false;
+}
+
+function hasPersistedToolResidueSiblingEvidence(
+  historyMsgs: ChatMessageData[],
+  msg: ChatMessageData,
+  turnBoundaryMessages: ChatMessageData[],
+): boolean {
+  const catId = msg.catId;
+  const parentInvocationId = getStreamParentInvocationId(msg);
+  if (!catId || !parentInvocationId || !msg.toolEvents?.length) return false;
+  const residueToolEvents = msg.toolEvents;
+  const persistedToolEvents: MessageToolEvent[] = [];
+  for (const historyMsg of historyMsgs) {
+    if (historyMsg.catId !== catId) continue;
+    if (historyMsg.id.startsWith('msg-') || historyMsg.id.startsWith('draft-')) continue;
+    if (historyMsg.extra?.isExplicitPost) continue;
+    if (getStreamParentInvocationId(historyMsg) !== parentInvocationId) continue;
+    if (crossesResidueTurnBoundary(turnBoundaryMessages, historyMsg, msg, catId, parentInvocationId)) continue;
+    if (historyMsg.toolEvents?.length) persistedToolEvents.push(...historyMsg.toolEvents);
+  }
+  return hasFullToolResidueEvidence(persistedToolEvents, residueToolEvents);
+}
+
+function isUnclaimedTerminalStreamResidueWithPersistedEvidence(
+  historyMsgs: ChatMessageData[],
+  msg: ChatMessageData,
+  invocationId: string | undefined,
+  currentCatInvocations: Record<string, CatInvocationInfo>,
+  turnBoundaryMessages: ChatMessageData[],
+): boolean {
+  if (!invocationId) return false;
+  if (msg.type !== 'assistant') return false;
+  if (msg.origin !== 'stream') return false;
+  if (msg.isStreaming !== false) return false;
+  if (!msg.id.startsWith('msg-')) return false;
+  if (msg.contentBlocks?.length) return false;
+  if (msg.extra?.rich?.blocks.length) return false;
+
+  const hasTextResidue = Boolean(getComparableMessageText(msg));
+  const hasToolResidue = Boolean(msg.toolEvents?.length);
+  if (!hasTextResidue && !hasToolResidue) return false;
+  if (hasTextResidue && !hasPersistedTextResidueSiblingEvidence(historyMsgs, msg, turnBoundaryMessages)) return false;
+  if (hasToolResidue && !hasPersistedToolResidueSiblingEvidence(historyMsgs, msg, turnBoundaryMessages)) return false;
+  return !isClaimedByLiveInvocation(invocationId, getStreamParentInvocationId(msg), msg.catId, currentCatInvocations);
 }
 
 function shouldPreferCurrentMessage(current: ChatMessageData, history: ChatMessageData): boolean {
@@ -369,6 +544,7 @@ export function mergeReplaceHydrationMessages(
   }
 
   const mergedMsgs = [...historyMsgs];
+  const turnBoundaryMessages = [...historyMsgs, ...currentMsgs];
   let preservedLocalCount = 0;
   let reconciledToHistoryCount = 0;
   let replacedHistoryCount = 0;
@@ -451,6 +627,26 @@ export function mergeReplaceHydrationMessages(
         continue;
       }
     }
+
+    // F194 follow-up: after a final CLI/tool stream bubble requests
+    // catch-up, server history may return the authoritative persisted message
+    // under a different turn key while the wrong-key local `msg-*` bubble was
+    // never persisted. Once no live invocation claims that local key, keeping
+    // duplicate persisted content/tool evidence creates the live-only split:
+    // history bubble + ghost work-log bubble. Contentful partial text is still
+    // preserved unless same-parent history already covers it.
+    if (
+      isUnclaimedTerminalStreamResidueWithPersistedEvidence(
+        historyMsgs,
+        msg,
+        invocationId,
+        currentCatInvocations,
+        turnBoundaryMessages,
+      )
+    ) {
+      continue;
+    }
+
     mergedMsgs.push(msg);
     preservedLocalCount++;
   }
@@ -491,6 +687,7 @@ export function useChatHistory(threadId: string) {
     updateThreadCatStatus,
     setQueue,
     setQueuePaused,
+    isOfflineSnapshot,
   } = useChatStore();
   const { setTasks } = useTaskStore();
 
@@ -565,6 +762,7 @@ export function useChatHistory(threadId: string) {
         if ((canSettle && reachedTarget) || framesRemaining <= 0) {
           rememberScrollState(scheduledForThread, el);
           restoreFrameRef.current = null;
+          window.dispatchEvent(new Event(CHAT_LAYOUT_CHANGED_EVENT));
           return;
         }
 
@@ -573,6 +771,29 @@ export function useChatHistory(threadId: string) {
       };
 
       restoreFrameRef.current = requestAnimationFrame(apply);
+    },
+    [cancelPendingRestore],
+  );
+
+  // F052: after a cross-post jump, retry scrolling to the source bubble until the message
+  // DOM has rendered (thread switch remounts + paginates async). Gives up after
+  // MAX_RESTORE_FRAMES so a paged-out source can't spin forever — the caller already fell
+  // back to default scroll-restore in that case. Stale-guarded by threadIdRef like scheduleRestore.
+  const scheduleScrollToMessage = useCallback(
+    (messageId: string) => {
+      // A cross-post jump preempts the default scroll-restore so the two raf loops don't fight
+      // over scrollTop (restore pulls to cached offset, this pulls to the target bubble).
+      cancelPendingRestore();
+      const scheduledForThread = threadIdRef.current;
+      let framesRemaining = MAX_RESTORE_FRAMES;
+      const tick = () => {
+        if (threadIdRef.current !== scheduledForThread) return;
+        if (scrollToMessage(messageId)) return;
+        framesRemaining -= 1;
+        if (framesRemaining <= 0) return;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
     },
     [cancelPendingRestore],
   );
@@ -653,7 +874,12 @@ export function useChatHistory(threadId: string) {
               crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
               stream?: { invocationId?: string };
               scheduler?: SchedulerMessageExtra['scheduler'];
-              systemKind?: 'a2a_routing';
+              systemKind?: 'a2a_routing' | 'context_briefing';
+              /** #814: explicit post_message bypass — survives hydration so F5/thread-switch
+               *  preserves the "don't merge by invocation" semantic. */
+              isExplicitPost?: boolean;
+              /** #814: direction pills — persisted by API, must survive hydration. */
+              targetCats?: string[];
               /** F212 Phase B: history-loader path may already carry cliDiagnostics under
                *  extra (when client wrote it via active-path) — prefer it over metadata copy. */
               cliDiagnostics?: CliDiagnostics;
@@ -703,6 +929,8 @@ export function useChatHistory(threadId: string) {
                   m.extra?.stream ||
                   m.extra?.scheduler ||
                   m.extra?.systemKind ||
+                  m.extra?.isExplicitPost ||
+                  m.extra?.targetCats ||
                   cliDiag;
                 if (!hasExtraField) return {};
                 return {
@@ -712,6 +940,8 @@ export function useChatHistory(threadId: string) {
                     ...(m.extra?.stream ? { stream: m.extra.stream } : {}),
                     ...(m.extra?.scheduler ? { scheduler: m.extra.scheduler } : {}),
                     ...(m.extra?.systemKind ? { systemKind: m.extra.systemKind } : {}),
+                    ...(m.extra?.isExplicitPost ? { isExplicitPost: true as const } : {}),
+                    ...(m.extra?.targetCats ? { targetCats: m.extra.targetCats } : {}),
                     ...(cliDiag ? { cliDiagnostics: cliDiag } : {}),
                   },
                 };
@@ -1250,6 +1480,9 @@ export function useChatHistory(threadId: string) {
     // Initial load (includes remount after thread switch — prevCountRef resets to 0).
     // clowder-ai#27: check module-level Map for a saved position before scrolling to bottom.
     if (prevCount === 0) {
+      // Default scroll-restore. A pending cross-post jump is handled by the dedicated effect
+      // below (it runs after this one and cancels this restore on a hit) — kept separate so the
+      // jump survives the IDB-snapshot → fresh-API two-phase load (砚砚 R1 P1).
       scheduleRestore(scrollPositionsByThread.get(threadId) ?? { top: 0, anchor: 'bottom' });
       return;
     }
@@ -1277,6 +1510,64 @@ export function useChatHistory(threadId: string) {
       }
     }
   }, [messages, scheduleRestore, threadId]);
+
+  // F052 + 砚砚 R1 P1: resolve a pending cross-post scroll across BOTH the tentative IDB-snapshot
+  // phase and the authoritative fresh-API phase. Kept independent of the scroll-restore effect
+  // above so it re-runs when isOfflineSnapshot flips true→false (fresh page replaces the stale
+  // snapshot). A hit scrolls + consumes; a miss only gives up once authoritative
+  // (isOfflineSnapshot=false), so a stale-snapshot miss keeps the jump alive for the fresh page.
+  useEffect(() => {
+    if (messages.length === 0) return;
+    if (useChatStore.getState().currentThreadId !== threadId) return;
+    const targetId = resolveCrossPostScrollTarget(threadId, messages, { authoritative: !isOfflineSnapshot });
+    if (targetId) scheduleScrollToMessage(targetId);
+  }, [messages, threadId, isOfflineSnapshot, scheduleScrollToMessage]);
+
+  // F227: resolve a pending teleport (from cat_cafe_teleport → Event Memory) the
+  // same way as cross-post — across the tentative IDB snapshot + the authoritative
+  // fresh page. Takes a real messageId directly (no invocationId lookup).
+  // P1-1/P1 (砚砚): resolve a pending teleport — scroll if the target is loaded, else
+  // auto-load older pages (full-corpus events can be older than the loaded 50-msg window).
+  // Only finalize a miss (consume + give up) when this is the authoritative fresh page AND
+  // no older history remains. Reused by the messages-effect (cross-thread nav + the
+  // auto-load chain) and an explicit kick (same-thread teleport, where no route changes).
+  const resolveTeleport = useCallback(() => {
+    if (messages.length === 0) return;
+    if (useChatStore.getState().currentThreadId !== threadId) return;
+    const targetId = resolvePendingTeleport(
+      threadId,
+      messages.map((m) => m.id),
+      { authoritative: !isOfflineSnapshot && !hasMore },
+    );
+    if (targetId) {
+      scheduleScrollToMessage(targetId);
+      return;
+    }
+    if (
+      shouldLoadOlderForTeleport({
+        hasPending: peekPendingTeleport(threadId) !== null,
+        found: false,
+        isStale: isOfflineSnapshot,
+        hasMore,
+        isLoading: isLoadingHistory,
+      })
+    ) {
+      const oldest = messages.find((m) => !m.id.startsWith('draft-'));
+      if (oldest) void fetchHistory(`${oldest.deliveredAt ?? oldest.timestamp}:${oldest.id}`);
+    }
+  }, [messages, threadId, isOfflineSnapshot, hasMore, isLoadingHistory, scheduleScrollToMessage, fetchHistory]);
+
+  useEffect(() => {
+    resolveTeleport();
+  }, [resolveTeleport]);
+
+  // Same-thread teleport doesn't change the route, so the effect above never re-fires;
+  // the kick (cat_cafe_teleport / timeline same-thread click) re-runs the SAME resolver.
+  useEffect(() => {
+    const handler = () => resolveTeleport();
+    window.addEventListener(TELEPORT_RESOLVE_EVENT, handler);
+    return () => window.removeEventListener(TELEPORT_RESOLVE_EVENT, handler);
+  }, [resolveTeleport]);
 
   useEffect(() => {
     let rafId: number | null = null;

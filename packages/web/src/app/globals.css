@@ -64,6 +64,50 @@ body {
   }
 }
 
+/* F226: presentation float tear-off enter animation (烁烁 UX — 让"撕下来"有视觉反馈) */
+@keyframes f226-float-in {
+  from {
+    opacity: 0;
+    transform: scale(0.94) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.f226-float-in {
+  animation: f226-float-in 280ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 砚砚: respect reduced-motion — disable the tear-off animation for sensitive users */
+@media (prefers-reduced-motion: reduce) {
+  .f226-float-in {
+    animation: none;
+  }
+}
+
+/* F244: Tip-as-thinking-bubble — breathing border glow while cat is thinking */
+@keyframes tip-thinking-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    border-color: var(--color-cafe-border, rgba(128, 128, 128, 0.2));
+  }
+  50% {
+    box-shadow: 0 0 10px 0 rgba(155, 126, 189, 0.12);
+    border-color: rgba(155, 126, 189, 0.35);
+  }
+}
+.tip-thinking {
+  animation: tip-thinking-glow 3s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tip-thinking {
+    animation: none;
+  }
+}
+
 @keyframes guide-success-flash {
   0% {
     transform: scale(1);
@@ -111,6 +155,48 @@ body {
   /* Disable breathe ring and transitions on guide overlay elements */
   [style*="guide-breathe"] {
     animation: none !important;
+  }
+}
+
+/* F229 PR-A3a: 猫猫球动画 */
+/* V4: idle 态慢呼吸（4s，scale 1→1.04→1） */
+@keyframes concierge-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.04);
+  }
+}
+
+/* V4: 气泡弹出（200ms，从 origin-bottom-right 弹入） */
+@keyframes concierge-bubble-pop {
+  from {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* V8: reduced-motion — 静态化猫猫球动画（重定义 keyframes 为 no-op） */
+@media (prefers-reduced-motion: reduce) {
+  @keyframes concierge-breathe {
+    0%,
+    100%,
+    50% {
+      transform: scale(1);
+    }
+  }
+  @keyframes concierge-bubble-pop {
+    from,
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
   }
 }
 

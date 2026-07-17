@@ -5,15 +5,34 @@
 
 import './helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const hasSourceStagingContent = existsSync(
+  new URL('../../../cat-cafe-skills/refs/l0-staging-content.md', import.meta.url),
+);
 
 import { afterEach, before, beforeEach, describe, it, mock } from 'node:test';
 import { catRegistry } from '@cat-cafe/shared';
+import { GovernanceBootstrapService } from '../dist/config/governance/governance-bootstrap.js';
+
+function assertStagingPromptContract(prompt, mode) {
+  if (hasSourceStagingContent) {
+    assert.ok(
+      prompt.includes('摩擦上报'),
+      `staging wipers core trigger MUST appear in ${mode} prompt (ADR-038 每轮注入生效)`,
+    );
+    assert.ok(prompt.includes('[爪感差:'), `staging wipers report format MUST appear in ${mode} prompt`);
+    return;
+  }
+
+  assert.ok(!prompt.includes('摩擦上报'), `public export omits raw L0 staging content in ${mode} prompt`);
+  assert.ok(!prompt.includes('[爪感差:'), `public export omits staging wipers format in ${mode} prompt`);
+}
 
 async function collect(iterable) {
   const msgs = [];
@@ -36,6 +55,26 @@ async function rmWithRetry(path, attempts = 5) {
   }
 }
 
+async function makeSameProjectWorkspace(prefix) {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), prefix)));
+  const projectRoot = await realpath(join(__dirname, '..', '..', '..'));
+  let fakeGitDir = join(projectRoot, '.git', 'worktrees', `${prefix}gitdir`);
+  try {
+    const dotGit = await readFile(join(projectRoot, '.git'), 'utf-8');
+    const match = dotGit.trim().match(/^gitdir:\s*(.+)$/);
+    if (match?.[1]) {
+      const hostGitDir = match[1].startsWith('/') ? match[1] : join(projectRoot, match[1]);
+      const commonGitDir = join(hostGitDir, '..', '..');
+      fakeGitDir = join(commonGitDir, 'worktrees', `${prefix}gitdir`);
+    }
+  } catch {
+    // Main worktree has .git as a directory; the default fakeGitDir above points
+    // back to the same common git dir through resolveGitCommonDir().
+  }
+  await writeFile(join(dir, '.git'), `gitdir: ${fakeGitDir}\n`, 'utf-8');
+  return dir;
+}
+
 /**
  * F171: bootstrapCatCatalog() now creates empty catalogs (first-run quest).
  * Tests that call bootstrapCatCatalog() and then read catalog breeds must call
@@ -46,7 +85,6 @@ const BUILTIN_ACCOUNT_IDS = {
   openai: 'codex',
   google: 'gemini',
   kimi: 'kimi',
-  dare: 'dare',
   opencode: 'opencode',
 };
 
@@ -139,6 +177,11 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     else process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = _savedGlobalRoot;
   }
 
+  // F203 Phase I: mock L0 compiler for OpenCode tests.
+  // Real subprocess compiler can't see in-process catRegistry registrations,
+  // so test services must use this instead of compileL0ViaSubprocess.
+  const dummyL0CompilerFn = async ({ catId }) => `# Dummy L0 for ${catId}\nTest-only stub.`;
+
   function makeDeps() {
     let counter = 0;
     return {
@@ -208,6 +251,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('injects per-cat GIT_AUTHOR_NAME/GIT_COMMITTER_NAME into callbackEnv (email inherited)', async () => {
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -243,6 +287,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const deps = { ...makeDeps(), taskProgressStore: store };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -277,6 +322,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('emits invocationId on task_progress system_info payloads', async () => {
     const deps = makeDeps();
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -326,6 +372,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const deps = { ...makeDeps(), taskProgressStore: store };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -365,6 +412,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const deps = { ...makeDeps(), taskProgressStore: store };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -414,6 +462,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const deps = { ...makeDeps(), taskProgressStore: store };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -456,6 +505,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const ac = new AbortController();
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -515,6 +565,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const ac = new AbortController();
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -586,6 +637,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const deps = { ...makeDeps(), taskProgressStore: store };
     const ac = new AbortController();
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'system_info',
@@ -746,6 +798,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const sessionChainStore = new SessionChainStore();
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-sess-abc', timestamp: Date.now() };
         yield { type: 'text', catId: 'opus', content: 'hello', timestamp: Date.now() };
@@ -782,6 +835,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const runtimeSessionStore = new RuntimeSessionStore();
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -854,6 +908,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -926,6 +981,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1003,6 +1059,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'text',
@@ -1084,6 +1141,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       lifecycle: { state: 'sealed', startedAt: 1000, lastObservedAt: 1000, sealReason: 'tool_conflict' },
     });
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1183,6 +1241,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1257,6 +1316,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1335,6 +1395,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1396,6 +1457,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       lifecycle: { state: 'active', startedAt: 1000, lastObservedAt: 1000 },
     });
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1467,6 +1529,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       reconcileAllStuck: async () => 0,
     };
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1533,6 +1596,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     });
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-continuity', timestamp: Date.now() };
         yield { type: 'done', catId: 'opus', timestamp: Date.now() };
@@ -1570,6 +1634,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     });
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'new-cli', timestamp: Date.now() };
         yield { type: 'done', catId: 'opus', timestamp: Date.now() };
@@ -1618,6 +1683,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     // Second invocation: ACP yields a DIFFERENT sessionId with ephemeralSession=true
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'session_init',
@@ -1656,6 +1722,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const sessionChainStore = new SessionChainStore();
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-health', timestamp: Date.now() };
         yield { type: 'text', catId: 'opus', content: 'answer', timestamp: Date.now() };
@@ -1707,11 +1774,420 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.ok(payload.health.fillRatio > 0 && payload.health.fillRatio <= 1);
   });
 
+  it('clowder#915: agent_loop with metadata.usage triggers context_health (opencode mid-stream handoff path)', async () => {
+    // GIVEN opencode emits step_finish (mid-stream LLM-call boundary) → transformer
+    // returns AgentMessage of type=agent_loop carrying token usage. Before the
+    // clowder#915 fix the F8/F24 usage+context_health block lived only inside the
+    // `done` branch of processMessage, so agent_loop's early-return in the `else`
+    // branch silently DROPPED metadata.usage → contextHealth never computed →
+    // seal never requested → opencode session never sealed → CLI hung at its
+    // context limit. This test pins the new behavior: agent_loop with usage MUST
+    // route through the same F8/F24 path as done, while preserving F153 Phase I
+    // telemetry-only semantics (agent_loop itself stays invisible to users).
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield { type: 'session_init', catId: 'opus', sessionId: 'cli-915', timestamp: Date.now() };
+        yield { type: 'text', catId: 'opus', content: 'mid-stream answer', timestamp: Date.now() };
+        // step_finish event (per LLM call inside opencode agentic loop) carries
+        // input/output/total tokens + cost. Transformer wraps it as agent_loop.
+        // The shape mirrors what OpenCodeAgentService yields after the R1 P1
+        // merge logic that puts service-level model/provider onto the metadata.
+        yield {
+          type: 'agent_loop',
+          catId: 'opus',
+          timestamp: Date.now(),
+          metadata: {
+            provider: 'opencode',
+            model: 'claude-opus-4-6',
+            usage: {
+              inputTokens: 36928,
+              lastTurnInputTokens: 36928,
+              outputTokens: 9,
+              totalTokens: 36937,
+              contextWindowSize: 200000,
+              costUsd: 0.036973,
+            },
+          },
+        };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = { ...makeDeps(), sessionChainStore };
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user1',
+        threadId: 'thread-915-agent-loop',
+        isLastCat: true,
+      }),
+    );
+
+    // (1) context_health MUST be emitted (cloud P1 fix)
+    const healthInfos = msgs.filter((m) => {
+      if (m.type !== 'system_info') return false;
+      try {
+        return JSON.parse(m.content).type === 'context_health';
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(healthInfos.length, 1, 'agent_loop with usage MUST emit context_health (clowder#915)');
+    const payload = JSON.parse(healthInfos[0].content);
+    assert.equal(payload.catId, 'opus');
+    assert.equal(payload.health.usedTokens, 36928, 'must use lastTurnInputTokens for per-call accuracy');
+    assert.equal(payload.health.windowTokens, 200000);
+    assert.equal(payload.health.usedFrom, 'last_turn');
+    assert.equal(payload.health.source, 'exact');
+
+    // (2) invocation_usage must also be emitted (F8/F230 — bubble footer fuel)
+    const usageInfos = msgs.filter((m) => {
+      if (m.type !== 'system_info') return false;
+      try {
+        return JSON.parse(m.content).type === 'invocation_usage';
+      } catch {
+        return false;
+      }
+    });
+    assert.ok(usageInfos.length >= 1, 'agent_loop with usage MUST emit invocation_usage system_info');
+
+    // (3) F153 Phase I telemetry-only semantics preserved: agent_loop must NOT
+    //     appear in user-visible outputs (no bubble, no transcript write).
+    const agentLoopVisible = msgs.filter((m) => m.type === 'agent_loop');
+    assert.equal(agentLoopVisible.length, 0, 'agent_loop must stay telemetry-only — no user-visible output');
+  });
+
+  it('clowder#915 R4 cloud P1 #3: agent_loop above seal threshold DEFERS seal to done (transcript continuity)', async () => {
+    // Cloud's failing scenario: an opencode tool loop with step_finish.reason='tool-calls'
+    // crosses the seal threshold mid-stream. If we fire requestSeal inline, the active
+    // session pointer is cleared immediately and the remaining text/tool events from
+    // the SAME opencode invocation lose their transcript writes (getActive returns null).
+    // The fix: capture seal intent at agent_loop time, execute at the `done` boundary.
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+
+    const sealCalls = [];
+    let sealCalledAtIndex = -1; // tracks how many service yields had been observed when requestSeal fired
+    let yieldsObserved = 0;
+
+    const sessionSealer = {
+      requestSeal: async (args) => {
+        sealCalls.push(args);
+        sealCalledAtIndex = yieldsObserved;
+        return { accepted: true, status: 'sealing' };
+      },
+      finalize: async () => {},
+      reconcileStuck: async () => 0,
+      reconcileAllStuck: async () => 0,
+    };
+
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yieldsObserved = 1;
+        yield { type: 'session_init', catId: 'opus', sessionId: 'cli-915-defer', timestamp: Date.now() };
+        yieldsObserved = 2;
+        yield { type: 'text', catId: 'opus', content: 'thinking...', timestamp: Date.now() };
+        yieldsObserved = 3;
+        // step_finish at high fill (180k of 200k = 90% — well above 0.85 threshold)
+        // would normally fire seal IMMEDIATELY in the inline path.
+        yield {
+          type: 'agent_loop',
+          catId: 'opus',
+          timestamp: Date.now(),
+          metadata: {
+            provider: 'opencode',
+            model: 'claude-opus-4-6',
+            usage: {
+              inputTokens: 180_000,
+              lastTurnInputTokens: 180_000,
+              outputTokens: 50,
+              totalTokens: 180_050,
+              contextWindowSize: 200_000,
+            },
+          },
+        };
+        yieldsObserved = 4;
+        // Post-seal-threshold tool/text events — these must NOT be sealed-while-emitting
+        yield { type: 'text', catId: 'opus', content: 'still here (post-threshold)', timestamp: Date.now() };
+        yieldsObserved = 5;
+        yield {
+          type: 'tool_use',
+          catId: 'opus',
+          toolName: 'bash',
+          toolInput: { command: 'ls' },
+          timestamp: Date.now(),
+        };
+        yieldsObserved = 6;
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = { ...makeDeps(), sessionChainStore, sessionSealer };
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user1',
+        threadId: 'thread-915-defer-seal',
+        isLastCat: true,
+      }),
+    );
+
+    // (1) Exactly one seal request fired — no double-seal
+    assert.equal(sealCalls.length, 1, 'must seal exactly once');
+
+    // (2) The seal must have fired AT or AFTER the done event (index 6), not at
+    //     agent_loop time (index 3). This is the heart of the defer fix.
+    assert.ok(
+      sealCalledAtIndex >= 6,
+      `seal must be deferred to done — fired at yield index ${sealCalledAtIndex}, expected ≥ 6 (done boundary)`,
+    );
+
+    // (3) The session_seal_requested system_info MUST carry the deferred marker
+    //     so observers can distinguish mid-stream-captured seals from synchronous
+    //     done-time seals.
+    const sealRequestedMsgs = msgs.filter((m) => {
+      if (m.type !== 'system_info') return false;
+      try {
+        return JSON.parse(m.content).type === 'session_seal_requested';
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(sealRequestedMsgs.length, 1, 'one session_seal_requested message');
+    const sealPayload = JSON.parse(sealRequestedMsgs[0].content);
+    assert.equal(sealPayload.deferredFrom, 'mid_stream_agent_loop', 'must carry deferred-origin marker');
+    assert.equal(sealPayload.healthSnapshot.usedTokens, 180_000, 'health snapshot from agent_loop moment');
+
+    // (4) context_health system_info still emits at agent_loop time (observability
+    //     not deferred — only the seal action is).
+    const healthInfos = msgs.filter((m) => {
+      if (m.type !== 'system_info') return false;
+      try {
+        return JSON.parse(m.content).type === 'context_health';
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(healthInfos.length, 1, 'context_health emits at mid-stream observation point');
+
+    // (5) Post-threshold text/tool events are still in user-visible outputs
+    //     (transcript continuity for the rest of the tool loop).
+    const postThresholdText = msgs.filter(
+      (m) => m.type === 'text' && typeof m.content === 'string' && m.content.includes('still here'),
+    );
+    assert.equal(postThresholdText.length, 1, 'post-threshold text must reach outputs (transcript continuity)');
+  });
+
+  it('clowder#915 R5 cloud P2: 3-tier window resolution — known opencode model uses fallback table (NOT clobbered by default)', async () => {
+    // Cloud's R5 regression catch: R4's unconditional 128k attach in the
+    // transformer would prevent claude-opus-4-6 (default opencode breed
+    // model per cat-template.json) from resolving to its true 200k via the
+    // fallback table. This test pins the 3-tier chain:
+    //   1) usage.contextWindowSize (none here)
+    //   2) getContextWindowFallback('claude-opus-4-6') = 200_000 ← THIS WINS
+    //   3) opencode last-resort default (128_000) — should NOT be used here
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield { type: 'session_init', catId: 'opus', sessionId: 'cli-915-r5-known', timestamp: Date.now() };
+        yield {
+          type: 'agent_loop',
+          catId: 'opus',
+          timestamp: Date.now(),
+          metadata: {
+            provider: 'opencode',
+            model: 'claude-opus-4-6', // KNOWN to fallback table (200k)
+            usage: {
+              inputTokens: 150_000,
+              lastTurnInputTokens: 150_000,
+              outputTokens: 50,
+              totalTokens: 150_050,
+              // NO contextWindowSize from transformer — forces tier 2+3
+            },
+          },
+        };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = { ...makeDeps(), sessionChainStore };
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user1',
+        threadId: 'thread-915-r5-known-model',
+        isLastCat: true,
+      }),
+    );
+
+    const healthInfos = msgs
+      .filter((m) => m.type === 'system_info')
+      .map((m) => {
+        try {
+          return JSON.parse(m.content);
+        } catch {
+          return null;
+        }
+      })
+      .filter((p) => p && p.type === 'context_health');
+    assert.equal(healthInfos.length, 1, 'must emit context_health');
+    // CRITICAL: windowTokens MUST be 200_000 (from fallback table) NOT 128_000
+    // (the opencode last-resort default — which would wrongly cap claude-opus-4-6).
+    assert.equal(
+      healthInfos[0].health.windowTokens,
+      200_000,
+      'claude-opus-4-6 must resolve to its precise 200k via fallback table — NOT clobbered by opencode last-resort default',
+    );
+    // Sanity: 150k of 200k = 0.75 fillRatio (would be 1.17 if window were clobbered to 128k)
+    assert.ok(healthInfos[0].health.fillRatio < 0.8, 'fillRatio must reflect true 200k window');
+  });
+
+  it('clowder#915 R5 cloud P2: 3-tier window resolution — unknown opencode model falls back to default', async () => {
+    // Counterpart to the known-model test: when the model is NOT in the
+    // fallback table (GLM-5.1, openrouter customs — the actual breed
+    // clowder#915 targets), the opencode last-resort default (128_000)
+    // kicks in so handoff still fires. This is tier 3 of the chain.
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield { type: 'session_init', catId: 'opus', sessionId: 'cli-915-r5-unknown', timestamp: Date.now() };
+        yield {
+          type: 'agent_loop',
+          catId: 'opus',
+          timestamp: Date.now(),
+          metadata: {
+            provider: 'opencode',
+            model: 'glm-5.1', // UNKNOWN — golden-chinchilla model (not in table)
+            usage: {
+              inputTokens: 109_000,
+              lastTurnInputTokens: 109_000,
+              outputTokens: 50,
+              totalTokens: 109_050,
+            },
+          },
+        };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = { ...makeDeps(), sessionChainStore };
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user1',
+        threadId: 'thread-915-r5-unknown-model',
+        isLastCat: true,
+      }),
+    );
+
+    const healthInfos = msgs
+      .filter((m) => m.type === 'system_info')
+      .map((m) => {
+        try {
+          return JSON.parse(m.content);
+        } catch {
+          return null;
+        }
+      })
+      .filter((p) => p && p.type === 'context_health');
+    assert.equal(healthInfos.length, 1, 'unknown opencode model must still emit context_health (last-resort fallback)');
+    assert.equal(healthInfos[0].health.windowTokens, 128_000, 'unknown opencode model resolves to last-resort 128k');
+  });
+
+  it('clowder#915 R2 cloud P1: agent_loop with provider-prefixed model (account-routing path) triggers context_health', async () => {
+    // Production opencode invocation path: invoke-single-cat.ts:1459 sets
+    // callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE to `safeProvider/safeModel`
+    // form. OpenCodeAgentService.ts:139 then propagates that as effectiveModel.
+    // Transformer doesn't set contextWindowSize, so we fall back to
+    // getContextWindowFallback. Before the R2 cloud P1 fix, the prefixed
+    // string missed the lookup table → no windowSize → context_health silently
+    // skipped → handoff bypassed. This test pins the production scenario.
+    const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
+    const sessionChainStore = new SessionChainStore();
+
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        yield { type: 'session_init', catId: 'opus', sessionId: 'cli-915-prefixed', timestamp: Date.now() };
+        yield { type: 'text', catId: 'opus', content: 'hi', timestamp: Date.now() };
+        yield {
+          type: 'agent_loop',
+          catId: 'opus',
+          timestamp: Date.now(),
+          metadata: {
+            provider: 'opencode',
+            // The model carries a provider prefix — this is the production
+            // account-routing path's normalized form (NOT a test artifact).
+            model: 'anthropic/claude-opus-4-6',
+            usage: {
+              inputTokens: 36928,
+              lastTurnInputTokens: 36928,
+              outputTokens: 9,
+              totalTokens: 36937,
+              // NO contextWindowSize — forces fallback through model lookup
+            },
+          },
+        };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = { ...makeDeps(), sessionChainStore };
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user1',
+        threadId: 'thread-915-prefixed',
+        isLastCat: true,
+      }),
+    );
+
+    const healthInfos = msgs.filter((m) => {
+      if (m.type !== 'system_info') return false;
+      try {
+        return JSON.parse(m.content).type === 'context_health';
+      } catch {
+        return false;
+      }
+    });
+    assert.equal(
+      healthInfos.length,
+      1,
+      'prefixed-model agent_loop with usage MUST emit context_health (clowder#915 R2 P1)',
+    );
+    const payload = JSON.parse(healthInfos[0].content);
+    assert.equal(payload.health.windowTokens, 200_000, 'fallback must resolve anthropic/claude-opus-4-6 → 200k');
+    assert.equal(payload.health.usedTokens, 36928);
+    assert.equal(payload.health.source, 'approx', 'fallback (no contextWindowSize on usage) → approx');
+  });
+
   it('F24: uses fallback window size for models without contextWindowSize', async () => {
     const { SessionChainStore } = await import('../dist/domains/cats/services/stores/ports/SessionChainStore.js');
     const sessionChainStore = new SessionChainStore();
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-fallback', timestamp: Date.now() };
         yield {
@@ -1760,6 +2236,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('F24: no context_health when model is unknown and no contextWindowSize', async () => {
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'done',
@@ -1807,6 +2284,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const sessionChainStore = new SessionChainStore();
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-update-health', timestamp: Date.now() };
         yield {
@@ -1852,6 +2330,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const sessionChainStore = new SessionChainStore();
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-last-turn', timestamp: Date.now() };
         yield {
@@ -1913,6 +2392,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
   it('F24-fix: falls back to inputTokens when lastTurnInputTokens is absent', async () => {
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'done',
@@ -1967,6 +2447,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     // Use codex to test totalTokens fallback path.
     // (F053: gemini now also has sessionChain=true, either cat would work here.)
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'done',
@@ -2015,6 +2496,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('F24: marks source as approx when usedTokens falls back to totalTokens despite exact window', async () => {
     // Use codex (sessionChain enabled) to test approx source detection.
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield {
           type: 'done',
@@ -2089,7 +2571,27 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       ),
       'invalid_thinking_signature',
     );
+    // Kimi: generic -32603 must NOT be classified as missing_session (PR #1058 P1-3)
+    assert.equal(classifyResumeFailure('prompt_failure: ACP error -32603: Internal error'), null);
+    // Only -32603 with bootstrap CWD/FileNotFoundError evidence → missing_session
+    assert.equal(
+      classifyResumeFailure('ACP error -32603: Internal error: FileNotFoundError: [Errno 2] No such file or directory'),
+      'missing_session',
+    );
+    assert.equal(classifyResumeFailure('ACP error -32603: os.getcwd() failed'), 'missing_session');
+    // Session interrupt: our stall auto-kill (SIGTERM) causes the daemon to mark the session
+    // as "interrupted". Without this classifier, resume fails cascade (no self-heal, no retry).
+    assert.equal(classifyResumeFailure('session was interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('already interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('session interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('session-interrupted'), 'missing_session');
+    assert.equal(classifyResumeFailure('session terminated'), 'missing_session');
+    // Must NOT match generic messages that happen to contain "interrupt" as a substring
+    // in non-session context (e.g. developer instructions mentioning keyboard interrupts)
     assert.equal(classifyResumeFailure('upstream timeout'), null);
+    assert.equal(classifyResumeFailure('keyboard interrupt'), null);
+    assert.equal(classifyResumeFailure('process was interrupted by user'), null);
+    assert.equal(classifyResumeFailure('interrupted system call'), null);
   });
 
   it('isTransientCliExitCode1: context-overflow messages must NOT be treated as transient (bug: Codex duplicate user turn in rollout)', async () => {
@@ -2124,6 +2626,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const sessionStores = [];
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options);
         invokeCount++;
@@ -2189,6 +2692,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -2232,10 +2736,85 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(optionsSeen[1].cliSessionId, undefined, 'retry should clear cliSessionId');
   });
 
+  it('clowder-ai#1038: opencode "Session not found" (in cliDiagnostics) self-heals to fresh session', async () => {
+    // opencode's stale-session signal surfaces in metadata.cliDiagnostics.reasonCode, NOT in
+    // msg.error (which is the generic exit-1 string with a [session_not_found] suffix). Without
+    // the reasonCode route, isMissingClaudeSessionError(msg.error) misses it and the error would
+    // fall into transient retry (Path B), re-running the same stale --session forever.
+    let invokeCount = 0;
+    const sessionDeletes = [];
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push({ ...options });
+        invokeCount++;
+        if (invokeCount === 1) {
+          yield {
+            type: 'error',
+            catId: 'opus',
+            error: 'opencode CLI: CLI 异常退出 (code: 1, signal: none) [session_not_found]',
+            metadata: {
+              cliDiagnostics: {
+                reasonCode: 'session_not_found',
+                publicSummary: 'CLI session 找不到',
+                publicHint: '已自动新建会话重试本轮',
+                debugRef: { command: 'opencode', exitCode: 1, signal: null },
+              },
+            },
+            timestamp: Date.now(),
+          };
+          yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+          return;
+        }
+        yield { type: 'session_init', catId: 'opus', sessionId: 'new-sess', timestamp: Date.now() };
+        yield { type: 'text', catId: 'opus', content: 'recovered', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    deps.sessionManager = {
+      get: async () => 'stale-sess',
+      store: async () => {},
+      delete: async (u, c, t) => {
+        sessionDeletes.push(`${u}:${c}:${t}`);
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test',
+        userId: 'user-1038',
+        threadId: 'thread-1038',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokeCount, 2, 'should re-invoke once after stale-session diagnostic');
+    assert.equal(optionsSeen[0].sessionId, 'stale-sess', 'first attempt should resume stale session');
+    assert.equal(optionsSeen[1].sessionId, undefined, 'retry should drop --session (fresh)');
+    assert.equal(optionsSeen[0].cliSessionId, 'stale-sess', 'first attempt carries cliSessionId');
+    assert.equal(optionsSeen[1].cliSessionId, undefined, 'retry clears cliSessionId');
+    assert.deepEqual(sessionDeletes, ['user-1038:opus:thread-1038'], 'should delete stale session before retry');
+    assert.ok(
+      msgs.some((m) => m.type === 'text' && m.content === 'recovered'),
+      'should recover and stream retry result',
+    );
+    assert.equal(
+      msgs.some((m) => m.type === 'error' && m.metadata?.cliDiagnostics?.reasonCode === 'session_not_found'),
+      false,
+      'stale-session error should be suppressed when retry succeeds',
+    );
+  });
+
   it('F-BLOAT cloud P1: self-heal retry re-injects systemPrompt when session drops', async () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -2303,6 +2882,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let invokeCount = 0;
     const sealRequests = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         if (invokeCount === 1) {
@@ -2399,6 +2979,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let invokeCount = 0;
     const sessionDeletes = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield { type: 'error', catId: 'opus', error: 'upstream timeout', timestamp: Date.now() };
@@ -2624,6 +3205,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('transient CLI self-heal: retries once when Claude exits code 1 before any stream output', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         if (invokeCount === 1) {
@@ -2667,6 +3249,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('transient CLI self-heal: does not retry when stream already produced text', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield { type: 'text', catId: 'opus', content: 'partial-output', timestamp: Date.now() };
@@ -2701,6 +3284,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('transient CLI self-heal: does NOT retry when Codex error carries context-window overflow (prevents duplicate user turn)', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield {
@@ -2739,6 +3323,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('resume failure stats: emits missing_session count after gemini self-heal success', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, _options) {
         invokeCount++;
         if (invokeCount === 1) {
@@ -2785,6 +3370,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('resume failure stats: emits auth count and does not retry', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield {
@@ -2825,6 +3411,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('resume failure stats: emits cli_exit count for transient resume bootstrap exit', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         if (invokeCount === 1) {
@@ -2870,6 +3457,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('retries gemini invoke on transient resume bootstrap exit', async () => {
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         if (invokeCount === 1) {
@@ -2952,6 +3540,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     // Service that triggers seal: 91% fill → opus threshold (90%)
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'old-sess', timestamp: Date.now() };
         yield { type: 'text', catId: 'opus', content: 'answer', timestamp: Date.now() };
@@ -3005,6 +3594,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -3100,6 +3690,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -3191,6 +3782,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -3250,6 +3842,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -3312,6 +3905,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const optionsSeen = [];
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push({ ...options });
         invokeCount++;
@@ -3373,6 +3967,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let transcriptWritten = false;
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'gemini', sessionId: 'gem-sess-1', timestamp: Date.now() };
         yield { type: 'text', catId: 'gemini', content: 'hello', timestamp: Date.now() };
@@ -3443,6 +4038,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let sessionRecordCreated = false;
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'opus-sess-1', timestamp: Date.now() };
         yield { type: 'done', catId: 'opus', timestamp: Date.now() };
@@ -3484,6 +4080,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const promptsSeen = [];
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(prompt, options) {
         promptsSeen.push(prompt);
         optionsSeen.push({ ...options });
@@ -3518,6 +4115,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('F-BLOAT: injects systemPrompt on new session (no sessionId)', async () => {
     const promptsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(prompt, _options) {
         promptsSeen.push(prompt);
         yield { type: 'text', catId: 'opus', content: 'hi', timestamp: Date.now() };
@@ -3551,9 +4149,86 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.ok(promptsSeen[0].includes('test'), 'F-BLOAT: original prompt should still be present');
   });
 
+  // L0-budget-defense PR-B-impl (ADR-038 件套 ④, Cloud R2 P1 + 砚砚 R4 P1 #2237):
+  // staging must reach service.invoke prompt on EVERY turn including resumes
+  // where systemPrompt is skipped. This regression directly tests the
+  // architectural contract: 折叠 staging into staticIdentity → resume drops it.
+  // 修法 = wire staging in invoke-single-cat at the same level as F225
+  // contextHintPrefix, independent of injectSystemPrompt.
+  it('PR-B-impl ADR-038: staging reaches service.invoke prompt on RESUME (systemPrompt skipped, staging still delivered)', async () => {
+    const promptsSeen = [];
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(prompt, options) {
+        promptsSeen.push(prompt);
+        optionsSeen.push({ ...options });
+        yield { type: 'text', catId: 'opus', content: 'hi', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+    const deps = makeDeps();
+    deps.sessionManager = {
+      get: async () => 'existing-sess',
+      store: async () => {},
+      delete: async () => {},
+    };
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'user message',
+        systemPrompt: 'static identity here',
+        userId: 'u1',
+        threadId: 'thread-staging-resume',
+        isLastCat: true,
+      }),
+    );
+    assert.equal(optionsSeen[0].sessionId, 'existing-sess', 'should resume existing session');
+    assert.ok(
+      !promptsSeen[0].includes('static identity here'),
+      'systemPrompt is skipped on resume (baseline, mirrors F-BLOAT)',
+    );
+    assertStagingPromptContract(promptsSeen[0], 'resume');
+    assert.ok(promptsSeen[0].includes('user message'), 'original user prompt still present');
+  });
+
+  it('PR-B-impl ADR-038: staging reaches service.invoke prompt on NEW SESSION (systemPrompt injected, staging also delivered)', async () => {
+    const promptsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(prompt, _options) {
+        promptsSeen.push(prompt);
+        yield { type: 'text', catId: 'opus', content: 'hi', timestamp: Date.now() };
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+    const deps = makeDeps();
+    deps.sessionManager = {
+      get: async () => undefined,
+      store: async () => {},
+      delete: async () => {},
+    };
+    await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'user message',
+        systemPrompt: 'static identity here',
+        userId: 'u1',
+        threadId: 'thread-staging-new',
+        isLastCat: true,
+      }),
+    );
+    assert.ok(promptsSeen[0].includes('static identity here'), 'systemPrompt prepended on new session');
+    assertStagingPromptContract(promptsSeen[0], 'new-session');
+    assert.ok(promptsSeen[0].includes('user message'), 'original user prompt still present');
+  });
+
   it('F053: Gemini (sessionChain=true) skips systemPrompt on resume like other cats', async () => {
     const promptsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(prompt, _options) {
         promptsSeen.push(prompt);
         yield { type: 'text', catId: 'gemini', content: 'hi', timestamp: Date.now() };
@@ -3592,6 +4267,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const originalConfigs = catRegistry.getAllConfigs();
     const promptsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(prompt) {
         promptsSeen.push(prompt);
         yield { type: 'text', catId: 'runtime-spark', content: 'runtime ok', timestamp: Date.now() };
@@ -3648,6 +4324,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let storedSession;
     let callCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(prompt, options) {
         promptsSeen.push(prompt);
         optionsSeen.push({ ...options });
@@ -3729,6 +4406,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const promptsSeen = [];
     let callNum = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(prompt, _options) {
         promptsSeen.push(prompt);
         callNum++;
@@ -3821,6 +4499,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let invokeCount = 0;
     const sessionDeletes = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield {
@@ -3897,6 +4576,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -3934,6 +4614,92 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(callbackEnv.OPENAI_API_KEY, 'sk-template-openai');
   });
 
+  it('F161: resolves Anthropic account env templates before filtering accountEnv pass-through', async () => {
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f161-anthropic-env-template-'));
+    process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+    process.env.HOME = root;
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    const boundProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'anthropic-env-template',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'anthropic',
+      apiKey: 'sk-custom-ant',
+      setActive: false,
+    });
+    const accountsPath = join(root, '.cat-cafe', 'accounts.json');
+    const accounts = JSON.parse(await readFile(accountsPath, 'utf-8'));
+    accounts[boundProfile.id].envVars = {
+      CUSTOM_TOKEN: '${api_key}',
+      CUSTOM_BASE: '${base_url}',
+      CUSTOM_BASE_MODEL: '${base_model}',
+      CUSTOM_MODEL: '${model}',
+    };
+    accounts[boundProfile.id].baseUrl = 'https://anthropic-proxy.example/v1';
+    await writeFile(accountsPath, `${JSON.stringify(accounts, null, 2)}\n`, 'utf-8');
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opus')?.config;
+    assert.ok(originalConfig, 'opus config should exist in registry');
+    const boundCatId = 'opus-anthropic-env-template';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      clientId: 'anthropic',
+      accountRef: boundProfile.id,
+      defaultModel: 'claude-opus-4-6',
+    });
+
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    const previousProxyEnabled = process.env.ANTHROPIC_PROXY_ENABLED;
+    try {
+      process.env.ANTHROPIC_PROXY_ENABLED = '0';
+      process.chdir(apiDir);
+      await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test anthropic template env',
+          userId: 'user-f161-anthropic-env-template',
+          threadId: 'thread-f161-anthropic-env-template',
+          isLastCat: true,
+        }),
+      );
+    } finally {
+      process.chdir(previousCwd);
+      if (previousProxyEnabled === undefined) delete process.env.ANTHROPIC_PROXY_ENABLED;
+      else process.env.ANTHROPIC_PROXY_ENABLED = previousProxyEnabled;
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rmWithRetry(root);
+    }
+
+    const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+    assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_PROFILE_MODE, 'api_key');
+    assert.equal(callbackEnv.CUSTOM_TOKEN, 'sk-custom-ant');
+    assert.equal(callbackEnv.CUSTOM_BASE, 'https://anthropic-proxy.example/v1');
+    assert.equal(callbackEnv.CUSTOM_BASE_MODEL, 'claude-opus-4-6');
+    assert.equal(callbackEnv.CUSTOM_MODEL, 'claude-opus-4-6');
+  });
+
   it('F127 P2: ignores unreadable CAT_TEMPLATE_PATH before switching account roots', async () => {
     const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const staleTemplateRoot = await mkdtemp(join(tmpdir(), 'f127-stale-template-'));
@@ -3958,6 +4724,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -4042,6 +4809,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -4134,6 +4902,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'opus', timestamp: Date.now() };
@@ -4223,6 +4992,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -4301,6 +5071,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -4367,6 +5138,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -4426,6 +5198,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -4502,6 +5275,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
@@ -4573,6 +5347,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     let invokeCount = 0;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         invokeCount++;
         yield { type: 'done', catId: boundCatId, timestamp: Date.now() };
@@ -4642,6 +5417,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
@@ -4719,6 +5495,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let seenConfigPath;
     let seenRuntimeConfig;
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -4763,6 +5540,92 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
   });
 
+  for (const { label, baseUrl } of [
+    { label: 'GLM v4', baseUrl: 'https://open.bigmodel.cn/api/paas/v4' },
+    { label: 'GLM Coding Plan v4', baseUrl: 'https://api.z.ai/api/coding/paas/v4' },
+  ]) {
+    it(`clowder-ai#1113: ${label} OpenCode binding preserves versioned baseUrl`, async () => {
+      const { createProviderProfile } = await import('./helpers/create-test-account.js');
+      const root = await mkdtemp(join(tmpdir(), 'clowder1113-opencode-glm-v4-'));
+      process.env.CAT_CAFE_GLOBAL_CONFIG_ROOT = root;
+      const apiDir = join(root, 'packages', 'api');
+      await mkdir(apiDir, { recursive: true });
+      await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+      const customProfile = await createProviderProfile(root, {
+        provider: 'openai',
+        name: 'zhipu-api',
+        mode: 'api_key',
+        authType: 'api_key',
+        protocol: 'openai',
+        baseUrl,
+        apiKey: 'sk-zhipu-key',
+        models: ['zhipu/glm-4.6v'],
+        setActive: false,
+      });
+
+      const registrySnapshot = catRegistry.getAllConfigs();
+      const originalConfig = catRegistry.tryGet('opencode')?.config;
+      assert.ok(originalConfig, 'opencode config should exist in registry');
+      const boundCatId = `opencode-zhipu-${label.toLowerCase().replace(/\W+/g, '-')}`;
+      catRegistry.register(boundCatId, {
+        ...originalConfig,
+        id: boundCatId,
+        mentionPatterns: [`@${boundCatId}`],
+        clientId: 'opencode',
+        accountRef: customProfile.id,
+        defaultModel: 'zhipu/glm-4.6v',
+        provider: 'zhipu',
+      });
+
+      const optionsSeen = [];
+      let seenConfigPath;
+      let seenRuntimeConfig;
+      const service = {
+        l0CompilerFn: dummyL0CompilerFn,
+        async *invoke(_prompt, options) {
+          optionsSeen.push(options ?? {});
+          seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
+          assert.ok(seenConfigPath, 'GLM OpenCode binding should receive OPENCODE_CONFIG');
+          seenRuntimeConfig = JSON.parse(await readFile(seenConfigPath, 'utf-8'));
+          yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+        },
+      };
+
+      const deps = makeDeps();
+      const previousCwd = process.cwd();
+      try {
+        process.chdir(apiDir);
+        const messages = await collect(
+          invokeSingleCat(deps, {
+            catId: boundCatId,
+            service,
+            prompt: 'test GLM v4 routing',
+            userId: 'user-clowder1113-opencode-glm-v4',
+            threadId: 'thread-clowder1113-opencode-glm-v4',
+            isLastCat: true,
+          }),
+        );
+        assert.ok(messages.some((m) => m.type === 'done'));
+      } finally {
+        process.chdir(previousCwd);
+        catRegistry.reset();
+        for (const [id, config] of Object.entries(registrySnapshot)) {
+          catRegistry.register(id, config);
+        }
+        await rmWithRetry(root);
+      }
+
+      const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+      assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-zhipu-key');
+      assert.equal(callbackEnv.CAT_CAFE_OC_BASE_URL, baseUrl);
+      assert.equal(seenRuntimeConfig?.model, 'zhipu/glm-4.6v');
+      assert.equal(seenRuntimeConfig?.provider?.zhipu?.npm, '@ai-sdk/openai-compatible');
+      assert.deepStrictEqual(seenRuntimeConfig?.provider?.zhipu?.models, { 'glm-4.6v': { name: 'glm-4.6v' } });
+      await assert.rejects(readFile(seenConfigPath, 'utf-8'));
+    });
+  }
+
   it('clowder-ai#223: bare model + provider assembles composite model for custom provider routing', async () => {
     const { createProviderProfile } = await import('./helpers/create-test-account.js');
     const root = await mkdtemp(join(tmpdir(), 'f189-oc-bare-model-'));
@@ -4801,6 +5664,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let seenRuntimeConfig;
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -4883,6 +5747,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let seenRuntimeConfig;
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -4963,6 +5828,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let seenRuntimeConfig;
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -5022,6 +5888,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     const mcpDir = join(root, 'packages', 'mcp-server', 'dist');
     await mkdir(mcpDir, { recursive: true });
     await writeFile(join(mcpDir, 'index.js'), '// stub mcp server', 'utf-8');
+    for (const entry of ['collab.js', 'memory.js', 'signals.js', 'limb.js']) {
+      await writeFile(join(mcpDir, entry), '// stub split server', 'utf-8');
+    }
 
     const anthropicProfile = await createProviderProfile(root, {
       provider: 'anthropic',
@@ -5054,6 +5923,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let seenRuntimeConfig;
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -5096,13 +5966,19 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-mcp-key');
     assert.ok(seenRuntimeConfig, 'runtime config must be parseable');
     assert.ok(seenRuntimeConfig.mcp, 'runtime config must contain mcp section');
-    const mcpCafe = seenRuntimeConfig.mcp['cat-cafe'];
-    assert.equal(mcpCafe.type, 'local');
-    assert.equal(mcpCafe.command.length, 2);
-    assert.equal(mcpCafe.command[0], 'node');
+    assert.equal(seenRuntimeConfig.mcp['cat-cafe'], undefined, 'monolith must not be injected');
+    const mcpCollab = seenRuntimeConfig.mcp['cat-cafe-collab'];
+    assert.ok(mcpCollab, 'split server cat-cafe-collab expected');
+    assert.equal(mcpCollab.type, 'local');
+    assert.equal(mcpCollab.command.length, 2);
+    const nodeBin91 = mcpCollab.command[0];
     assert.ok(
-      mcpCafe.command[1].endsWith('/packages/mcp-server/dist/index.js'),
-      `mcp command[1] must point to mcp-server entry: ${mcpCafe.command[1]}`,
+      nodeBin91 === 'node' || nodeBin91.endsWith('/node') || nodeBin91.endsWith('\\node.exe'),
+      `command[0] must be a node binary: ${nodeBin91}`,
+    );
+    assert.ok(
+      mcpCollab.command[1].endsWith('/packages/mcp-server/dist/collab.js'),
+      `mcp command[1] must point to split entrypoint: ${mcpCollab.command[1]}`,
     );
     // Config file should be cleaned up after invocation
     await assert.rejects(readFile(seenConfigPath, 'utf-8'));
@@ -5123,6 +5999,9 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
       const envMcpPath = join(externalMcpDir, 'index.js');
       await writeFile(envMcpPath, '// stub mcp server from env', 'utf-8');
+      for (const entry of ['collab.js', 'memory.js', 'signals.js', 'limb.js']) {
+        await writeFile(join(externalMcpDir, entry), '// stub split server', 'utf-8');
+      }
 
       const anthropicProfile = await createProviderProfile(root, {
         provider: 'anthropic',
@@ -5153,6 +6032,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       let seenRuntimeConfig;
       const optionsSeen = [];
       const service = {
+        l0CompilerFn: dummyL0CompilerFn,
         async *invoke(_prompt, options) {
           optionsSeen.push(options ?? {});
           seenConfigPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -5205,13 +6085,217 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       assert.equal(callbackEnv.CAT_CAFE_OC_API_KEY, 'sk-ant-mcp-env-key');
       assert.ok(seenRuntimeConfig, 'runtime config must be parseable');
       assert.ok(seenRuntimeConfig.mcp, 'runtime config must contain mcp section');
-      const mcpCafe = seenRuntimeConfig.mcp['cat-cafe'];
-      assert.equal(mcpCafe.type, 'local');
-      assert.equal(mcpCafe.command[0], 'node');
-      assert.equal(mcpCafe.command[1], envMcpPath);
+      assert.equal(seenRuntimeConfig.mcp['cat-cafe'], undefined, 'monolith must not be injected');
+      const mcpCollab = seenRuntimeConfig.mcp['cat-cafe-collab'];
+      assert.ok(mcpCollab, 'split server cat-cafe-collab expected');
+      assert.equal(mcpCollab.type, 'local');
+      const nodeBin92 = mcpCollab.command[0];
+      assert.ok(
+        nodeBin92 === 'node' || nodeBin92.endsWith('/node') || nodeBin92.endsWith('\\node.exe'),
+        `command[0] must be a node binary: ${nodeBin92}`,
+      );
+      assert.ok(mcpCollab.command[1].endsWith('collab.js'), 'must point to split entrypoint');
       await assert.rejects(readFile(seenConfigPath, 'utf-8'));
     },
   );
+
+  // F203 Phase I AC-I4: subscription/unresolved OpenCode path gets instructions-only L0 config
+  it('F203-I: OpenCode subscription path → full runtime config (MCP + L0) + no API key injection', async () => {
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f203-subscription-oc-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+    const mcpDir = join(root, 'packages', 'mcp-server', 'dist');
+    await mkdir(mcpDir, { recursive: true });
+    await writeFile(join(mcpDir, 'index.js'), '// stub mcp server', 'utf-8');
+    for (const entry of ['collab.js', 'memory.js', 'signals.js', 'limb.js']) {
+      await writeFile(join(mcpDir, entry), '// stub split server', 'utf-8');
+    }
+
+    // Create a subscription-mode profile (no API key)
+    const subscriptionProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'claude-subscription',
+      mode: 'subscription',
+      authType: 'subscription',
+      protocol: 'anthropic',
+      baseUrl: '',
+      apiKey: '',
+      models: ['claude-opus-4-6'],
+      setActive: false,
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig);
+    const boundCatId = 'opencode-subscription-test';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      clientId: 'opencode',
+      accountRef: subscriptionProfile.id,
+      defaultModel: 'anthropic/claude-opus-4-6',
+    });
+
+    const optionsSeen = [];
+    let seenRuntimeConfig;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        const configPath = options?.callbackEnv?.OPENCODE_CONFIG;
+        if (configPath) {
+          seenRuntimeConfig = JSON.parse(await readFile(configPath, 'utf-8'));
+        }
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(apiDir);
+      await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test subscription opencode path',
+          userId: 'user-f203-subscription',
+          threadId: 'thread-f203-subscription',
+          isLastCat: true,
+        }),
+      );
+
+      const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
+      // Non-api_key auth gets full runtime config (MCP + L0 + model routing)
+      // but signals instructions-only so buildEnv preserves native auth
+      assert.ok(callbackEnv.OPENCODE_CONFIG, 'subscription path must get OPENCODE_CONFIG with MCP + L0');
+      assert.strictEqual(
+        callbackEnv.CAT_CAFE_OC_INSTRUCTIONS_ONLY,
+        '1',
+        'non-api_key must signal instructions-only to preserve native auth',
+      );
+      // Non-api_key: no credential injection (auth handled natively by OpenCode)
+      assert.strictEqual(callbackEnv.CAT_CAFE_OC_API_KEY, undefined, 'no API key for non-api_key auth');
+      assert.strictEqual(
+        callbackEnv.CAT_CAFE_ANTHROPIC_PROFILE_MODE,
+        'subscription',
+        'must pass subscription profile mode',
+      );
+      const runtimeConfig = seenRuntimeConfig;
+      assert.ok(runtimeConfig, 'fake service must observe runtime config before cleanup');
+      assert.equal(runtimeConfig.model, 'anthropic/claude-opus-4-6', 'model routing must stay in runtime config');
+      assert.ok(runtimeConfig.provider?.anthropic, 'provider routing must stay in runtime config');
+      assert.equal(
+        runtimeConfig.provider.anthropic.options.apiKey,
+        undefined,
+        'non-api_key runtime config must not reference missing CAT_CAFE_OC_API_KEY',
+      );
+      assert.equal(
+        runtimeConfig.provider.anthropic.options.baseURL,
+        undefined,
+        'non-api_key runtime config must not reference missing CAT_CAFE_OC_BASE_URL',
+      );
+      assert.equal(runtimeConfig.mcp?.['cat-cafe'], undefined, 'monolith must not be injected for subscription path');
+      assert.ok(
+        runtimeConfig.mcp?.['cat-cafe-collab'],
+        'split server cat-cafe-collab must be present for subscription path',
+      );
+    } finally {
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rmWithRetry(root);
+    }
+  });
+
+  // F203 Phase I: compile fail-closed — throwing l0CompilerFn aborts invocation
+  it('F203-I: OpenCode compile failure → fail-closed, service.invoke never called', async () => {
+    const { createProviderProfile } = await import('./helpers/create-test-account.js');
+    const root = await mkdtemp(join(tmpdir(), 'f203-fail-closed-'));
+    const apiDir = join(root, 'packages', 'api');
+    await mkdir(apiDir, { recursive: true });
+    await writeFile(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - "packages/*"\n', 'utf-8');
+
+    const anthropicProfile = await createProviderProfile(root, {
+      provider: 'anthropic',
+      name: 'claude-api-fail-closed',
+      mode: 'api_key',
+      authType: 'api_key',
+      protocol: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      apiKey: 'sk-ant-fail-closed-key',
+      models: ['claude-opus-4-6'],
+      setActive: false,
+    });
+
+    const registrySnapshot = catRegistry.getAllConfigs();
+    const originalConfig = catRegistry.tryGet('opencode')?.config;
+    assert.ok(originalConfig);
+    const boundCatId = 'opencode-fail-closed-test';
+    catRegistry.register(boundCatId, {
+      ...originalConfig,
+      id: boundCatId,
+      mentionPatterns: [`@${boundCatId}`],
+      clientId: 'opencode',
+      accountRef: anthropicProfile.id,
+      defaultModel: 'anthropic/claude-opus-4-6',
+    });
+
+    let invokedService = false;
+    const service = {
+      // Throwing l0CompilerFn — simulates compile failure
+      l0CompilerFn: async () => {
+        throw new Error('deliberate L0 compile failure');
+      },
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = makeDeps();
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(apiDir);
+      // invokeSingleCat catches internal errors and yields them as events
+      // (it doesn't reject — it's an async generator with internal error handling).
+      const msgs = await collect(
+        invokeSingleCat(deps, {
+          catId: boundCatId,
+          service,
+          prompt: 'test compile failure',
+          userId: 'user-f203-fail-closed',
+          threadId: 'thread-f203-fail-closed',
+          isLastCat: true,
+        }),
+      );
+      // Verify error event contains F203 fail-closed message
+      const errorMsgs = msgs.filter(
+        (m) =>
+          m.type === 'error' ||
+          (m.type === 'system_info' && typeof m.content === 'string' && m.content.includes('F203')),
+      );
+      const allContent = msgs.map((m) => m.error || m.content || '').join('\n');
+      assert.ok(
+        allContent.includes('F203 fail-closed') || allContent.includes('deliberate L0 compile failure'),
+        `must contain F203 fail-closed or compile error in events, got: ${msgs.map((m) => m.type).join(',')}`,
+      );
+      // service.invoke() must NOT have been called — no naked invocation
+      assert.strictEqual(invokedService, false, 'service.invoke must not run when L0 compile fails');
+    } finally {
+      process.chdir(previousCwd);
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(registrySnapshot)) {
+        catRegistry.register(id, config);
+      }
+      await rmWithRetry(root);
+    }
+  });
 
   it('fix(#280): known legacy model without provider skips runtime config', async () => {
     const mod = await import('../dist/domains/cats/services/agents/invocation/invoke-single-cat.js');
@@ -5249,9 +6333,17 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
-        assert.equal(options?.callbackEnv?.OPENCODE_CONFIG, undefined);
+        // F203 Phase I: known legacy model without provider STILL gets OPENCODE_CONFIG
+        // for L0 instructions (instructions-only fallback path). Before F203 this was undefined.
+        assert.ok(
+          options?.callbackEnv?.OPENCODE_CONFIG,
+          'F203: known legacy model must get instructions-only config for L0',
+        );
+        // Verify it's an instructions-only config (no provider auth clearing)
+        assert.equal(options?.callbackEnv?.CAT_CAFE_OC_INSTRUCTIONS_ONLY, '1');
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
       },
     };
@@ -5285,7 +6377,10 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     }
 
     const callbackEnv = optionsSeen[0]?.callbackEnv ?? {};
-    assert.equal(callbackEnv.OPENCODE_CONFIG, undefined);
+    // F203 Phase I: known legacy model now gets instructions-only config for L0.
+    // Before F203 this was undefined; now it always has a config path.
+    assert.ok(callbackEnv.OPENCODE_CONFIG, 'F203: must get instructions-only config');
+    assert.equal(callbackEnv.CAT_CAFE_OC_INSTRUCTIONS_ONLY, '1', 'must signal instructions-only');
     assert.equal(callbackEnv.CAT_CAFE_ANTHROPIC_MODEL_OVERRIDE, undefined);
   });
 
@@ -5328,6 +6423,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     let seenRuntimeConfig;
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         const configPath = options?.callbackEnv?.OPENCODE_CONFIG;
@@ -5410,6 +6506,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
@@ -5494,6 +6591,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-approx-no-seal', timestamp: Date.now() };
         yield {
@@ -5622,6 +6720,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-exact-no-seal', timestamp: Date.now() };
         yield {
@@ -5751,6 +6850,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'opus', sessionId: 'cli-exact-handoff-seal', timestamp: Date.now() };
         yield {
@@ -5815,6 +6915,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
   it('configures cat invocation stall auto-kill to leave room for slow upstream responses', async () => {
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'codex', timestamp: Date.now() };
@@ -5836,17 +6937,44 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       msgs.some((m) => m.type === 'done'),
       'service should be invoked',
     );
-    assert.equal(optionsSeen[0]?.livenessProbe?.stallAutoKill, true, 'cat invocations still opt into stall cleanup');
+    assert.equal(
+      optionsSeen[0]?.livenessProbe?.stallAutoKill,
+      true,
+      'cat invocations still opt into stall cleanup (default CLI_TIMEOUT_MS)',
+    );
+    // #1145: stallWarningMs tracks resolved CLI_TIMEOUT_MS (default 30 min).
+    // buildStallAutoKillConfig(cliTimeoutMs) uses resolved value, not a hardcoded constant.
     assert.equal(
       optionsSeen[0]?.livenessProbe?.stallWarningMs,
-      7 * 60_000,
-      'stall auto-kill must leave async sampling and deferred-kill margin before the 10m stale-processing window',
+      30 * 60_000,
+      'default: stall threshold must equal DEFAULT_CLI_TIMEOUT_MS (30 min)',
     );
+  });
+
+  it('#1145: buildStallAutoKillConfig tracks custom CLI_TIMEOUT_MS and disables on 0', async () => {
+    const { buildStallAutoKillConfig } = await import(
+      '../dist/domains/cats/services/agents/invocation/invoke-single-cat.js'
+    );
+    // Custom CLI_TIMEOUT_MS (e.g. 60 min)
+    const custom = buildStallAutoKillConfig(60 * 60_000);
+    assert.equal(custom.stallAutoKill, true, 'custom: stallAutoKill enabled');
+    assert.equal(custom.stallWarningMs, 60 * 60_000, 'custom: threshold tracks custom value');
+
+    // CLI_TIMEOUT_MS=0 (disabled) → stallAutoKill off
+    const disabled = buildStallAutoKillConfig(0);
+    assert.equal(disabled.stallAutoKill, false, 'disabled: stallAutoKill off when CLI_TIMEOUT_MS=0');
+    assert.equal(disabled.stallWarningMs, undefined, 'disabled: no stallWarningMs when off');
+
+    // Default fallback (negative → uses DEFAULT_CLI_TIMEOUT_MS internally)
+    const fallback = buildStallAutoKillConfig(-1);
+    assert.equal(fallback.stallAutoKill, true, 'fallback: stallAutoKill enabled');
+    assert.equal(fallback.stallWarningMs, 30 * 60_000, 'fallback: uses DEFAULT_CLI_TIMEOUT_MS');
   });
 
   it('F101: game thread projectPath (games/*) does not trigger governance gate', async () => {
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'opus', timestamp: Date.now() };
@@ -5881,6 +7009,571 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
       'should reach done (service was invoked)',
     );
     assert.equal(optionsSeen[0]?.workingDirectory, undefined, 'workingDirectory must be undefined for game threads');
+  });
+
+  it('fails loud for OpenCode when thread projectPath is a virtual game path', async () => {
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: 'games/werewolf', createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opencode',
+        service,
+        prompt: 'test game briefing',
+        userId: 'user1',
+        threadId: 'thread-opencode-game-werewolf',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokedService, false, 'OpenCode must not inherit runtime cwd for virtual game projectPaths');
+    assert.ok(
+      msgs.some((m) => m.type === 'error' && String(m.error).includes('virtual game projectPath games/werewolf')),
+      `expected virtual game projectPath error, got: ${msgs.map((m) => m.type).join(',')}`,
+    );
+  });
+
+  it('passes a valid thread projectPath as OpenCode workingDirectory', async () => {
+    const projectRoot = await realpath(join(__dirname, '..', '..', '..'));
+
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: projectRoot, createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opencode',
+        service,
+        prompt: 'test project cwd',
+        userId: 'user1',
+        threadId: 'thread-opencode-project-cwd',
+        isLastCat: true,
+      }),
+    );
+
+    assert.ok(
+      msgs.some((m) => m.type === 'done'),
+      'service should complete',
+    );
+    assert.equal(optionsSeen.length, 1, `service should be invoked once, got messages: ${JSON.stringify(msgs)}`);
+    assert.equal(optionsSeen[0]?.workingDirectory, projectRoot);
+  });
+
+  it('reads external-project governance from the persistent workspace when invoked from a runtime checkout', async () => {
+    const previousCwd = process.cwd();
+    const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
+    const previousWorkspaceRoot = process.env.CAT_CAFE_WORKSPACE_ROOT;
+    const runtimeRoot = await realpath(await mkdtemp(join(tmpdir(), 'governance-runtime-root-')));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), 'governance-workspace-root-')));
+    const externalProject = await realpath(await mkdtemp(join(tmpdir(), 'governance-external-project-')));
+    await Promise.all([
+      writeFile(join(runtimeRoot, 'pnpm-workspace.yaml'), 'packages: []\n'),
+      writeFile(join(workspaceRoot, 'pnpm-workspace.yaml'), 'packages: []\n'),
+    ]);
+    process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
+    process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
+    process.chdir(runtimeRoot);
+
+    const bootstrap = new GovernanceBootstrapService(workspaceRoot);
+    await bootstrap.bootstrap(externalProject, { dryRun: false });
+
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'codex', timestamp: Date.now() };
+      },
+    };
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: externalProject, createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    try {
+      const msgs = await collect(
+        invokeSingleCat(deps, {
+          catId: 'codex',
+          service,
+          prompt: 'invoke initialized external project',
+          userId: 'user1',
+          threadId: 'thread-persistent-governance-root',
+          isLastCat: true,
+        }),
+      );
+
+      assert.equal(invokedService, true, 'the initialized external project should reach the agent service');
+      assert.equal(
+        msgs.some((m) => m.type === 'system_info' && m.content?.includes('governance_blocked')),
+        false,
+        'dispatch must read the registry written under the persistent workspace',
+      );
+    } finally {
+      process.chdir(previousCwd);
+      if (previousRuntimeRoot === undefined) delete process.env.CAT_CAFE_RUNTIME_ROOT;
+      else process.env.CAT_CAFE_RUNTIME_ROOT = previousRuntimeRoot;
+      if (previousWorkspaceRoot === undefined) delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+      else process.env.CAT_CAFE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      await Promise.all([rmWithRetry(runtimeRoot), rmWithRetry(workspaceRoot), rmWithRetry(externalProject)]);
+    }
+  });
+
+  it('migrates a legacy runtime-root thread before invoking the agent', async () => {
+    const workspaceRoot = await realpath(join(__dirname, '..', '..', '..'));
+    const runtimeRoot = await realpath(await mkdtemp(join(tmpdir(), 'legacy-thread-runtime-root-')));
+    const previousRuntimeRoot = process.env.CAT_CAFE_RUNTIME_ROOT;
+    const previousWorkspaceRoot = process.env.CAT_CAFE_WORKSPACE_ROOT;
+    process.env.CAT_CAFE_RUNTIME_ROOT = runtimeRoot;
+    process.env.CAT_CAFE_WORKSPACE_ROOT = workspaceRoot;
+
+    const optionsSeen = [];
+    const migrations = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+    const threadId = 'thread-legacy-runtime-root';
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: runtimeRoot, createdBy: 'user1' }),
+        updateProjectPath: async (...args) => migrations.push(args),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    try {
+      const msgs = await collect(
+        invokeSingleCat(deps, {
+          catId: 'opencode',
+          service,
+          prompt: 'test legacy runtime cwd migration',
+          userId: 'user1',
+          threadId,
+          isLastCat: true,
+        }),
+      );
+
+      assert.ok(msgs.some((m) => m.type === 'done'));
+      assert.equal(optionsSeen[0]?.workingDirectory, workspaceRoot);
+      assert.deepEqual(migrations, [[threadId, workspaceRoot]]);
+    } finally {
+      if (previousRuntimeRoot === undefined) delete process.env.CAT_CAFE_RUNTIME_ROOT;
+      else process.env.CAT_CAFE_RUNTIME_ROOT = previousRuntimeRoot;
+      if (previousWorkspaceRoot === undefined) delete process.env.CAT_CAFE_WORKSPACE_ROOT;
+      else process.env.CAT_CAFE_WORKSPACE_ROOT = previousWorkspaceRoot;
+      await rmWithRetry(runtimeRoot);
+    }
+  });
+
+  it('drops OpenCode resume when the stored session workspace differs from the current thread workspace', async () => {
+    const repoA = await makeSameProjectWorkspace('opencode-repo-a-');
+    const repoB = await makeSameProjectWorkspace('opencode-repo-b-');
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+    const activeRecord = {
+      id: 'rec-opencode-repo-a',
+      seq: 0,
+      status: 'active',
+      cliSessionId: 'ses_repo_a',
+      catId: 'opencode',
+      threadId: 'thread-opencode-stale-workspace',
+      userId: 'user1',
+      messageCount: 0,
+      workspaceFingerprint: repoA,
+      workingDirectory: repoA,
+    };
+    const chainStore = {
+      getChain: async () => [activeRecord],
+      getActive: async () => activeRecord,
+      get: async () => activeRecord,
+      create: async () => activeRecord,
+      update: async (_id, patch) => Object.assign(activeRecord, patch),
+    };
+
+    try {
+      await collect(
+        invokeSingleCat(
+          {
+            ...makeDeps(),
+            sessionChainStore: chainStore,
+            threadStore: {
+              get: async () => ({ projectPath: repoB, createdBy: 'user1' }),
+              updateParticipantActivity: async () => {},
+            },
+          },
+          {
+            catId: 'opencode',
+            service,
+            prompt: 'test stale workspace resume',
+            userId: 'user1',
+            threadId: 'thread-opencode-stale-workspace',
+            isLastCat: true,
+          },
+        ),
+      );
+    } finally {
+      await rmWithRetry(repoA);
+      await rmWithRetry(repoB);
+    }
+
+    assert.equal(optionsSeen.length, 1);
+    assert.equal(optionsSeen[0]?.workingDirectory, repoB);
+    assert.equal(optionsSeen[0]?.sessionId, undefined, 'OpenCode must start fresh on workspace mismatch');
+    assert.equal(optionsSeen[0]?.cliSessionId, undefined, 'stale session id must not be used for diagnostics either');
+  });
+
+  it('keeps OpenCode resume when the stored session workspace matches the current thread workspace', async () => {
+    const repo = await makeSameProjectWorkspace('opencode-repo-match-');
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+    const activeRecord = {
+      id: 'rec-opencode-repo-match',
+      seq: 0,
+      status: 'active',
+      cliSessionId: 'ses_repo_match',
+      catId: 'opencode',
+      threadId: 'thread-opencode-matching-workspace',
+      userId: 'user1',
+      messageCount: 0,
+      workspaceFingerprint: repo,
+      workingDirectory: repo,
+    };
+    const chainStore = {
+      getChain: async () => [activeRecord],
+      getActive: async () => activeRecord,
+      get: async () => activeRecord,
+      create: async () => activeRecord,
+      update: async (_id, patch) => Object.assign(activeRecord, patch),
+    };
+
+    try {
+      await collect(
+        invokeSingleCat(
+          {
+            ...makeDeps(),
+            sessionChainStore: chainStore,
+            threadStore: {
+              get: async () => ({ projectPath: repo, createdBy: 'user1' }),
+              updateParticipantActivity: async () => {},
+            },
+          },
+          {
+            catId: 'opencode',
+            service,
+            prompt: 'test matching workspace resume',
+            userId: 'user1',
+            threadId: 'thread-opencode-matching-workspace',
+            isLastCat: true,
+          },
+        ),
+      );
+    } finally {
+      await rmWithRetry(repo);
+    }
+
+    assert.equal(optionsSeen.length, 1);
+    assert.equal(optionsSeen[0]?.workingDirectory, repo);
+    assert.equal(optionsSeen[0]?.sessionId, 'ses_repo_match');
+    assert.equal(optionsSeen[0]?.cliSessionId, 'ses_repo_match');
+  });
+
+  it('drops OpenCode resume when the stored session workspace is unknown', async () => {
+    const repo = await makeSameProjectWorkspace('opencode-repo-unknown-');
+    const optionsSeen = [];
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        optionsSeen.push(options ?? {});
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+    const activeRecord = {
+      id: 'rec-opencode-unknown',
+      seq: 0,
+      status: 'active',
+      cliSessionId: 'ses_unknown_workspace',
+      catId: 'opencode',
+      threadId: 'thread-opencode-unknown-workspace',
+      userId: 'user1',
+      messageCount: 0,
+    };
+    const chainStore = {
+      getChain: async () => [activeRecord],
+      getActive: async () => activeRecord,
+      get: async () => activeRecord,
+      create: async () => activeRecord,
+      update: async (_id, patch) => Object.assign(activeRecord, patch),
+    };
+
+    try {
+      await collect(
+        invokeSingleCat(
+          {
+            ...makeDeps(),
+            sessionChainStore: chainStore,
+            threadStore: {
+              get: async () => ({ projectPath: repo, createdBy: 'user1' }),
+              updateParticipantActivity: async () => {},
+            },
+          },
+          {
+            catId: 'opencode',
+            service,
+            prompt: 'test unknown workspace resume',
+            userId: 'user1',
+            threadId: 'thread-opencode-unknown-workspace',
+            isLastCat: true,
+          },
+        ),
+      );
+    } finally {
+      await rmWithRetry(repo);
+    }
+
+    assert.equal(optionsSeen.length, 1);
+    assert.equal(optionsSeen[0]?.workingDirectory, repo);
+    assert.equal(optionsSeen[0]?.sessionId, undefined, 'OpenCode must start fresh when stored workspace is unknown');
+    assert.equal(optionsSeen[0]?.cliSessionId, undefined, 'unknown-workspace resume id must not reach diagnostics');
+  });
+
+  it('fails loud for OpenCode when thread projectPath is default', async () => {
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: 'default', createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opencode',
+        service,
+        prompt: 'test missing project path',
+        userId: 'user1',
+        threadId: 'thread-default-project-path',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokedService, false, 'OpenCode must not inherit runtime cwd when projectPath is default');
+    assert.ok(
+      msgs.some((m) => m.type === 'error' && String(m.error).includes('OpenCode requires a thread projectPath')),
+      `expected missing projectPath error, got: ${msgs.map((m) => m.type).join(',')}`,
+    );
+  });
+
+  it('fails loud for OpenCode when thread projectPath is rejected by project-path validation', async () => {
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: '/dev', createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opencode',
+        service,
+        prompt: 'test invalid project path',
+        userId: 'user1',
+        threadId: 'thread-invalid-project-path',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokedService, false, 'OpenCode must not spawn when projectPath is invalid');
+    assert.ok(
+      msgs.some((m) => m.type === 'error' && String(m.error).includes('Invalid thread projectPath')),
+      `expected invalid projectPath error, got: ${msgs.map((m) => m.type).join(',')}`,
+    );
+  });
+
+  it('degrades for non-OpenCode when thread projectPath is rejected by project-path validation', async () => {
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        invokedService = true;
+        assert.equal(options?.workingDirectory, undefined);
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => ({ projectPath: '/dev', createdBy: 'user1' }),
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test invalid project path degrade',
+        userId: 'user1',
+        threadId: 'thread-invalid-project-path-non-opencode',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokedService, true, 'non-OpenCode providers keep best-effort fallback');
+    assert.ok(
+      msgs.some((m) => m.type === 'done'),
+      'should reach done',
+    );
+    assert.ok(
+      !msgs.some((m) => m.type === 'error' && String(m.error).includes('Invalid thread projectPath')),
+      'non-OpenCode provider must not hard-fail historical invalid projectPath',
+    );
+  });
+
+  it('degrades when thread workspace lookup fails before spawn', async () => {
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke(_prompt, options) {
+        invokedService = true;
+        assert.equal(options?.workingDirectory, undefined);
+        yield { type: 'done', catId: 'opus', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => {
+          throw new Error('thread store unavailable');
+        },
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opus',
+        service,
+        prompt: 'test workspace lookup failure degrade',
+        userId: 'user1',
+        threadId: 'thread-workspace-lookup-fails',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokedService, true, 'threadStore transient failure should keep best-effort fallback');
+    assert.ok(
+      msgs.some((m) => m.type === 'done'),
+      'should reach done',
+    );
+    assert.ok(
+      !msgs.some((m) => m.type === 'error' && String(m.error).includes('Unable to resolve thread workspace')),
+      'threadStore transient failure must not hard-fail invocation',
+    );
+  });
+
+  it('fails loud for OpenCode when thread workspace lookup fails before spawn', async () => {
+    let invokedService = false;
+    const service = {
+      l0CompilerFn: dummyL0CompilerFn,
+      async *invoke() {
+        invokedService = true;
+        yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
+      },
+    };
+
+    const deps = {
+      ...makeDeps(),
+      threadStore: {
+        get: async () => {
+          throw new Error('thread store unavailable');
+        },
+        updateParticipantActivity: async () => {},
+      },
+    };
+
+    const msgs = await collect(
+      invokeSingleCat(deps, {
+        catId: 'opencode',
+        service,
+        prompt: 'test opencode workspace lookup failure',
+        userId: 'user1',
+        threadId: 'thread-opencode-workspace-lookup-fails',
+        isLastCat: true,
+      }),
+    );
+
+    assert.equal(invokedService, false, 'OpenCode must not inherit runtime cwd when workspace lookup fails');
+    assert.ok(
+      msgs.some((m) => m.type === 'error' && String(m.error).includes('Unable to resolve thread workspace')),
+      `expected OpenCode workspace lookup error, got: ${msgs.map((m) => m.type).join(',')}`,
+    );
   });
 
   it('bug-fix: account resolution uses runtime root (process.cwd()), not thread.projectPath', async () => {
@@ -5933,6 +7626,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
 
     const optionsSeen = [];
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke(_prompt, options) {
         optionsSeen.push(options ?? {});
         yield { type: 'done', catId: 'opencode', timestamp: Date.now() };
@@ -6013,6 +7707,7 @@ describe('invokeSingleCat audit events (P1 fix)', () => {
     };
 
     const service = {
+      l0CompilerFn: dummyL0CompilerFn,
       async *invoke() {
         yield { type: 'session_init', catId: 'gemini', sessionId: 'cli-gemini-cumul', timestamp: Date.now() };
         yield {

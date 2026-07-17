@@ -4,6 +4,7 @@ related_features: [F048, F117, F173, F183]
 topics: [invocation, liveness, redis, runtime-state, observability, message-pipeline]
 doc_kind: spec
 created: 2026-05-07
+tips_exempt: post-close R20/R21 live CLI ghost bugfix timeline; no new user-facing capability tip
 ---
 
 # F194: Invocation Liveness Canonical Read Model — 后端 invocation 活性真相源收口
@@ -12,11 +13,11 @@ created: 2026-05-07
 >
 >
 >
-> Reviewer: Maine Coon/Maine Coon (GPT-5.5)。立项基于 2026-05-07 thread `thread_mov3a7qva8mtsbs1` post-close diagnosis（F183 close 之后team lead报告"现在活跃的线程气泡都是裂的"，Maine Coon只读诊断捕到 `/api/messages` 与 `/api/threads/:threadId/queue` 对同一 thread 的 liveness 判定矛盾）。Architecture cell：`docs/architecture/ownership/cells/runtime-invocation-state` (待建/复用)。Map delta：none — 复用既有 `domains/cats/services/agents/invocation/` 边界，本 feat 在该 cell 内新增 read-model helper，不改 ownership map。
+> Reviewer: Maine Coon/Maine Coon (GPT-5.5)。立项基于 2026-05-07 thread `[thread-id]` post-close diagnosis（F183 close 之后operator报告"现在活跃的线程气泡都是裂的"，Maine Coon只读诊断捕到 `/api/messages` 与 `/api/threads/:threadId/queue` 对同一 thread 的 liveness 判定矛盾）。Architecture cell：`docs/architecture/ownership/cells/runtime-invocation-state` (待建/复用)。Map delta：none — 复用既有 `domains/cats/services/agents/invocation/` 边界，本 feat 在该 cell 内新增 read-model helper，不改 ownership map。
 
 ## Why
 
-### team experience（2026-05-07 19:14 / 19:21）
+### operator experience（2026-05-07 19:14 / 19:21）
 
 > "我发现现在 f184 183 改完之后好像气泡还是有问题…说实话只要是现在活跃的线程他们气泡都是裂的你好像可以自己去找个活跃的线程看？ 然后和我讲讲为什么捏？"
 >
@@ -24,11 +25,11 @@ created: 2026-05-07
 
 ### 现场症状（Maine Coon只读诊断）
 
-F183 全 phase merged 后，team lead报告 active thread 气泡仍偶发裂成两条。Maine Coon在 3 个不同 thread 都采到同一型号 split-brain：
+F183 全 phase merged 后，operator报告 active thread 气泡仍偶发裂成两条。Maine Coon在 3 个不同 thread 都采到同一型号 split-brain：
 
-- `thread_mou6i2v6jpgo7utj`: `/api/messages` 返回 `draft-4a31dc69-…`/`draft-ffaa19de-…`，`/api/threads/:threadId/queue` 返回 `activeInvocations: []`
-- `thread_mov3a7qva8mtsbs1`: `/api/messages` 返回 `draft-3270e743-…`，queue endpoint 返回 `activeInvocations: []`
-- `thread_movcg5v7226tmg0q`: `/api/messages` 返回 `draft-bca7ca54-…`，queue endpoint 返回 `activeInvocations: []`
+- `[thread-id]`: `/api/messages` 返回 `draft-4a31dc69-…`/`draft-ffaa19de-…`，`/api/threads/:threadId/queue` 返回 `activeInvocations: []`
+- `[thread-id]`: `/api/messages` 返回 `draft-3270e743-…`，queue endpoint 返回 `activeInvocations: []`
+- `[thread-id]`: `/api/messages` 返回 `draft-bca7ca54-…`，queue endpoint 返回 `activeInvocations: []`
 
 PR #1586 已修了一类局部 identity gap（local invocationless live bubble 与 server `draft-{invocationId}` 的 late-bind merge），但只要后端两个读模型对 liveness 的判定本身互相矛盾，前端 reconcile 仍会进入 "draft exists, active slot absent" 的 split-brain。
 
@@ -155,9 +156,9 @@ async function getThreadLiveInvocations(
 
 ### Phase B (Bundle): 消费方迁移 + zombie cleanup + 运行时 diagnostic + alpha 验收 ⚠️ ALPHA FAILED → Phase Z
 
-> **Single bundled phase（CVO ack 2026-05-08）**：原 4-phase 拆分（A/B/C/D 各一）调整为 **2-phase 拆分**——Phase A 已独立 merged（PR #1592, squash `4b5edfdd2`）；**消费方迁移 + zombie cleanup + diagnostic + alpha 全部合并为单一 Phase B (Bundle)** 一锅端做完一锅端 review。spec 真相源直接反映"single bundle"，避免子 step 之间的 review iteration 碎片化（详见 KD-12）。
+> **Single bundled phase（operator ack 2026-05-08）**：原 4-phase 拆分（A/B/C/D 各一）调整为 **2-phase 拆分**——Phase A 已独立 merged（PR #1592, squash `4b5edfdd2`）；**消费方迁移 + zombie cleanup + diagnostic + alpha 全部合并为单一 Phase B (Bundle)** 一锅端做完一锅端 review。spec 真相源直接反映"single bundle"，避免子 step 之间的 review iteration 碎片化（详见 KD-12）。
 >
-> ⚠️ Phase B merged (PR #1603, squash `5c1ab366`) 但 **alpha runtime acceptance 失败**：team lead 2026-05-09 03:35 实测气泡仍裂。Maine Coon 04:51 拍板：F194 没 close，进 Phase Z 修 namespace 模型缺口（read-side helper 把 parent recordStore invocation 与 per-cat-turn registry invocation 当成同 namespace），Z 阶段不 close 不准 alpha 通过。
+> ⚠️ Phase B merged (PR #1603, squash `5c1ab366`) 但 **alpha runtime acceptance 失败**：operator 2026-05-09 03:35 实测气泡仍裂。Maine Coon 04:51 拍板：F194 没 close，进 Phase Z 修 namespace 模型缺口（read-side helper 把 parent recordStore invocation 与 per-cat-turn registry invocation 当成同 namespace），Z 阶段不 close 不准 alpha 通过。
 
 ### Phase Z: Namespace-aware canonical read model（alpha runtime acceptance failure recovery）
 
@@ -229,7 +230,7 @@ tracker (cat-level only)
 **Z5 — Runtime regression + alpha + 愿景守护**：
 - 整合测试用 fastify 真启动 + 真 Redis（test:redis isolation）+ 真 streaming mock，复现 Z2-α/β/γ
 - alpha 通道（`pnpm alpha:start` 6398 隔离）实测：复现 thread + 多轮 multi-cat 串联，气泡不再裂
-- 愿景守护：非作者非 reviewer 猫（Siamese / 孟加拉猫）拉一遍 alpha，对照team experience出对照表
+- 愿景守护：非作者非 reviewer 猫（Siamese / Bengal）拉一遍 alpha，对照operator experience出对照表
 
 **Z 阶段必须三层都过 + alpha 证据齐备 才能 close F194**——Maine Coon hard gate（spec 之外不接受 partial close）。
 
@@ -281,9 +282,9 @@ tracker (cat-level only)
 - [x] AC-B11: `LivenessEvent` schema 落地（`liveness_degraded` / `liveness_pending` / `record_zombie_detected`），fallback 用 `liveness_fallback` log kind 标记；字段含 threadId/userId/invocationId/catId/source/reason/recordStatus/recordUpdatedAt/trackerSlotPresent/draftFresh/draftAge
 - [x] AC-B12: helper `onLog?` callback dep 落地，emitLivenessEvent 在 degraded live + zombie 决策点 emit；sink throw swallowed 不中断 read；7 个 onLog 单测（degraded/pending/zombie 各 1 + healthy 不 emit + 多事件 + sink throw + 无 onLog backward compat）
 - [x] AC-B13: fallback frequency metric — messages/queue callsite catch 路径写 `kind: 'liveness_fallback'` + endpoint 字段；onLog event 也用 `feature: 'F194'` 标记（不覆盖 helper.source）便于查询
-- [x] AC-B14: ~~alpha 实测：active thread 在正常 stream 期间无 `liveness_degraded` 噪音~~ **superseded by Phase Z series** — Phase B alpha 失败后进 Phase Z，原 B14 测试场景被 Z9/Z10 alpha 完全覆盖。team lead 2026-05-12 "用了一下午没发现啥问题"
+- [x] AC-B14: ~~alpha 实测：active thread 在正常 stream 期间无 `liveness_degraded` 噪音~~ **superseded by Phase Z series** — Phase B alpha 失败后进 Phase Z，原 B14 测试场景被 Z9/Z10 alpha 完全覆盖。operator 2026-05-12 "用了一下午没发现啥问题"
 - [x] AC-B15: ~~alpha 实测：构造 record+tracker missing 场景~~ **superseded by Phase Z series** — 同 B14，Z9 backend stamp + Z8 统一投影从根因解决
-- [x] AC-B16: 愿景守护：非作者非 reviewer 猫输出对照表 ✅ Ragdoll/Opus-46 2026-05-12 独立审计 14/14 team lead需求全部代码验证通过（thread message `0001778558166649-000147-9d1b9a59`）
+- [x] AC-B16: 愿景守护：非作者非 reviewer 猫输出对照表 ✅ Ragdoll/Opus-46 2026-05-12 独立审计 14/14 operator需求全部代码验证通过（thread message `0001778558166649-000147-9d1b9a59`）
 
 ### Phase Z（namespace-aware canonical read model + alpha 复测）
 
@@ -291,9 +292,9 @@ tracker (cat-level only)
 - [x] AC-Z2: helper 加 namespace-aware dep（**Maine Coon R1 P1-1 修正：结构化数据不黑盒 boolean**）：`getTurnInvocation(invocationId): {parentInvocationId, threadId, catId, createdAt} | null` + `getLatestTurnInvocationId(threadId, catId): string | null`（复用 registry 既有 parentInvocationId 字段 + getLatestId）。Helper 四类前置规则（**Maine Coon R1 P1-2/P1-3 修正**）：(α) parent running + mapped child fresh draft + tracker present → 1 active source=`parent+child+tracker` startedAt=earliest child turn createdAt；(β) 同 α 但 tracker missing → 1 degraded active source=`parent+child-draft`；(γ) parent running + 无 child draft + 同 cat slot 已被新 parent 占用 + 本 parent **没** emit formal message → instant zombie failed；(γ') 同 γ 但本 parent emit 过 formal message → **不**做 instant succeeded（formal message 不能当 chainDone 证据），仅 suppress ghost slot + 输出 namespace diagnostic event ✅ PR #1614 (含 cloud R1+R2 P1 修正：iterate ALL targetCats + gate on fresh-draft activity)
 - [x] AC-Z3: producer defensive try/finally（routes/messages.ts background async 最外层）：新增 `hasParentRouteCompleted(parentId)` 信号（routeExecution 内部 in-memory map：start→pending, done→succeeded, error→failed），finally 读这个 map 决定终态；CAS expectedStatus=running 守护避免覆盖；map 缺/超时 → 兜底 failed(error='producer_left_running_no_terminal')。trace log 记录 reqId/from→to/source。routeParallel 同样改 ✅ `ensureTerminalStatus.ts` + `RouteChainCompletionTracker`
 - [x] AC-Z4: RED tests 四类（**Maine Coon R1 P2 加 parallel**）：Z2-α/β/γ + Z2-δ（parallel 同 parent 多 child drafts / 多 cat active 不互挤）各 1 个 unit + 1 个 routes integration test 覆盖 namespace race；producer try/finally 覆盖正常 / 异常 / abort + chainDone signal 缺失三路径 ✅ 95/95 namespace + ensure-terminal + routes-integration（含 R4/R5 cloud P2 + cross-parent same-cat dedup + parent-level zombie aggregation）
-- [x] AC-Z5: alpha 通道实测复现 thread + 多轮 multi-cat 串联气泡不再裂；F194 close 前必须有 alpha runtime 截图/日志 evidence + 愿景守护猫对照表（hard gate by Maine Coon 2026-05-09） ✅ 愿景守护猫对照表 by Ragdoll/Opus-46 2026-05-09（runtime HEAD `0807f4165`，含 Phase Z merge `7443d049e`；team lead 05:11 重启 runtime 后 visual confirm 不裂 + opus-47 API diagnosis `/queue` = 1 active no ghost split + Ragdoll/Opus-46 代码审计 + 26/26 unit tests pass）⚠️ 17:09 Maine Coon发现 acceptance 漏 ideate/parallel 场景 → Z2 重做
+- [x] AC-Z5: alpha 通道实测复现 thread + 多轮 multi-cat 串联气泡不再裂；F194 close 前必须有 alpha runtime 截图/日志 evidence + 愿景守护猫对照表（hard gate by Maine Coon 2026-05-09） ✅ 愿景守护猫对照表 by Ragdoll/Opus-46 2026-05-09（runtime HEAD `0807f4165`，含 Phase Z merge `7443d049e`；operator 05:11 重启 runtime 后 visual confirm 不裂 + opus-47 API diagnosis `/queue` = 1 active no ghost split + Ragdoll/Opus-46 代码审计 + 26/26 unit tests pass）⚠️ 17:09 Maine Coon发现 acceptance 漏 ideate/parallel 场景 → Z2 重做
 - [x] AC-Z6 (Z2 extension): `route-parallel.ts` 调 `invokeSingleCat` 必须传 `options.parentInvocationId`，与 `route-serial.ts:725` 对齐。RED test 覆盖 ideate 多猫场景：parallel chain 的 child registry record 必须有 `parentInvocationId === 当前 parent record.id`；helper 不能再把 parallel parent + child 误判为 `tracker+draft_missing_record` ✅ PR #1617 squash `1fa6ed229` (Maine Coon R APPROVE + 云端 LGTM "Can't wait for the next one!")
-- [x] AC-Z7 (Z2 extension): KD-23 四件套重做（含 ideate 场景）✅ ideate 代码修复 AC-Z15 verified + Z9 replay fixture F1 (multi-turn same parent codex→sonnet→codex 3 distinct bubbles) + team lead 2026-05-12 afternoon alpha + 守护猫对照表 R5 行 verified
+- [x] AC-Z7 (Z2 extension): KD-23 四件套重做（含 ideate 场景）✅ ideate 代码修复 AC-Z15 verified + Z9 replay fixture F1 (multi-turn same parent codex→sonnet→codex 3 distinct bubbles) + operator 2026-05-12 afternoon alpha + 守护猫对照表 R5 行 verified
 - [x] AC-Z8 (Z3 spec): 双 id 边界文档化 ✅ KD-21 (namespace model) + KD-28 (Z9 direction) + visible-turn.ts:1-22 header (contract docstring) + spec Z3/Z9 sections 充分文档化 chainInvocationId vs turnInvocationId 职责边界
 - [x] AC-Z9 (Z3 implementation): 后端 `messages.ts` / `route-serial.ts` / `route-parallel.ts` formal message 持久化加 `extra.stream.turnInvocationId`；前端 `mergeReplaceHydrationMessages` / `getBubbleInvocationId` / reducer stable key 至少各一层锁，优先用 turn id；RED test 覆盖：(a) 同 parent 下 `opus → codex → opus` 两个 opus bubble 不合并；(b) refresh 后仍三条 bubble；(c) 第三个 opus 的 active/cancel 状态不挂到第一个 opus 上 ✅ PR #1619 squash `79d53ada7` (含 R15-R21 cloud Codex 7 轮 P1：13 suppression callsites + 4 deriveBubbleId callsites + active invocation_created turn-extract + boundary cleanup turn-aware + local placeholder fallback turn-priority + invocationless callback fallback turn id)
 
@@ -304,11 +305,11 @@ tracker (cat-level only)
 
 ### Phase Z5（state coherence reconciliation — 4 bug 一锅端）
 
-> **背景**：2026-05-10 04:42~05:01 team lead alpha 实测 + opus-47 / GPT-5.5 / opus-46 三猫独立诊断，发现 Z3/Z4 合入后 4 个新/加剧问题。team experience："前后端根本不一致了！" "你们这两个z3 z4之前以前就算有裂开的两个气泡不需要f5就能合并 现在不能了！" "我并发at 47和55但是观点采样竟然是独立观点 只有47？" "结果竟然是46 你们的上个pr 和上上个pr可能都有问题"
+> **背景**：2026-05-10 04:42~05:01 operator alpha 实测 + opus-47 / GPT-5.5 / opus-46 三猫独立诊断，发现 Z3/Z4 合入后 4 个新/加剧问题。operator experience："前后端根本不一致了！" "你们这两个z3 z4之前以前就算有裂开的两个气泡不需要f5就能合并 现在不能了！" "我并发at 47和55但是观点采样竟然是独立观点 只有47？" "结果竟然是46 你们的上个pr 和上上个pr可能都有问题"
 >
 > **共同根因模式**（Maine Coon归纳）：系统某一层（reducer / activeInvocations / participantsActivity）的"事实"语义，跟用户在 UI 上看到的/操作时心智模型，**没对齐**。不是 4 个独立 bug，是同一 canonical contract 缺失的 4 种表现。
 >
-> **KD-24（revert decision）**：opus-47 strong 建议 revert Z4 squash `0648b597`（保留 Z3）—— Z4 的 `deriveBubbleId` id 公式方向错误（`msg-{turn}-{cat}` 不带 kind suffix，与 reducer `msg-{turn}-{cat}-{kind}` 不对齐），留在 main 会持续制造 Bug A + Bug B。team lead拍板后执行。⏳ pending
+> **KD-24（revert decision）**：opus-47 strong 建议 revert Z4 squash `0648b597`（保留 Z3）—— Z4 的 `deriveBubbleId` id 公式方向错误（`msg-{turn}-{cat}` 不带 kind suffix，与 reducer `msg-{turn}-{cat}-{kind}` 不对齐），留在 main 会持续制造 Bug A + Bug B。operator拍板后执行。⏳ pending
 
 #### Bug A — bubble id 方言冲突
 
@@ -351,7 +352,7 @@ tracker (cat-level only)
 
 #### Bug D — 无 @ 留言 fallback 错猫
 
-**症状**：team lead最后 @ 的是 opus-47 和 GPT-5.5，但下一条无 @ 留言 fallback 召唤了 opus-46。
+**症状**：operator最后 @ 的是 opus-47 和 GPT-5.5，但下一条无 @ 留言 fallback 召唤了 opus-46。
 **根因**（opus-47 诊断 + 代码定位）：`AgentRouter.resolveTargets` 无 @ fallback 走 `participantsWithActivity` 按 `lastMessageAt desc` 排序，`find` 拿最近发言的健康猫。opus-46 刚发了 vision guard 对照表 → `lastMessageAt` 最大 → 被 fallback 选中。
 **用户心智模型**：fallback = "我上一条消息 @ 的最后那只猫"，不是"thread 里最近发言的猫"。
 
@@ -360,14 +361,14 @@ tracker (cat-level only)
   - **时间窗口**（opus-47 R1 add）：只回看最近 N 条 user messages（建议 N=5 或时间窗口 1h），防止远古 mentions 主导 fallback；可走 `messageStore.getRecent(threadId, { limit: N })` 反序列扫
   - RED test 覆盖：(1) user msg1 @ A+B → cat C 发言 → user msg2 无 @ → fallback 应选 A 或 B，不选 C；(2) user msg1 @ A → 远古 user msg N 个迭代后无 @ → fallback 不能拿 N 步前的 A（除非时间窗口允许）
 
-> **scope 边界说明**：Bug D 严格来说是 `AgentRouter` 路由语义问题，不是 invocation liveness read model。但team lead明确说"这就是 f194 的遗留而不是新增一个 feat"，且 D 是在 F194 acceptance 场景中暴露的，归入 F194 scope 避免碎片化。
+> **scope 边界说明**：Bug D 严格来说是 `AgentRouter` 路由语义问题，不是 invocation liveness read model。但operator明确说"这就是 f194 的遗留而不是新增一个 feat"，且 D 是在 F194 acceptance 场景中暴露的，归入 F194 scope 避免碎片化。
 
 ### Phase Z6（acceptance residue — live rich self-heal + single-cat fallback）
 
 Phase Z5 合入后的 alpha re-test 又抓到两个剩余边界：
 
 1. **Bug A2 / R9**：rich/audio `system_info` 可能在 `done` 已 finalize 主 stream bubble、active refs 被清掉之后到达。active rich-block fallback 没查 just-finalized stream ref，导致 live 侧新建一个临时小气泡；F5 后 hydrate 只返回 canonical 单消息，所以小气泡消失。
-2. **Bug D2 / R10**：Phase Z5 把 no-@ fallback 改成上一条 user mentions 的完整集合。team lead澄清实际语义：上一条 @ 了 47 + 55 时，下一条无 @ 应该从这两只里确定性选 **一只**，不是重新并发两只。
+2. **Bug D2 / R10**：Phase Z5 把 no-@ fallback 改成上一条 user mentions 的完整集合。operator澄清实际语义：上一条 @ 了 47 + 55 时，下一条无 @ 应该从这两只里确定性选 **一只**，不是重新并发两只。
 
 - [x] AC-Z17: invocationless rich/audio block after `done` attaches to the just-finalized stream bubble, not a new placeholder. ✅ PR #1623 squash `24eb56e3` — active path uses `findInvocationlessStreamPlaceholder` before creating a new assistant bubble; background path reuses `finalizedBgRefs` before `bg-rich-*` creation. Cloud review P1s narrowed both fallbacks to invocationless late events only so explicit new-turn rich/audio cannot splice into the prior bubble. RED tests: `useAgentMessages-richblock-correlation` AC-Z17 (`done` → late rich_block) stays one bubble + explicit rich_block does not attach to previous finalized bubble; background system-info test covers the same guard.
 - [x] AC-Z18: no-@ fallback returns a deterministic **single** cat from the previous user message mentions. ✅ PR #1623 squash `24eb56e3` — `findRecentUserMentionFallback` keeps Z5 paging / system filtering / effective-score semantics but returns `[routable[0]]` instead of the whole set. RED tests update F078 superseded case + AC-Z16 no-mention case.
@@ -380,10 +381,10 @@ Phase Z6 后 alpha re-test 继续抓到 live-only residue：同一 assistant res
 
 ### Phase Z8（unified canonical bubble projection — Z1-Z7 终止符）✅ PR #1632 squash `49814778`
 
-Z7 alpha re-test 后 (2026-05-10 19:55~20:30) team lead catch："F5 后变 1 个 这是同一次回复 thread id 好像你就得随便打开浏览器去找一个thread 看看 大概率都是裂开的？" — 普遍现象，不是边缘 race。
+Z7 alpha re-test 后 (2026-05-10 19:55~20:30) operator catch："F5 后变 1 个 这是同一次回复 thread id 好像你就得随便打开浏览器去找一个thread 看看 大概率都是裂开的？" — 普遍现象，不是边缘 race。
 
 **根因（opus-47 + Maine Coon + opus-46 三猫独立诊断收敛）**：
-1. Backend `/messages` 真的存了多条 raw assistant records 共享同一 `extra.stream.invocationId`、`turnInvocationId` 全部为空。例如 thread `thread_moyfjyjc0662weit` opus 同 invocation `2fe279aa` 有 3 条 records (2 stream + 1 callback)，对应 3 段独立内容。
+1. Backend `/messages` 真的存了多条 raw assistant records 共享同一 `extra.stream.invocationId`、`turnInvocationId` 全部为空。例如 thread `[thread-id]` opus 同 invocation `2fe279aa` 有 3 条 records (2 stream + 1 callback)，对应 3 段独立内容。
 2. Hydrate (`mergeReplaceHydrationMessages`) 用 `(catId, invocationId)` streamKey + last-wins 收敛 → F5 后只显示 1 个 bubble。
 3. Live reducer 用 ADR-033 kind 隔离 + stable key match 创建独立 bubble，多个 raw records → 多个 live bubble，跟 hydrate 投影规则不一致。
 
@@ -405,19 +406,19 @@ Z7 alpha re-test 后 (2026-05-10 19:55~20:30) team lead catch："F5 后变 1 个
     - **Thinking**: 合并 reduce
     - **isStreaming**: 任一 raw record `isStreaming === true` → bubble streaming
     - **canonical id**: 选 group 内最早 callback record id 优先；没 callback 则取最早 stream record id
-  - RED test: alpha 真实 thread `thread_moyfjyjc0662weit` opus invocation `2fe279aa` 的 3 条 records → projection 后必须 1 个 bubble，content/toolEvents/rich blocks 完整合并
+  - RED test: alpha 真实 thread `[thread-id]` opus invocation `2fe279aa` 的 3 条 records → projection 后必须 1 个 bubble，content/toolEvents/rich blocks 完整合并
 
 - [x] AC-Z21: live reducer 改用 projection（writer boundary integration per Maine Coon R1 OQ-3）。✅ PR #1632 squash `49814778` — `applyBubbleEventWithRecovery` 在 `useAgentMessages.ts` wraps reducer，project `result.nextMessages` 后 store.setMessages。Destructive callback path 用 synthetic `id::z8-raw-pre-callback` 注入 pre-reducer stream content 保留 Z7 cleanup baseline。Cloud R3 P1 fix：lookup 用 `getBubbleInvocationId(m)` (turn-priority stable key) 匹配 Z3 dual-id event canonicalInvocationId。
 
 - [x] AC-Z22: hydrate path 改用同一 projection function。✅ PR #1632 squash `49814778` — `useChatHistory.ts` `hydrateThread` + `prependHistory` 替换 streamKey last-wins，调用 `projectCanonicalBubbles`。
 
-- [x] AC-Z23: replay fixture 回归 — alpha 真实 thread `thread_moyfjyjc0662weit` opus invocation `2fe279aa` 3-records (2 stream + 1 callback) fixture。✅ PR #1632 squash `49814778` — `bubble-projection-alpha-replay.test.ts` 证明 hydrate full-batch projection ≡ live incremental projection (byte-identical) + R2 P1 destructive callback test。`useAgentMessages-z8-dual-id-callback.test.ts` 覆盖 Z3 dual-id + legacy single-id 回归。
+- [x] AC-Z23: replay fixture 回归 — alpha 真实 thread `[thread-id]` opus invocation `2fe279aa` 3-records (2 stream + 1 callback) fixture。✅ PR #1632 squash `49814778` — `bubble-projection-alpha-replay.test.ts` 证明 hydrate full-batch projection ≡ live incremental projection (byte-identical) + R2 P1 destructive callback test。`useAgentMessages-z8-dual-id-callback.test.ts` 覆盖 Z3 dual-id + legacy single-id 回归。
 
 ### Phase Z9（canonical bubble identity contract + projection observability — backend stamp 补漏）
 
-Z8 合入后 (2026-05-11 06:51) team lead alpha re-test 仍裂："我发现还是裂开的，🤔 好像修这个你们总修不全怎么办呢？ 有没有好办法？" — Z1-Z8 八轮 frontend patch 仍未收敛，team lead push back 方法论。
+Z8 合入后 (2026-05-11 06:51) operator alpha re-test 仍裂："我发现还是裂开的，🤔 好像修这个你们总修不全怎么办呢？ 有没有好办法？" — Z1-Z8 八轮 frontend patch 仍未收敛，operator push back 方法论。
 
-**只读诊断证据**（thread `thread_mp0o2lf7d2gu5j3y`，runtime preflight Z8 squash `49814778` 之后启动）：
+**只读诊断证据**（thread `[thread-id]`，runtime preflight Z8 squash `49814778` 之后启动）：
 - parent invocation `7e1c4435-1d3e-4b97-b79c-bdd5bb0108fc` 跨 3 个 visible turn 共享：codex turn1 (05/10 20:54) → sonnet turn2 (05/10 21:01) → codex turn3 (05/10 21:02)
 - 三条 raw record 的 `extra.stream.invocationId` 全部等于 parent；`extra.stream.turnInvocationId` **全部为 null**
 - top-level `invocationId / turnInvocationId` 也都是 null（参考用，不参与 frontend bubble identity）
@@ -454,7 +455,7 @@ Z8 合入后 (2026-05-11 06:51) team lead alpha re-test 仍裂："我发现还�
 
 ### Phase Z10（liveness identity invariant — F5 hydrate active/cancel 一致性）
 
-Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问题（R14, 2026-05-11 07:15）："f5字后一切消失了 猫猫状态什么都是空闲... 没cancel按钮 然后我刚打完这些字 你冒出来了"。Maine Coon识别为 bubble identity 的姐妹问题：**bubble identity (Z9) 和 liveness identity (Z10) 本质都是前后端没有共享同一份 invocation/turn 真相源**。
+Phase Z9 进 review 期间operator catch 一个相邻但独立子系统的问题（R14, 2026-05-11 07:15）："f5字后一切消失了 猫猫状态什么都是空闲... 没cancel按钮 然后我刚打完这些字 你冒出来了"。Maine Coon识别为 bubble identity 的姐妹问题：**bubble identity (Z9) 和 liveness identity (Z10) 本质都是前后端没有共享同一份 invocation/turn 真相源**。
 
 **Phase Z10 scope（与 Z9 解耦的独立 PR）**：
 - 现状审计（已做）：`useChatHistory.ts:813` `fetchQueue` 已经有完整的 `/queue` 消费逻辑（读 activeInvocations + setThreadHasActiveInvocation + addActiveInvocation + replaceThreadTargetCats）— 代码路径已存在
@@ -467,7 +468,7 @@ Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问�
   - 范围：race window 缩短从"直到 /queue 返回"到"直到 IDB load"（典型 10-50ms vs 100ms+）。Server 仍是 authoritative source，IDB 仅作 first-paint 优化
 
 - [x] AC-Z29: A2A handoff live slot ownership 在 handoff 事件到达时立即迁移到下一只猫，且上一只猫已清 slot、下一只猫尚未 `invocation_created` 的窗口仍保留 cancel affordance。
-  - 诊断（2026-05-12 17:08 team lead）：`Maine Coon -> Ragdoll` handoff 后 UI 仍显示Maine Coon active；F5 hydrate 后变成Ragdoll，说明后端最终真相正确，live slot migration 缺失
+  - 诊断（2026-05-12 17:08 operator）：`Maine Coon -> Ragdoll` handoff 后 UI 仍显示Maine Coon active；F5 hydrate 后变成Ragdoll，说明后端最终真相正确，live slot migration 缺失
   - R1 Fix：`a2a_handoff` live event 增加 `targetCatId`（route-serial 两个 handoff yield site），active thread 收到 handoff 时复用 `maybeMigrateSequentialInvocationOwnership` 立即迁移 active slot
   - R2 Fix：guard 从 "slot 不存在就退出" 改成 "slot 已经是 nextCat 才退出"；当 previous-cat `done(isFinal=false)` 已清掉 slot 时，handoff 事件重建 nextCat placeholder slot，保证 cancel button 不消失
   - R3 Fix（2026-05-13）：legacy / old-runtime `a2a_handoff` event 仍可能不带 `invocationId`，导致 live slot migration 无法定位当前 turn。route-serial 两个 handoff yield site 显式带 `invocationId: ownInvocationId`；frontend 对 legacy event 通过 from-cat active slot / session metadata / single active slot 兜底解析 handoff invocation，再迁移到 targetCat
@@ -476,37 +477,37 @@ Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问�
 ### Phase Z11（CLI Output stdout consistency — post-close hotfix R17）
 
 - [x] AC-Z30: CLI Output 块行为与是否有 post_msg 无关——纯 stream / stream+post_message 都显示猫的 CLI 工作日志（tools + stream stdout）；post_msg speech 自己单独成泡，不吞掉或改写 CLI 工作日志。
-  - 诊断（2026-05-16 19:xx 47，raw record 实证）：thread `thread_mov3a7qva8mtsbs1` 同 turn `964b43c5` 有 stream record（origin=stream, content="Confirmed — branch...", 4 tools）+ callback record（origin=callback, content="@codex Review continuity..."）。Z8 KD-27 按 `(catId, turnInvocationId)` group → 合并 1 bubble，origin=callback。`ChatMessage.tsx:122` `toCliEvents(toolEvents, isStreamOrigin ? content : undefined)` —— 合并后 origin=callback → isStreamOrigin=false → CLI Output 拿 undefined → stdout 丢失，只剩 tools。纯 stream turn 则 origin=stream → CLI Output 有 stdout。**行为不一致是痛点**（team lead R17：CLI Output "无论有没有 post msg 行为要保持一致"）。
-  - R17 follow-up（2026-05-17 02:34 Maine Coon接手）：team lead进一步澄清 "post msg 自己单独气泡；其他消息就是正常的 Thinking + CLI Output + cli 原本消息"。第一版 Z11 保留 Z8 合并导致 `post_msg` speech 跑进 CLI Output 上方/同泡，坐标仍错。修正 contract：stream/work-log records 按 `(catId, turnInvocationId)` 合并；callback-origin records with own message id 按 callback id 单独成泡；只有 exact-key `callback_final`（id 等于已有 stream record id）作为 terminal update 留在 stream 组，避免 duplicate id
+  - 诊断（2026-05-16 19:xx 47，raw record 实证）：thread `[thread-id]` 同 turn `964b43c5` 有 stream record（origin=stream, content="Confirmed — branch...", 4 tools）+ callback record（origin=callback, content="@codex Review continuity..."）。Z8 KD-27 按 `(catId, turnInvocationId)` group → 合并 1 bubble，origin=callback。`ChatMessage.tsx:122` `toCliEvents(toolEvents, isStreamOrigin ? content : undefined)` —— 合并后 origin=callback → isStreamOrigin=false → CLI Output 拿 undefined → stdout 丢失，只剩 tools。纯 stream turn 则 origin=stream → CLI Output 有 stdout。**行为不一致是痛点**（operator R17：CLI Output "无论有没有 post msg 行为要保持一致"）。
+  - R17 follow-up（2026-05-17 02:34 Maine Coon接手）：operator进一步澄清 "post msg 自己单独气泡；其他消息就是正常的 Thinking + CLI Output + cli 原本消息"。第一版 Z11 保留 Z8 合并导致 `post_msg` speech 跑进 CLI Output 上方/同泡，坐标仍错。修正 contract：stream/work-log records 按 `(catId, turnInvocationId)` 合并；callback-origin records with own message id 按 callback id 单独成泡；只有 exact-key `callback_final`（id 等于已有 stream record id）作为 terminal update 留在 stream 组，避免 duplicate id
   - Fix：`bubbleGroupKey` 增加 `originBucket`。stream records 预扫描 `streamIdsByBaseKey`；callback 若 id 命中同 turn stream id → 归 stream bucket，否则归 callback bucket。`projectGroup` 保留 `cliStdout/speechContent` 仅服务 exact-key terminal merge；普通 post_msg 不再触发 merge。`ChatMessage` 的 Z11 split 渲染保留为兼容 exact-key terminal merge
   - RED tests：`bubble-projection-z11-cli-stdout.test.ts` 4/4（stream + post_msg same turn → 2 bubbles；纯 stream / 纯 callback 不变；多 stream record 合并且 callback 单泡）+ alpha replay / Z9 replay / useAgentMessages / useChatHistory 旧 Z8 断言全更新。Full web vitest `src/stores src/hooks src/components` 371 files / 2713 tests GREEN
-  - R17 live follow-up（2026-05-17 05:08 Maine Coon，thread `thread_motr8u5i1dtjigtd`）：live active recovery 仍可把 same-turn `origin=callback` post_msg bubble 当作 tool/stream 容器复用，导致 callback speech 渲染在 CLI Output 上方，且 tool rows 追加到 post_msg bubble。修正：`ensureStreaming` 路径的 active/recovery 只接受 `origin=stream`（origin 缺失 legacy 仍可），active ref 若指向 callback 视为 stale 并重建 stream bubble。terminal/done/replacement fallback 不启用此限制，避免破坏 exact-key `callback_final` 兼容。RED test：`useAgentMessages-placeholder-recovery.test.ts` 覆盖 same parent+turn callback bubble + incoming tool_use → 创建独立 stream bubble，不 append 到 callback bubble。Full web vitest `src/hooks src/stores src/components` 372 files / 2725 tests GREEN
+  - R17 live follow-up（2026-05-17 05:08 Maine Coon，thread `[thread-id]`）：live active recovery 仍可把 same-turn `origin=callback` post_msg bubble 当作 tool/stream 容器复用，导致 callback speech 渲染在 CLI Output 上方，且 tool rows 追加到 post_msg bubble。修正：`ensureStreaming` 路径的 active/recovery 只接受 `origin=stream`（origin 缺失 legacy 仍可），active ref 若指向 callback 视为 stale 并重建 stream bubble。terminal/done/replacement fallback 不启用此限制，避免破坏 exact-key `callback_final` 兼容。RED test：`useAgentMessages-placeholder-recovery.test.ts` 覆盖 same parent+turn callback bubble + incoming tool_use → 创建独立 stream bubble，不 append 到 callback bubble。Full web vitest `src/hooks src/stores src/components` 372 files / 2725 tests GREEN
 
 ### Phase Z12（Ideate targetCats hydration — post-close hotfix R18）
 
 - [x] AC-Z31: ideate / independent sampling 模式下，thread switch 或 queue hydrate 不得把本轮全量 `targetCats` 覆盖成 `/queue.activeInvocations` 的活跃子集；完成的猫卡片仍保留，active slots 只表示哪些猫仍在跑。
-  - 诊断（2026-05-19 08:40 team lead）：`@opus @opus47 @codex` 三猫独立观点采样，从当前 thread 切到别的 thread 再切回来后，采样条只剩两只。根因：`useChatHistory.fetchQueue` 把 `/queue.activeInvocations.map(catId)` 直接 `replaceThreadTargetCats`，而 `/queue.activeInvocations` 是 server active slot 子集，不是本轮 sampling 目标全集。Z5 AC-Z15 的 `deriveActiveCats` 依赖 `targetCats` 保持全量；hydrate 时把它缩小后，完成猫卡片自然消失。
+  - 诊断（2026-05-19 08:40 operator）：`@opus @opus47 @codex` 三猫独立观点采样，从当前 thread 切到别的 thread 再切回来后，采样条只剩两只。根因：`useChatHistory.fetchQueue` 把 `/queue.activeInvocations.map(catId)` 直接 `replaceThreadTargetCats`，而 `/queue.activeInvocations` 是 server active slot 子集，不是本轮 sampling 目标全集。Z5 AC-Z15 的 `deriveActiveCats` 依赖 `targetCats` 保持全量；hydrate 时把它缩小后，完成猫卡片自然消失。
   - Fix：新增 `deriveQueueHydrationTargetCats`。仅当 `intentMode === 'ideate'` 且本地已有 `previousTargetCats` 时，queue hydrate 用 `previousTargetCats ∪ activeCatIds` 保留全量目标；execute / 普通队列仍按 server active subset 收敛，避免旧猫残留。`replaceThreadTargetCats` 后恢复非 active 猫的已有 `catStatuses`（例如 done），active 猫再标记 streaming。
   - RED tests：`useChatHistory-queue.test.ts` 覆盖三猫 ideate、本地一猫 done、server 只报告两猫 active → hydrate 后 `targetCats` 仍为三猫，active slots 仍只两猫，done 状态不被重置。相关回归：`useChatHistory-queue` + `useChatHistory-thread-switch` + `useChatHistory-z10-idle-server-wins` + `useThreadScopedSelectors` + `status-helpers-liveness` + `chatStore-parallel-status-merge` = 54/54 GREEN；`pnpm check` GREEN。
 
 ### Phase Z13（Live parent-only chunk turn recovery — post-close hotfix R19）
 
 - [x] AC-Z32: `invocation_created` 已建立当前 cat turn 后，后续仍只带 parent invocation 的 live `text/tool_use/tool_result` 事件必须绑定到当前 turn bubble；不得按 parent stable key 回收旧 turn 的 finalized bubble。
-  - 诊断（2026-05-19 19:13 team lead）：F207 thread `thread_moa8ndjmv4x8j93u` 同 parent sequential chain 中，Opus turn1 已完成后，Codex handoff 回 Opus turn3；live UI 显示两个 Opus bubble，其中第二个 bubble 复制了 turn1 开头内容。后端 `/api/messages` raw records 正确：Opus turn1 `turnInvocationId=3889fd9f...`，Opus turn3 `turnInvocationId=068257df...`，且 turn3 raw content 不含 turn1 文本；`projectCanonicalBubbles` hydrate 也正确分泡。因此根因是 live recovery 在 parent-only chunk 上仍用 parent key 命中旧 parent-only finalized bubble。
+  - 诊断（2026-05-19 19:13 operator）：F207 thread `[thread-id]` 同 parent sequential chain 中，Opus turn1 已完成后，Codex handoff 回 Opus turn3；live UI 显示两个 Opus bubble，其中第二个 bubble 复制了 turn1 开头内容。后端 `/api/messages` raw records 正确：Opus turn1 `turnInvocationId=3889fd9f...`，Opus turn3 `turnInvocationId=068257df...`，且 turn3 raw content 不含 turn1 文本；`projectCanonicalBubbles` hydrate 也正确分泡。因此根因是 live recovery 在 parent-only chunk 上仍用 parent key 命中旧 parent-only finalized bubble。
   - Fix：新增 `resolveCurrentTurnInvocationIdForCat(catId, parentInvocationId)`，当 `catInvocations[catId].invocationId === parentInvocationId` 时把当前 `turnInvocationId` 作为 active stream lookup / bubble id seed / reducer event 的 effective turn id。`findRecoverableAssistantMessage`、`getOrRecoverActiveAssistantMessageId`、`ensureActiveAssistantMessage`、active `text/tool_use/tool_result` 路径全部使用该 effective turn id，避免 parent-only live chunk reopen older same-parent bubble。
-  - Follow-up（2026-05-20 01:04 team lead）：post_msg 之后仍偶现 live-only duplicate；raw `/api/messages` 与 `projectCanonicalBubbles` hydrate 均正确，问题限定在 foreground live：首个 stream bubble 先以 parent-only 身份创建，随后 server stream re-emission 带 turn id 返回时，active ref 因 stable-key mismatch 被判 stale，旧 parent-only bubble 留下、新 turn bubble 另建。修复：active ref 命中 parent-only stream 且当前 `catInvocations` 已知 `turnInvocationId` 时，原地补写 dual id，不删除 active ref，不另建第二个 stream bubble。
+  - Follow-up（2026-05-20 01:04 operator）：post_msg 之后仍偶现 live-only duplicate；raw `/api/messages` 与 `projectCanonicalBubbles` hydrate 均正确，问题限定在 foreground live：首个 stream bubble 先以 parent-only 身份创建，随后 server stream re-emission 带 turn id 返回时，active ref 因 stable-key mismatch 被判 stale，旧 parent-only bubble 留下、新 turn bubble 另建。修复：active ref 命中 parent-only stream 且当前 `catInvocations` 已知 `turnInvocationId` 时，原地补写 dual id，不删除 active ref，不另建第二个 stream bubble。
   - RED tests：`useAgentMessages-bubble-merge.test.ts` 覆盖旧 parent-only finalized Opus bubble + `invocation_created` 新 turn + 后续 parent-only text chunk → 旧 bubble content 不变，新 chunk 进入当前 turn bubble；同文件 follow-up 覆盖 active parent-only stream bubble + server stream re-emission(turn id) → 原泡升级为 current turn 且只保留 1 个 stream bubble。Focused + related regression：`useAgentMessages-bubble-merge` 45/45、`placeholder-recovery + invocation-created` 18/18、Z8/Z9/Z11 projection 11/11、`src/hooks src/stores` 120 files / 1135 tests GREEN；`tsc --noEmit` GREEN。
 
-- [x] AC-E1: team lead 2026-05-07 报告的 "现在活跃的线程他们气泡都是裂的" 在 alpha 通道实测全部消失（并发 multi-cat handoff 也不裂） ✅ team lead 2026-05-12 确认"用了一下午没发现啥问题"
+- [x] AC-E1: operator 2026-05-07 报告的 "现在活跃的线程他们气泡都是裂的" 在 alpha 通道实测全部消失（并发 multi-cat handoff 也不裂） ✅ operator 2026-05-12 确认"用了一下午没发现啥问题"
 - [x] AC-E2: 后端 `/api/messages` 与 `/api/threads/:threadId/queue` 共用同一 canonical helper，单一规则源 ✅ 代码审计：`getThreadLiveInvocations` imported by `messages.ts:1466` + `queue.ts:143`
 - [x] AC-E3: 后续新增 read endpoint（admin observability / debug API）可直接复用 helper，不需要自拼三家 store ✅ helper 导出 async function + types，无 route 耦合
-- [x] AC-E4: 并发 ideate 场景 UI 一致性——采样面板全程显示本轮所有 targetCats（Bug C）+ 无 @ fallback 回到上轮 @ 的猫（Bug D） ✅ Phase Z5 修复 (PR #1622) + team lead alpha 2026-05-12 确认无问题
+- [x] AC-E4: 并发 ideate 场景 UI 一致性——采样面板全程显示本轮所有 targetCats（Bug C）+ 无 @ fallback 回到上轮 @ 的猫（Bug D） ✅ Phase Z5 修复 (PR #1622) + operator alpha 2026-05-12 确认无问题
 
 ## 需求点 Checklist
 
-| ID | 需求点（team experience/转述） | AC 编号 | 验证方式 | 状态 |
+| ID | 需求点（operator experience/转述） | AC 编号 | 验证方式 | 状态 |
 |----|---------------------------|---------|----------|------|
-| R1 | "现在活跃的线程他们气泡都是裂的" | AC-B5, AC-B15, AC-Z1 | paired-route regression + runtime 实测 | [x] (team lead 2026-05-12 alpha 确认) |
+| R1 | "现在活跃的线程他们气泡都是裂的" | AC-B5, AC-B15, AC-Z1 | paired-route regression + runtime 实测 | [x] (operator 2026-05-12 alpha 确认) |
 | R2 | 让我"讲讲为什么"——根因可解释、可观测 | AC-B11, AC-B12, AC-B13 | structured event schema + code audit | [x] |
 | R3 | "找Ragdoll 46 或者 47…大概看了一下你的方向我觉得 ok" | AC-A1, AC-A2 | helper contract review | [x] |
 | R4 | 不能只在前端打补丁，从根因层（liveness contract）解决 | AC-A1, AC-Z2 | helper 单 contract + 双消费方迁移 | [x] |
@@ -568,7 +569,7 @@ Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问�
 | KD-9 | candidate 双源 enumeration（records ∪ drafts）+ tracker association guard 含 cross-check `slotClaimedByOtherDraft` | Maine Coon R1 P1-1：record 缺失但 tracker+draft 仍能证明 live 的合法路径必须保留（messages.ts hotfix3 + AC-B5）。Maine Coon R1 P1-2：tracker slot key 是 (threadId, catId) 没 invocationId，cat slot 重用时新 slot 不能反向证明旧 record。Maine Coon R2 P1：weak association 还得排除 slot 已被其他 draft 强关联的歧义场景，否则 zombie record + 新 record-missing draft 共存会让一个 slot "证明"两个 invocation。修复：buildSlotClaimedByDraft 预计算 earliest-anchored 那个 draft 的 slot ownership；weak record-tracker 和 tracker+draft 都加 `!slotClaimedByOtherDraft` 守护 | 2026-05-07 |
 | KD-10 | strong tracker-backed path（record+tracker / tracker+draft）由 ownership 而非 timing 决定——只有 slot owner（earliest-anchored draft 的主人）能用 | Maine Coon R3 P1：单 slot 同时 timing-anchor 两个 candidate 的 draft（A.createdAt = -90_000 earliest-owner, B.record+B.draft.createdAt = -85_000 也 timing-anchor），原 `slotAssocWithDraft` 只看时间是否能 anchor，B 仍走 strong path 拿 record+tracker。修复：ctx 加 `slotClaimedByThisDraft = slotClaimingDraft?.invocationId === candidate.invocationId`；`tryRecordTracker` 用 `slotClaimedByThisDraft || slotAssocWithRecordSingle`，`tryTrackerDraft` 改用 `slotClaimedByThisDraft`。非 owner 的 record+draft 仍可走 fresh-draft fallback (record+draft) 保持 active，只是不获得 tracker-backed 强证据。Hard 不变量：每个 cat slot 至多 back 一个 tracker-backed source | 2026-05-07 |
 | KD-11 | slot ownership map 必须排除 stale drafts（freshness guard） | 云端 codex review P1（PR #1592 commit 135f00635）：`buildSlotClaimedByDraft` 没检查 freshness，stale draft（`updatedAt > freshDraftWindowMs` 但 DraftStore TTL 还没 reap，例如 caller 注入更短 freshDraftWindow）能 claim cat slot 当 owner，导致 `slotClaimedByOtherDraft=true` 错误 disable 真正 running invocation 的 weak `record+tracker` path——live record 被错降为 `record-only` pending。修复：`buildSlotClaimedByDraft` 预先 filter `drafts` 只保留 fresh 的（`now - updatedAt ≤ freshDraftWindowMs`）；helper 主入口把 `now` / `freshDraftWindowMs` 透传给 buildIndexes/buildSlotClaimedByDraft | 2026-05-08 |
-| KD-12 | F194 phase scope 重新规划：原 4-phase 拆分（A/B/C/D 各一）合并为 **2-phase**——Phase A 独立 + **Phase B (Bundle)** 单一 phase（消费方迁移 + cleanup + diagnostic + alpha 全在一起）。spec 真相源直接反映"single bundle"，AC 改为连续编号 AC-B1~B16 不再分 sub-phase | team lead 2026-05-08 第二次 push back："我当时喊你把 phase bcd 都合成一个，然后先改 feat md，这样你才不会飘"——我第一次只在 KD-12 写"3 phase 合 1 PR"但 spec phase 章节保留 3 段，导致做实现时仍按 step 1/2a/2b 拆碎，commits 出现 9 个（4 feat + 5 fix review iteration）。第二次纠正：spec phase **章节本身**合并成单一 Phase B (Bundle)，AC 也合并连续编号，让做实现时不再有"按 phase 分步思考"的飘动空间。Phase A 仍独立保留作 contract foundation；Phase B (Bundle) 内部按 B1~B16 子 AC 连续验收，但作为同一 phase 同一 PR 一锅端 close | 2026-05-08 |
+| KD-12 | F194 phase scope 重新规划：原 4-phase 拆分（A/B/C/D 各一）合并为 **2-phase**——Phase A 独立 + **Phase B (Bundle)** 单一 phase（消费方迁移 + cleanup + diagnostic + alpha 全在一起）。spec 真相源直接反映"single bundle"，AC 改为连续编号 AC-B1~B16 不再分 sub-phase | operator 2026-05-08 第二次 push back："我当时喊你把 phase bcd 都合成一个，然后先改 feat md，这样你才不会飘"——我第一次只在 KD-12 写"3 phase 合 1 PR"但 spec phase 章节保留 3 段，导致做实现时仍按 step 1/2a/2b 拆碎，commits 出现 9 个（4 feat + 5 fix review iteration）。第二次纠正：spec phase **章节本身**合并成单一 Phase B (Bundle)，AC 也合并连续编号，让做实现时不再有"按 phase 分步思考"的飘动空间。Phase A 仍独立保留作 contract foundation；Phase B (Bundle) 内部按 B1~B16 子 AC 连续验收，但作为同一 phase 同一 PR 一锅端 close | 2026-05-08 |
 | KD-13 | running 索引必须有 backfill 路径——SMEMBERS-only 读路径不能假设 Set 已经 populate，必须能恢复 pre-deploy / 漏写 transition 的 orphan running records | 云端 codex review R13 P1（PR #1603 commit 472da890f）：R3 P1 fix 把 `listRunningByThread` 从 SCAN-based 切到 SMEMBERS-only，但 `invoc:running:{tid}:{uid}` Set 只在 `update()` 的 ATOMIC_UPDATE_LUA 里 populate。任何在新 build 部署时已经 `running` 的 record（或漏写 transition 的 record）都 absent from set，read 路径会把活的 invocation 误判为"消失" → /messages 丢 live draft + /queue 显示无 active slot，直到 record 再次 transition。修复：per-process lazy backfill（`runningIndexBackfilled` 标志位 + in-flight promise 共享），首次 listRunningByThread 调用时 SCAN 所有 invoc:* hashes，把 running records SADD 到对应的 (threadId, userId) Set，然后 flag = true 后续读纯 SMEMBERS。SADD idempotent，多进程 startup 最坏只是重复工作。On scan error: clear in-flight promise → 下次重试；error propagate 让 caller 决定 fail-open | 2026-05-08 |
 | KD-14 | update() 的 KEYS[2] 必须 CAS 防御 reassignUserId 漂移——JS 端 snapshot 推导出的 setKey 在 EVAL 之前可能因并发 reassignUserId 而失效 | 云端 codex review R13 P1 #2（PR #1603 inline comment 3209482070，与 P1 #1 同 R13 iteration）：`update()` 拉取 `before = await this.get(id)` 后用 `(threadId, userId)` 推 setKey 传给 Lua KEYS[2]。如果在 get() 与 eval() 之间 reassignUserId() 把 record migrate 到新 userId，Lua 的 SADD/SREM 就打到了错的 set——queued→running 漂移会把 record 加到 stale "T:A" 但 record.userId 已经是 B，listRunningByThread('T','B') 看不到 → 直接破坏 canonical liveness。修复（同一原子事务内 CAS 校验）：Lua 加 ARGV[3]/ARGV[4] = expectedThreadId/UserId，CAS 检查后立即 HGET 当前 threadId/userId，不匹配返回 -3；JS 端 update() wrap 在 retry loop（MAX_RETRIES=3），-3 触发 re-snapshot + 重发 EVAL 用 fresh setKey。设计权衡：Lua 内构造 setKey 需要 keyPrefix（ioredis EVAL 内的 raw 字符串不会自动 prefix），不如 CAS retry 简洁；reassignUserId 是稀有操作（scheduler backfill），3 次 retry 足够收敛 | 2026-05-08 |
 | KD-15 | reassignUserId 的 ownership 迁移必须 atomic——HSET userId + SREM oldSet + SADD newSet 不能拆 3 个 await | 云端 codex review R14 P1（PR #1603 inline comment 3211498998，rebased HEAD 75b55e14e）：原本 reassignUserId 三步独立 await，crash 落在 SREM 和 SADD 中间会让 running record 既不在 oldSet 也不在 newSet —— defensive filter 在 read 端兜底但 set 状态错。修复 `REASSIGN_USERID_LUA`：HSET userId + SREM + SADD 折成一个 Lua eval；status 在 Lua 内（post-HSET）读取，避免捕获 stale snapshot——并发 update() 把 status 转 terminal 时跳过 Set 迁移（terminal records 不该在 running set）。Idempotency key migration 留在 Lua 外（不在 hot read path，原本 multi/exec 已 atomic enough） | 2026-05-08 |
@@ -577,22 +578,22 @@ Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问�
 | KD-18 | backfill SCAN 必须过滤掉 running-set keys——`invoc:*` prefix 同时覆盖 record hashes (`invoc:{uuid}`) 和 running 索引 sets (`invoc:running:{tid}:{uid}`)，HGETALL on set keys 浪费 round trips | 云端 codex review R16 P2（PR #1603 inline comment 3211824356，HEAD 331b18aa8）：scanAndPopulateRunningIndex 用 MATCH=invoc:* 找 record hashes，但 R3 P1 fix 引入的 running 索引 sets 也住 `invoc:*` 下面，SCAN 返回 both。defensive filter 在 result loop 里捞 WRONGTYPE error 兜底但 round trips 还是付出去了。修复：post-scan 过滤 `invoc:running:` 前缀（不需 Redis TYPE filter 版本依赖），保留现有 SCAN MATCH pattern。Test 通过 wrap pipeline().hgetall 捕获 key 集合，断言 NO `invoc:running:*` 出现在 HGETALL targets | 2026-05-08 |
 | KD-19 | /messages 必须无条件 invoke helper（zombie 检测不依赖 draft 列表非空）——zombie 的本质就是"record running + no fresh draft"，drafts.length>0 gate 直接漏掉这一类 | 云端 codex review R17 P1（PR #1603 inline comment 3211853817，HEAD 46a735250）：messages.ts 旧逻辑把 helper invocation 嵌套在 `if (drafts.length > 0)` 里，empty draft thread 永远不触发 reconcile。修复 KD-19：重构 messages.ts 的 draft-merge 块，helper invocation 只 gate `opts.invocationRecordStore`，drafts 数组（可空）作为 helper 输入；activeDrafts 初始化前移；sort+push 出 `drafts.length>0` 内层条件。/messages 与 /queue 双路径都能触发 reconcileZombies，no-draft thread 的 phantom progress 不再永驻 | 2026-05-08 |
 | KD-20 | reconcileZombies 必须区分 missing / terminal / 仍 alive 三种 CAS-null 子情况——把"still running"误归 alreadyTerminal 等于丢失真 zombie | 云端 codex review R17 P2（PR #1603 inline comment 3211853819，HEAD 46a735250）：R15 P1 fix 把 `!updated` 分支拆成 terminal-cleanup vs missing 但还是把 still-running 也归 alreadyTerminal，Redis store CAS-drift retry exhaustion 时会丢 zombie。修复 KD-20：fresh get() 后三分支：(1) current=null missing → alreadyTerminal+no cleanup；(2) terminal → alreadyTerminal+retry cleanup（R15 P1 行为）；(3) 仍 alive (queued/running) → errors=1 + alreadyTerminal=false + warn log "transient failure"。下个 sweep 会 re-try。监控可基于 errors 指标 flag 真问题 | 2026-05-08 |
-| KD-21 | F194 helper 必须把 invocation 视为**双 namespace**：`recordStore.invocationId`（parent，整条 multi-cat 链共享）vs `draftStore/registry.invocationId`（child，per-cat-turn）。drafts/tracker stamping 不变，helper 学会 parent↔child 映射 | Phase B alpha 验收失败根因（team lead 2026-05-09 03:35 + Maine Coon 04:51 拍板）：runtime thread `thread_moxnb78ckc36xhga` 仍裂——98d2949c 是 parent（用户消息"你说说我们的现状"，opus→codex→opus 链 4 分钟没结束），a58a8757 是 child（当前 opus 第三轮 streaming）。helper 把它们当同 namespace → record-only/pending + tracker+draft no-record 两个 ghost identity → /queue dedup 取最早 startedAt → slot 计时陈旧但内容是新的。架构上：drafts 必须 per-turn 唯一（DraftStore key 含 invocationId 不能复用 parent），formal message 用 parentInvocationId stamp（已正确），tracker 干脆不存 invocationId（ambiguous）。helper 不能假设 namespace 相等。Maine Coon reject 方案 A（全量统一 schema 迁移风险大）+ reject 方案 C（"同 cat 有 draft 就特殊处理" 是孤立 patch）→ 走方案 B（namespace-aware helper） | 2026-05-09 |
+| KD-21 | F194 helper 必须把 invocation 视为**双 namespace**：`recordStore.invocationId`（parent，整条 multi-cat 链共享）vs `draftStore/registry.invocationId`（child，per-cat-turn）。drafts/tracker stamping 不变，helper 学会 parent↔child 映射 | Phase B alpha 验收失败根因（operator 2026-05-09 03:35 + Maine Coon 04:51 拍板）：runtime thread `[thread-id]` 仍裂——98d2949c 是 parent（用户消息"你说说我们的现状"，opus→codex→opus 链 4 分钟没结束），a58a8757 是 child（当前 opus 第三轮 streaming）。helper 把它们当同 namespace → record-only/pending + tracker+draft no-record 两个 ghost identity → /queue dedup 取最早 startedAt → slot 计时陈旧但内容是新的。架构上：drafts 必须 per-turn 唯一（DraftStore key 含 invocationId 不能复用 parent），formal message 用 parentInvocationId stamp（已正确），tracker 干脆不存 invocationId（ambiguous）。helper 不能假设 namespace 相等。Maine Coon reject 方案 A（全量统一 schema 迁移风险大）+ reject 方案 C（"同 cat 有 draft 就特殊处理" 是孤立 patch）→ 走方案 B（namespace-aware helper） | 2026-05-09 |
 | KD-22 | helper namespace-aware 实现走"加 dep 不改 stamping"路线，**dep 必须返回结构化数据不能黑盒 boolean**（Maine Coon R1 P1-1）：复用 InvocationRegistry 已有 `parentInvocationId` 字段 + `getLatestId(threadId, catId)` 接口；helper 入口 build namespace index `parentToChildren: Map<parentRecordId, Array<{childTurnId, draft, turnCreatedAt}>>` 后再做分类 | KD-21 决策后的实现路线选择：A 全量 namespace 统一会触动 callback auth + DraftStore key + 历史兼容三处 schema migration（高风险大半天起）；C "同 cat 有 draft" hotfix rule 短期变好但下次会在别的 parent/child 边界继续裂。B = canonical helper 加 namespace awareness。Maine Coon R1 P1-1 reject 黑盒 boolean dep（`hasFreshChildDraft(parentId)` 只返 true/false，helper 拿不到 child id/catId/createdAt 做 startedAt 与 diagnostic）→ 改用结构化 dep：`getTurnInvocation(invocationId)` 返 `{ parentInvocationId, threadId, catId, createdAt }`（包装 `registry.getRecord`） + `getLatestTurnInvocationId(threadId, catId)`（包装 `registry.getLatestId`）。Maine Coon R1 P1-2 reject "parent 有 child draft → parent 不进 active 让 child 走 tracker+draft"（tracker 丢就漏 live）→ 改成"parent + child draft 是同一 execution chain"分类，tracker present → `parent+child+tracker`，tracker missing → degraded `parent+child-draft`。startedAt 优先取 child turn createdAt 不取 parent.updatedAt。Maine Coon R1 P1-3 reject "formal message exists → instant succeeded"（multi-cat chain 中途就有 formal message）→ read-side 只 suppress ghost slot + 输出 namespace diagnostic，**succeeded 终态由 producer Z4 finally 决定**，read-side 不擅自终态化（缺 chainDone 证据） | 2026-05-09 |
 | KD-23 | F194 close hard gate：alpha runtime acceptance（AC-Z5）必须有 **截图/日志 evidence** + **愿景守护猫对照表**——spec / unit test / integration test 全过 ≠ close 资格，必须 runtime 真实场景验证不裂 | Maine Coon 2026-05-09 04:51 拍板原话："不是'代码 merge 了就算完'，而是 active runtime thread 不裂才算 F194 过关"+ "Z 阶段验收必须包含 runtime 复现用例和 alpha 截图/日志证据"。Phase B 失败根因就是单测全过、API regression 全过、cloud LGTM "Bravo"，但没在 alpha 真实 multi-cat 串联场景压一遍。Phase Z 不重蹈：unit test + integration test + alpha runtime + 守护猫四个证据齐才允许 status: done | 2026-05-09 |
 | KD-25 | Phase Z5 走"一锅端 single-PR"，不再拆 sub-phase | 4 个 bug 根因都是同一 canonical contract 缺失（id 公式 / live reconcile / sampling 投影 / fallback 语义），分 4 个 PR 修会让 reducer / status-helpers / AgentRouter 跨 PR 跨 review 拆碎，重蹈 Phase A→B 拆分时"按 phase 分步思考飘动"的覆辙。一个 PR 同时验证 4 个 bug 互不冲突 + 跨 helper 边界一致性。代价：PR 大，review iteration 可能多，但 alpha 验收一次到位 | 2026-05-10 (opus-47 R1) |
-| KD-26 | 愿景守护 SOP 漏检 "live state ≡ reducer canonical state" 不变量——Phase Z3/Z4 守护对照表（Ragdoll/Opus-46 跨 family）2 次都全绿但 Bug A+B 没 catch。守护 checklist 必须加："同 turn 多 event kind 链下 live UI bubble 数 ≡ hydrate canonical bubble 数" 的 alpha 实测脚本 | Z3 守护对照表只对照"刷新前后气泡数一致"（team lead最初 catch 的 Z3 失败场景），没考虑 Z3/Z4 自己引入的"helper id vs reducer id 公式不一致"。Z4 守护对照表也只看"placeholder id == hydrate id"假设的字面相等，没考虑 reducer kind suffix 路径。这是元-级 lesson：守护 SOP 不能只对照"上一次 catch 的症状"，要主动审 "你这次改的 contract 有没有跟周边 contract 漂"。Self-evolution 候选 → 待 close 后蒸馏到 vision guard skill | 2026-05-10 (opus-47 + Maine Coon 共识) |
+| KD-26 | 愿景守护 SOP 漏检 "live state ≡ reducer canonical state" 不变量——Phase Z3/Z4 守护对照表（Ragdoll/Opus-46 跨 family）2 次都全绿但 Bug A+B 没 catch。守护 checklist 必须加："同 turn 多 event kind 链下 live UI bubble 数 ≡ hydrate canonical bubble 数" 的 alpha 实测脚本 | Z3 守护对照表只对照"刷新前后气泡数一致"（operator最初 catch 的 Z3 失败场景），没考虑 Z3/Z4 自己引入的"helper id vs reducer id 公式不一致"。Z4 守护对照表也只看"placeholder id == hydrate id"假设的字面相等，没考虑 reducer kind suffix 路径。这是元-级 lesson：守护 SOP 不能只对照"上一次 catch 的症状"，要主动审 "你这次改的 contract 有没有跟周边 contract 漂"。Self-evolution 候选 → 待 close 后蒸馏到 vision guard skill | 2026-05-10 (opus-47 + Maine Coon 共识) |
 
 ## Review Gate
 
 - Phase A: helper contract + 单测 review（Maine Coon跨 family 必过）
 - Phase B: messages + queue 双迁移 review（强守护 F173 hotfix3 行为兼容）
-- Phase B (Bundle): 单一 PR review covering AC-B1~B16 一次性闭环；alpha 愿景守护（非作者非 reviewer 猫，对照team experience出对照表）放在 PR merge 后
+- Phase B (Bundle): 单一 PR review covering AC-B1~B16 一次性闭环；alpha 愿景守护（非作者非 reviewer 猫，对照operator experience出对照表）放在 PR merge 后
 
 ## Close Gate Report
 
 **Closed**: 2026-05-12 by Ragdoll/Opus-46 (愿景守护 + close)
-**Hard gate**: KD-23 satisfied — (1) 单测+集成测试+replay fixture 全过 (2) 愿景守护对照表 by Ragdoll/Opus-46（14/14 ✅）(3) alpha team lead 2026-05-12 确认"用了一下午没发现啥问题" (4) 代码 review Maine Coon APPROVE 全部 PR。
+**Hard gate**: KD-23 satisfied — (1) 单测+集成测试+replay fixture 全过 (2) 愿景守护对照表 by Ragdoll/Opus-46（14/14 ✅）(3) alpha operator 2026-05-12 确认"用了一下午没发现啥问题" (4) 代码 review Maine Coon APPROVE 全部 PR。
 **Harness feedback**: none — F194 非 harness/skill/MCP feature，无 eval contract 触发条件。
 
 ### 愿景守护对照表
@@ -600,9 +601,9 @@ Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问�
 **守护猫**: Ragdoll/Opus-46（非 author、非 reviewer，跨 4.6 视角）
 **Runtime HEAD**: `0807f4165`（含 Phase Z merge `7443d049e`）
 
-| team experience | AC | 验证方式 | 状态 | Evidence |
+| operator experience | AC | 验证方式 | 状态 | Evidence |
 |---|---|---|---|---|
-| R1 "现在活跃的线程他们气泡都是裂的" | AC-Z1+B5+B15 | runtime API + visual | ✅ | `/queue` = 1 active no ghost；team lead 05:11 重启后 visual confirm |
+| R1 "现在活跃的线程他们气泡都是裂的" | AC-Z1+B5+B15 | runtime API + visual | ✅ | `/queue` = 1 active no ghost；operator 05:11 重启后 visual confirm |
 | R2 "讲讲为什么"（根因可解释、可观测） | AC-B11~B13 | structured events audit | ✅ | 3 event kinds, 10-field schema, `trackerSlotPresent` = actual presence |
 | R3 "Ragdoll 47 方向 ok"（helper-based unified read model） | AC-A1+A2 | single helper audit | ✅ | `getThreadLiveInvocations` in both `messages.ts:1466` + `queue.ts:143` |
 | R4 "不能只在前端打补丁，根因层解决" | AC-A1+Z2 | dual migration + producer | ✅ | 双消费方迁移完成 + `RouteChainCompletionTracker` + `ensureTerminalStatus` |
@@ -610,11 +611,11 @@ Phase Z9 进 review 期间team lead catch 一个相邻但独立子系统的问�
 ### 验收 evidence 三件套
 
 1. **Spec/Unit/Integration tests** — F194/Z focused 95/95 + biome clean + wider regression（messages/draft-merge/record-store/reconcileZombies）一并过
-2. **Alpha runtime acceptance** — team lead 2026-05-09 05:11 重启 runtime（HEAD `0807f4165` PID `43143`）+ 多轮 active multi-cat thread visual confirm 不裂；opus-47 只读诊断 `/queue.activeInvocations[0].startedAt` 反映 child 真实启动时间（不再是 parent.updatedAt 旧时间）
+2. **Alpha runtime acceptance** — operator 2026-05-09 05:11 重启 runtime（HEAD `0807f4165` PID `43143`）+ 多轮 active multi-cat thread visual confirm 不裂；opus-47 只读诊断 `/queue.activeInvocations[0].startedAt` 反映 child 真实启动时间（不再是 parent.updatedAt 旧时间）
 3. **愿景守护对照表** — 见上表（4 行全 ✅）
 
 ### Review chain
 
 - 本地 review: Maine Coon/codex GPT-5.5 — R1→R6 APPROVE
-- 云端 review: chatgpt-codex-connector — 6 轮（R1 P1 → R2 P1 → R3 LGTM → R4 P2 → R5 P2 → R6 LGTM "Swish!"）
-- 愿景守护: Ragdoll/Opus-46（孟加拉猫家族）— 跨族 + 4.6 视角
+- remote review: chatgpt-codex-connector — 6 轮（R1 P1 → R2 P1 → R3 LGTM → R4 P2 → R5 P2 → R6 LGTM "Swish!"）
+- 愿景守护: Ragdoll/Opus-46（Bengal家族）— 跨族 + 4.6 视角

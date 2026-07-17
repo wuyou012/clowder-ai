@@ -3,18 +3,20 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { describe, it, mock } from 'node:test';
 import Fastify from 'fastify';
+import { LimbRegistry } from '../dist/domains/limb/LimbRegistry.js';
 import { PluginRegistry, resourceCapId } from '../dist/domains/plugin/PluginRegistry.js';
 import {
   PluginResourceActivator,
   rehydrateEnabledPluginLimbs,
   withPersistedLimbNodeId,
 } from '../dist/domains/plugin/PluginResourceActivator.js';
+import { writePluginConfig } from '../dist/domains/plugin/plugin-config-store.js';
 import { BUILTIN_PLUGIN_IDS, parsePluginManifest, validateEnvSafety } from '../dist/domains/plugin/plugin-manifest.js';
 import { registerPluginRoutes } from '../dist/routes/plugin-routes.js';
 
@@ -278,7 +280,7 @@ describe('parsePluginManifest security', () => {
     assert.equal(manifest.resources[1].type, 'skill');
   });
 
-  it('filters out deferred schedule resource type', () => {
+  it('parses schedule resource with factoryId and name', () => {
     tmpDir = mkdtempSync(join(os.tmpdir(), 'plugin-test-'));
     const yamlPath = writeTmpManifest(
       tmpDir,
@@ -289,14 +291,52 @@ describe('parsePluginManifest security', () => {
         'version: 1.0.0',
         'resources:',
         '  - type: schedule',
-        '    path: cron.yml',
+        '    name: my-poller',
+        '    factoryId: test.my-poller',
         '  - type: skill',
         '    path: skills/test',
       ].join('\n'),
     );
     const manifest = parsePluginManifest(yamlPath);
-    assert.equal(manifest.resources.length, 1, 'schedule should be filtered');
-    assert.equal(manifest.resources[0].type, 'skill');
+    assert.equal(manifest.resources.length, 2, 'schedule should be parsed as first-class resource');
+    assert.equal(manifest.resources[0].type, 'schedule');
+    assert.equal(manifest.resources[0].factoryId, 'test.my-poller');
+    assert.equal(manifest.resources[0].name, 'my-poller');
+    assert.equal(manifest.resources[1].type, 'skill');
+  });
+
+  it('rejects schedule resource without factoryId', () => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), 'plugin-test-'));
+    const yamlPath = writeTmpManifest(
+      tmpDir,
+      'test-plugin',
+      [
+        'id: test-plugin',
+        'name: Test',
+        'version: 1.0.0',
+        'resources:',
+        '  - type: schedule',
+        '    name: my-poller',
+      ].join('\n'),
+    );
+    assert.throws(() => parsePluginManifest(yamlPath), /factoryId/);
+  });
+
+  it('rejects schedule resource without name', () => {
+    tmpDir = mkdtempSync(join(os.tmpdir(), 'plugin-test-'));
+    const yamlPath = writeTmpManifest(
+      tmpDir,
+      'test-plugin',
+      [
+        'id: test-plugin',
+        'name: Test',
+        'version: 1.0.0',
+        'resources:',
+        '  - type: schedule',
+        '    factoryId: test.poller',
+      ].join('\n'),
+    );
+    assert.throws(() => parsePluginManifest(yamlPath), /name/);
   });
 
   it('rejects unknown resource types instead of silently dropping them', () => {
@@ -541,6 +581,256 @@ describe('parsePluginManifest security', () => {
   });
 });
 
+describe('PluginResourceActivator config handling', () => {
+  function createActivator(projectRoot, factory) {
+    let capabilities = { version: 1, capabilities: [] };
+    const limbRegistry = new LimbRegistry();
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir: join(projectRoot, 'plugins'),
+      limbRegistry,
+      readCapabilities: async () => capabilities,
+      writeCapabilities: async (next) => {
+        capabilities = next;
+      },
+      withCapabilityLock: async (fn) => fn(),
+      limbAdapterFactory: factory,
+    });
+    return { activator, getCapabilities: () => capabilities, limbRegistry };
+  }
+
+  it('uses env fallback for plugin MCP and limb activation', async () => {
+    const projectRoot = mkdtempSync(join(os.tmpdir(), 'plugin-config-test-'));
+    const manifest = {
+      id: 'test-plugin-env-fallback',
+      name: 'Test',
+      version: '1.0.0',
+      builtin: false,
+      config: [{ envName: 'TEST_PLUGIN_ENV_FALLBACK_TOKEN', label: 'Token', sensitive: true, required: true }],
+      resources: [
+        { type: 'mcp', name: 'server', command: 'node', args: ['server.js'] },
+        { type: 'limb', path: 'limb.yml' },
+      ],
+    };
+    mkdirSync(join(projectRoot, 'plugins', manifest.id), { recursive: true });
+    writeFileSync(join(projectRoot, 'plugins', manifest.id, 'limb.yml'), 'nodeId: test-node\n');
+
+    const seenTokens = [];
+    const { activator, getCapabilities, limbRegistry } = createActivator(
+      projectRoot,
+      async (_pluginId, _yamlPath, pluginConfig) => {
+        seenTokens.push(pluginConfig.TEST_PLUGIN_ENV_FALLBACK_TOKEN);
+        return {
+          nodeId: 'test-node',
+          displayName: pluginConfig.TEST_PLUGIN_ENV_FALLBACK_TOKEN,
+          platform: 'test',
+          capabilities: [{ cap: 'test', commands: ['test.run'], authLevel: 'free' }],
+          invoke: async () => ({ success: true }),
+        };
+      },
+    );
+
+    process.env.TEST_PLUGIN_ENV_FALLBACK_TOKEN = 'from-env';
+    try {
+      await activator.enablePlugin(manifest);
+    } finally {
+      delete process.env.TEST_PLUGIN_ENV_FALLBACK_TOKEN;
+    }
+
+    const mcpEntry = getCapabilities().capabilities.find(
+      (c) => c.id === resourceCapId(manifest.id, manifest.resources[0]),
+    );
+    assert.equal(mcpEntry?.mcpServer?.env?.TEST_PLUGIN_ENV_FALLBACK_TOKEN, 'from-env');
+    assert.deepEqual(seenTokens, ['from-env']);
+    assert.equal(limbRegistry.getNode('test-node')?.displayName, 'from-env');
+  });
+
+  it('refreshes enabled limb nodes after plugin config changes', async () => {
+    const projectRoot = mkdtempSync(join(os.tmpdir(), 'plugin-config-test-'));
+    const manifest = {
+      id: 'test-plugin-sync',
+      name: 'Test',
+      version: '1.0.0',
+      builtin: false,
+      config: [{ envName: 'TEST_PLUGIN_SYNC_TOKEN', label: 'Token', sensitive: true, required: true }],
+      resources: [{ type: 'limb', path: 'limb.yml' }],
+    };
+    mkdirSync(join(projectRoot, 'plugins', manifest.id), { recursive: true });
+    writeFileSync(join(projectRoot, 'plugins', manifest.id, 'limb.yml'), 'nodeId: sync-node\n');
+
+    const { activator, limbRegistry } = createActivator(projectRoot, async (_pluginId, _yamlPath, pluginConfig) => ({
+      nodeId: 'sync-node',
+      displayName: pluginConfig.TEST_PLUGIN_SYNC_TOKEN,
+      platform: 'test',
+      capabilities: [{ cap: 'test', commands: ['test.run'], authLevel: 'free' }],
+      invoke: async () => ({ success: true }),
+    }));
+
+    process.env.TEST_PLUGIN_SYNC_TOKEN = 'old-token';
+    try {
+      await activator.enablePlugin(manifest);
+    } finally {
+      delete process.env.TEST_PLUGIN_SYNC_TOKEN;
+    }
+    assert.equal(limbRegistry.getNode('sync-node')?.displayName, 'old-token');
+
+    writePluginConfig(projectRoot, manifest.id, [{ name: 'TEST_PLUGIN_SYNC_TOKEN', value: 'fresh-token' }]);
+    await activator.syncPluginEnv(manifest);
+
+    assert.equal(limbRegistry.getNode('sync-node')?.displayName, 'fresh-token');
+  });
+
+  it('keeps registered limb aligned with persisted config when config refresh write fails', async () => {
+    const projectRoot = mkdtempSync(join(os.tmpdir(), 'plugin-config-test-'));
+    const manifest = {
+      id: 'test-plugin-sync-write-fail',
+      name: 'Test',
+      version: '1.0.0',
+      builtin: false,
+      config: [{ envName: 'TEST_PLUGIN_SYNC_WRITE_FAIL_TOKEN', label: 'Token', sensitive: true, required: true }],
+      resources: [{ type: 'limb', path: 'limb.yml' }],
+    };
+    mkdirSync(join(projectRoot, 'plugins', manifest.id), { recursive: true });
+    writeFileSync(join(projectRoot, 'plugins', manifest.id, 'limb.yml'), 'nodeId: sync-node\n');
+
+    let capabilities = { version: 1, capabilities: [] };
+    let failRefreshWrite = false;
+    const limbRegistry = new LimbRegistry();
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir: join(projectRoot, 'plugins'),
+      limbRegistry,
+      readCapabilities: async () => structuredClone(capabilities),
+      writeCapabilities: async (next) => {
+        const writesFreshNode = next.capabilities.some((cap) => cap.limbNodeId === 'fresh-node');
+        if (failRefreshWrite && writesFreshNode) {
+          throw new Error('simulated config write failure');
+        }
+        capabilities = structuredClone(next);
+      },
+      withCapabilityLock: async (fn) => fn(),
+      limbAdapterFactory: async (_pluginId, _yamlPath, pluginConfig) => {
+        const token = pluginConfig.TEST_PLUGIN_SYNC_WRITE_FAIL_TOKEN;
+        return {
+          nodeId: token === 'fresh-token' ? 'fresh-node' : 'old-node',
+          displayName: token,
+          platform: 'test',
+          capabilities: [{ cap: 'test', commands: ['test.run'], authLevel: 'free' }],
+          invoke: async () => ({ success: true }),
+        };
+      },
+    });
+
+    process.env.TEST_PLUGIN_SYNC_WRITE_FAIL_TOKEN = 'old-token';
+    try {
+      await activator.enablePlugin(manifest);
+    } finally {
+      delete process.env.TEST_PLUGIN_SYNC_WRITE_FAIL_TOKEN;
+    }
+    assert.equal(capabilities.capabilities[0]?.limbNodeId, 'old-node');
+    assert.equal(limbRegistry.getNode('old-node')?.displayName, 'old-token');
+
+    writePluginConfig(projectRoot, manifest.id, [{ name: 'TEST_PLUGIN_SYNC_WRITE_FAIL_TOKEN', value: 'fresh-token' }]);
+    failRefreshWrite = true;
+    await assert.rejects(() => activator.syncPluginEnv(manifest), /simulated config write failure/);
+
+    assert.equal(capabilities.capabilities[0]?.limbNodeId, 'old-node');
+    assert.equal(limbRegistry.getNode('old-node')?.displayName, 'old-token');
+    assert.equal(limbRegistry.getNode('fresh-node'), undefined);
+  });
+
+  it('refreshes enabled limb nodes with legacy backslash capability ids after plugin config changes', async () => {
+    const projectRoot = mkdtempSync(join(os.tmpdir(), 'plugin-config-test-'));
+    const manifest = {
+      id: 'test-plugin-sync-legacy',
+      name: 'Test',
+      version: '1.0.0',
+      builtin: false,
+      config: [{ envName: 'TEST_PLUGIN_SYNC_LEGACY_TOKEN', label: 'Token', sensitive: true, required: true }],
+      resources: [{ type: 'limb', path: 'limbs/node.yaml' }],
+    };
+    mkdirSync(join(projectRoot, 'plugins', manifest.id, 'limbs'), { recursive: true });
+    writeFileSync(join(projectRoot, 'plugins', manifest.id, 'limbs', 'node.yaml'), 'nodeId: sync-node\n');
+
+    const { activator, getCapabilities, limbRegistry } = createActivator(
+      projectRoot,
+      async (_pluginId, _yamlPath, pluginConfig) => ({
+        nodeId: 'sync-node',
+        displayName: pluginConfig.TEST_PLUGIN_SYNC_LEGACY_TOKEN,
+        platform: 'test',
+        capabilities: [{ cap: 'test', commands: ['test.run'], authLevel: 'free' }],
+        invoke: async () => ({ success: true }),
+      }),
+    );
+    getCapabilities().capabilities.push({
+      id: 'plugin:test-plugin-sync-legacy:limbs\\node.yaml',
+      type: 'limb',
+      enabled: true,
+      source: 'cat-cafe',
+      pluginId: manifest.id,
+      limbNodeId: 'sync-node',
+    });
+    await limbRegistry.register({
+      nodeId: 'sync-node',
+      displayName: 'old-token',
+      platform: 'test',
+      capabilities: [{ cap: 'test', commands: ['test.run'], authLevel: 'free' }],
+      invoke: async () => ({ success: true }),
+    });
+
+    writePluginConfig(projectRoot, manifest.id, [{ name: 'TEST_PLUGIN_SYNC_LEGACY_TOKEN', value: 'fresh-token' }]);
+    await activator.syncPluginEnv(manifest);
+
+    assert.equal(limbRegistry.getNode('sync-node')?.displayName, 'fresh-token');
+  });
+
+  it('rejects limb source symlinks that escape the plugin root during config refresh', async () => {
+    const projectRoot = mkdtempSync(join(os.tmpdir(), 'plugin-config-test-'));
+    const manifest = {
+      id: 'test-plugin-sync-symlink',
+      name: 'Test',
+      version: '1.0.0',
+      builtin: false,
+      config: [{ envName: 'TEST_PLUGIN_SYNC_SYMLINK_TOKEN', label: 'Token', sensitive: true, required: true }],
+      resources: [{ type: 'limb', path: 'limb.yml' }],
+    };
+    const pluginRoot = join(projectRoot, 'plugins', manifest.id);
+    const limbPath = join(pluginRoot, 'limb.yml');
+    const outsideDir = mkdtempSync(join(os.tmpdir(), 'plugin-config-outside-'));
+    const outsideYaml = join(outsideDir, 'node.yaml');
+    mkdirSync(pluginRoot, { recursive: true });
+    writeFileSync(limbPath, 'nodeId: sync-node\n');
+    writeFileSync(outsideYaml, ['nodeId: outside-node', 'displayName: Outside', 'platform: test'].join('\n'));
+
+    const adapterPaths = [];
+    const { activator, limbRegistry } = createActivator(projectRoot, async (_pluginId, yamlPath, pluginConfig) => {
+      adapterPaths.push(yamlPath);
+      return {
+        nodeId: 'sync-node',
+        displayName: pluginConfig.TEST_PLUGIN_SYNC_SYMLINK_TOKEN,
+        platform: 'test',
+        capabilities: [{ cap: 'test', commands: ['test.run'], authLevel: 'free' }],
+        invoke: async () => ({ success: true }),
+      };
+    });
+
+    process.env.TEST_PLUGIN_SYNC_SYMLINK_TOKEN = 'old-token';
+    try {
+      await activator.enablePlugin(manifest);
+    } finally {
+      delete process.env.TEST_PLUGIN_SYNC_SYMLINK_TOKEN;
+    }
+    fsModule.unlinkSync(limbPath);
+    symlinkSync(outsideYaml, limbPath);
+
+    writePluginConfig(projectRoot, manifest.id, [{ name: 'TEST_PLUGIN_SYNC_SYMLINK_TOKEN', value: 'fresh-token' }]);
+    await assert.rejects(() => activator.syncPluginEnv(manifest), /must resolve inside plugin root/);
+
+    assert.equal(adapterPaths.length, 1, 'escaping refresh path must be rejected before adapter load');
+    assert.equal(limbRegistry.getNode('sync-node')?.displayName, 'old-token');
+  });
+});
+
 describe('validateEnvSafety security', () => {
   it('community plugin cannot use unprefixed env var', () => {
     const manifest = {
@@ -661,7 +951,8 @@ describe('PluginResourceActivator skill safety', () => {
 
     assert.equal(enableResult.status, 'success');
     const codexLink = join(projectRoot, '.codex', 'skills', 'plugin-skill');
-    assert.equal(readlinkSync(codexLink), skillSourceDir);
+    // F228: mountSkillForProject creates relative symlinks; compare resolved targets
+    assert.equal(realpathSync(codexLink), realpathSync(skillSourceDir));
     assert.equal(existsSync(join(projectRoot, '.codex', 'skills', 'skills')), false);
     assert.equal(persisted.capabilities[0].id, 'plugin-skill');
     assert.equal(persisted.capabilities[0].enabled, true);
@@ -670,11 +961,124 @@ describe('PluginResourceActivator skill safety', () => {
 
     assert.equal(disableResult.status, 'success');
     assert.equal(existsSync(codexLink), false);
-    assert.equal(persisted.capabilities[0].id, 'plugin-skill');
-    assert.equal(persisted.capabilities[0].enabled, false);
+    // Plugin skills are fully purged from capabilities on deactivation
+    assert.equal(
+      persisted.capabilities.find((c) => c.id === 'plugin-skill' && c.type === 'skill'),
+      undefined,
+      'plugin skill entry should be removed, not just disabled',
+    );
   });
 
-  it('rejects plugin skill activation through provider skills root symlink', async () => {
+  it('inherits main default mount rules when activating external project skills', async () => {
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-root-'));
+    const mainRoot = join(root, 'main');
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'external-project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'plugin-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    mkdirSync(join(mainRoot, '.cat-cafe'), { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+    writeFileSync(
+      join(mainRoot, '.cat-cafe', 'capabilities.json'),
+      JSON.stringify({
+        version: 2,
+        capabilities: [],
+        defaultMountRules: [
+          { name: 'claude', path: '.claude/skills', enabled: true },
+          { name: 'codex', path: '.codex/skills', enabled: false },
+          { name: 'gemini', path: '.gemini/skills', enabled: false },
+          { name: 'kimi', path: '.kimi/skills', enabled: false },
+          { name: 'acp', path: '.acp/skills', enabled: true },
+        ],
+      }),
+    );
+
+    let persisted = { version: 1, capabilities: [] };
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      resolveMainProjectRoot: () => mainRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/plugin-skill' }],
+    };
+
+    const enableResult = await activator.enablePlugin(manifest);
+
+    assert.equal(enableResult.status, 'success');
+    assert.equal(realpathSync(join(projectRoot, '.claude', 'skills', 'plugin-skill')), realpathSync(skillSourceDir));
+    assert.equal(realpathSync(join(projectRoot, '.acp', 'skills', 'plugin-skill')), realpathSync(skillSourceDir));
+    assert.equal(
+      existsSync(join(projectRoot, '.codex', 'skills', 'plugin-skill')),
+      false,
+      'plugin skill activation must honor disabled default providers inherited from main project',
+    );
+  });
+
+  it('plugin skill activation always mounts to all active mount points', async () => {
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-root-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'plugin-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+
+    // Even with a pre-existing disabled entry that had restricted mountPaths,
+    // plugin activation always mounts to all active mount points.
+    let persisted = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'plugin-skill',
+          type: 'skill',
+          enabled: false,
+          source: 'cat-cafe',
+          pluginId: 'test-plugin',
+          mountPaths: ['claude'],
+        },
+      ],
+    };
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/plugin-skill' }],
+    };
+
+    const enableResult = await activator.enablePlugin(manifest);
+
+    assert.equal(enableResult.status, 'success');
+    assert.ok(existsSync(join(projectRoot, '.claude', 'skills', 'plugin-skill')));
+    assert.ok(existsSync(join(projectRoot, '.codex', 'skills', 'plugin-skill')));
+    assert.equal(persisted.capabilities[0].enabled, true);
+    // F228: mountPaths is always explicit — re-enable resets to all active targets
+    assert.deepEqual(persisted.capabilities[0].mountPaths, ['claude', 'codex', 'gemini', 'kimi']);
+  });
+
+  it('registers plugin skill but does not mount through provider skills root symlink', async () => {
     const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-root-'));
     const pluginsDir = join(root, 'plugins');
     const projectRoot = join(root, 'project');
@@ -694,20 +1098,89 @@ describe('PluginResourceActivator skill safety', () => {
       config: [],
       resources: [{ type: 'skill', path: 'skills/plugin-skill' }],
     };
+    let persisted = { version: 1, capabilities: [] };
     const activator = new PluginResourceActivator({
       resolveProjectRoot: () => projectRoot,
       pluginsDir,
       limbRegistry: {},
-      readCapabilities: async () => ({ version: 1, capabilities: [] }),
-      writeCapabilities: async () => {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
       withCapabilityLock: async (fn) => fn(),
     });
 
     const result = await activator.enablePlugin(manifest);
 
-    assert.equal(result.status, 'failed');
-    assert.match(result.resources[0].error, /directory-level skills symlink/);
+    assert.equal(result.status, 'success');
+    assert.equal(result.resources[0].ok, true);
     assert.equal(existsSync(join(sharedSkillsDir, 'plugin-skill')), false);
+    assert.equal(persisted.capabilities[0].id, 'plugin-skill');
+    assert.equal(persisted.capabilities[0].enabled, true);
+    assert.equal(persisted.capabilities[0].skillsSource, '../plugins/test-plugin/skills');
+  });
+
+  it('re-enables plugin skill to all mount points after disable→enable cycle', async () => {
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-reenable-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'plugin-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+
+    let persisted = { version: 1, capabilities: [] };
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/plugin-skill' }],
+    };
+
+    // 1. Enable: should mount to all default providers
+    const enable1 = await activator.enablePlugin(manifest);
+    assert.equal(enable1.status, 'success');
+    assert.ok(existsSync(join(projectRoot, '.claude', 'skills', 'plugin-skill')));
+    assert.ok(existsSync(join(projectRoot, '.codex', 'skills', 'plugin-skill')));
+
+    // 2. Disable: removeSkill purges plugin skill entry and removes symlinks
+    const disable = await activator.disablePlugin(manifest);
+    assert.equal(disable.status, 'success');
+    assert.equal(
+      persisted.capabilities.find((c) => c.id === 'plugin-skill' && c.type === 'skill'),
+      undefined,
+      'plugin skill entry should be fully removed on disable',
+    );
+    assert.equal(existsSync(join(projectRoot, '.claude', 'skills', 'plugin-skill')), false);
+
+    // 3. Re-enable: must mount to ALL mount points again, not zero
+    const enable2 = await activator.enablePlugin(manifest);
+    assert.equal(enable2.status, 'success');
+    assert.ok(
+      existsSync(join(projectRoot, '.claude', 'skills', 'plugin-skill')),
+      're-enable must mount to claude (was blocked by stale mountPaths: [])',
+    );
+    assert.ok(
+      existsSync(join(projectRoot, '.codex', 'skills', 'plugin-skill')),
+      're-enable must mount to codex (was blocked by stale mountPaths: [])',
+    );
+    // Config must not have stale empty mountPaths
+    assert.equal(persisted.capabilities[0].enabled, true);
+    assert.ok(
+      !Array.isArray(persisted.capabilities[0].mountPaths) || persisted.capabilities[0].mountPaths.length > 0,
+      'config must not retain stale mountPaths: [] after re-enable',
+    );
   });
 
   it('rejects plugin skill source symlinks that escape the plugin root', async () => {
@@ -861,6 +1334,64 @@ describe('PluginResourceActivator skill safety', () => {
     assert.equal(existsSync(join(projectRoot, '.codex', 'skills', 'plugin-skill')), false);
   });
 
+  it('preserves existing plugin skill mounts when activation capability write fails', async () => {
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-root-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'plugin-skill');
+    const codexLink = join(projectRoot, '.codex', 'skills', 'plugin-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    mkdirSync(join(projectRoot, '.codex', 'skills'), { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+    symlinkSync(skillSourceDir, codexLink, 'dir');
+
+    let persisted = {
+      version: 1,
+      capabilities: [
+        {
+          id: 'plugin-skill',
+          type: 'skill',
+          enabled: true,
+          source: 'cat-cafe',
+          pluginId: 'test-plugin',
+        },
+      ],
+    };
+    let writes = 0;
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+        if (writes++ === 0) throw new Error('generateCliConfigs failed');
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+
+    const result = await activator.enablePlugin({
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/plugin-skill' }],
+    });
+
+    assert.equal(result.status, 'failed');
+    assert.equal(realpathSync(codexLink), realpathSync(skillSourceDir));
+    assert.deepEqual(persisted.capabilities, [
+      {
+        id: 'plugin-skill',
+        type: 'skill',
+        enabled: true,
+        source: 'cat-cafe',
+        pluginId: 'test-plugin',
+      },
+    ]);
+  });
+
   it('persists plugin MCP workingDir and env from resolved config sources', async () => {
     const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-root-'));
     const pluginsDir = join(root, 'plugins');
@@ -996,6 +1527,242 @@ describe('PluginResourceActivator skill safety', () => {
       ['plugin:other-plugin:keep'],
     );
     assert.deepEqual(deregistered, ['old-node']);
+  });
+});
+
+describe('PluginResourceActivator conflict & rollback (review P1-2, P2-1)', () => {
+  it('fails plugin skill activation when all mount points conflict', async () => {
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-p12-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'my-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+
+    // Create user-owned directories at ALL standard provider paths → all conflict
+    for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
+      const userDir = join(projectRoot, `.${provider}`, 'skills', 'my-skill');
+      mkdirSync(userDir, { recursive: true });
+      writeFileSync(join(userDir, 'user-file.md'), 'user content');
+    }
+
+    let persisted = { version: 1, capabilities: [] };
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/my-skill' }],
+    };
+
+    const result = await activator.enablePlugin(manifest);
+
+    assert.equal(result.status, 'failed', 'all-conflict activation should fail the required skill resource');
+    const skillResult = result.resources?.find((r) => r.type === 'skill');
+    assert.ok(skillResult, 'skill result should exist in resources');
+    assert.equal(skillResult.ok, false, 'skill activation should report ok=false');
+    assert.match(skillResult.error ?? '', /All skill mount points conflict/);
+    assert.deepEqual(persisted.capabilities, [], 'failed all-conflict activation should roll back capability config');
+    for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
+      assert.equal(
+        existsSync(join(projectRoot, `.${provider}`, 'skills', 'my-skill', 'user-file.md')),
+        true,
+        `activation must not replace user-owned ${provider} conflict`,
+      );
+    }
+  });
+
+  it('does not fail plugin skill activation when an existing managed mount already works', async () => {
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-existing-mount-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'my-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+
+    const claudeLink = join(projectRoot, '.claude', 'skills', 'my-skill');
+    mkdirSync(dirname(claudeLink), { recursive: true });
+    symlinkSync(relative(dirname(claudeLink), skillSourceDir), claudeLink);
+    const codexConflict = join(projectRoot, '.codex', 'skills', 'my-skill');
+    mkdirSync(codexConflict, { recursive: true });
+    writeFileSync(join(codexConflict, 'user-file.md'), 'user content');
+    mkdirSync(join(projectRoot, '.cat-cafe'), { recursive: true });
+    writeFileSync(
+      join(projectRoot, '.cat-cafe', 'capabilities.json'),
+      JSON.stringify(
+        {
+          version: 2,
+          capabilities: [],
+          mountRules: [
+            { name: 'claude', path: '.claude/skills', enabled: true },
+            { name: 'codex', path: '.codex/skills', enabled: true },
+            { name: 'gemini', path: '.gemini/skills', enabled: false },
+            { name: 'kimi', path: '.kimi/skills', enabled: false },
+          ],
+        },
+        null,
+        2,
+      ),
+    );
+
+    let persisted = { version: 1, capabilities: [] };
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/my-skill' }],
+    };
+
+    const result = await activator.enablePlugin(manifest);
+
+    assert.equal(result.status, 'success', 'existing managed mount means this is not an all-conflict failure');
+    assert.equal(result.resources?.find((r) => r.type === 'skill')?.ok, true);
+    assert.equal(persisted.capabilities[0].enabled, true);
+    assert.equal(
+      existsSync(join(codexConflict, 'user-file.md')),
+      true,
+      'activation must preserve conflicting user dir',
+    );
+  });
+
+  it('rolls back plugin skill config when mount operation throws (cloud review P2 round 5)', async () => {
+    // addSkill writes config BEFORE mounting (config-first). If mountSkillSymlinks throws
+    // (e.g. permission denied on mkdir), the activator must roll back config so the skill
+    // doesn't appear enabled in capabilities while having zero working mounts.
+    if (process.platform === 'win32') return; // chmod semantics differ on Windows
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-mount-throw-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'my-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+    mkdirSync(join(projectRoot, '.cat-cafe'), { recursive: true });
+    // Create provider dirs as read-only (r-x) so mkdir for skills/ subdir throws EACCES
+    for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
+      const providerDir = join(projectRoot, `.${provider}`);
+      mkdirSync(providerDir, { recursive: true });
+      chmodSync(providerDir, 0o555);
+    }
+    let persisted = { version: 1, capabilities: [] };
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => structuredClone(persisted),
+      writeCapabilities: async (config) => {
+        persisted = structuredClone(config);
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/my-skill' }],
+    };
+    const result = await activator.enablePlugin(manifest);
+    assert.equal(result.status, 'failed', 'mount throw should cause activation failure');
+    assert.deepEqual(persisted.capabilities, [], 'config must be rolled back on mount throw');
+    // Cleanup: restore permissions before temp dir cleanup
+    for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
+      chmodSync(join(projectRoot, `.${provider}`), 0o755);
+    }
+  });
+
+  it('P2-1: rollback cleans up custom mount alias symlinks (not just standard providers)', async () => {
+    // Original bug: rollback used mountRules.mountPoints[m.mountPointId].path to rebuild
+    // the link path, which misses custom aliases entirely. Fix uses m.path directly.
+    // This test disables ALL standard providers and uses ONLY a custom alias (acp)
+    // so the old buggy code would leave the symlink behind.
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-activator-p21-'));
+    const pluginsDir = join(root, 'plugins');
+    const projectRoot = join(root, 'project');
+    const skillSourceDir = join(pluginsDir, 'test-plugin', 'skills', 'rollback-skill');
+    mkdirSync(skillSourceDir, { recursive: true });
+    writeFileSync(join(skillSourceDir, 'SKILL.md'), '# Test Skill\n');
+
+    // Write capabilities.json with custom-only mount rules (standard providers disabled)
+    const catCafeDir = join(projectRoot, '.cat-cafe');
+    mkdirSync(catCafeDir, { recursive: true });
+    writeFileSync(
+      join(catCafeDir, 'capabilities.json'),
+      JSON.stringify({
+        version: 2,
+        capabilities: [],
+        mountRules: [
+          { name: 'claude', path: '.claude/skills', enabled: false },
+          { name: 'codex', path: '.codex/skills', enabled: false },
+          { name: 'gemini', path: '.gemini/skills', enabled: false },
+          { name: 'kimi', path: '.kimi/skills', enabled: false },
+          { name: 'acp', path: '.acp/skills', enabled: true },
+        ],
+      }),
+    );
+
+    const activator = new PluginResourceActivator({
+      resolveProjectRoot: () => projectRoot,
+      pluginsDir,
+      limbRegistry: {},
+      readCapabilities: async () => {
+        // Read real config for mount rules resolution, but fail on write
+        const { readCapabilitiesConfig } = await import('../dist/config/capabilities/capability-orchestrator.js');
+        return readCapabilitiesConfig(projectRoot);
+      },
+      writeCapabilities: async () => {
+        throw new Error('Simulated config write failure');
+      },
+      withCapabilityLock: async (fn) => fn(),
+    });
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+      version: '1.0.0',
+      builtin: false,
+      config: [],
+      resources: [{ type: 'skill', path: 'skills/rollback-skill' }],
+    };
+
+    const result = await activator.enablePlugin(manifest);
+
+    assert.equal(result.status, 'failed', 'config write failure should fail activation');
+    const skillResult = result.resources?.find((r) => r.type === 'skill');
+    assert.equal(skillResult?.ok, false, 'skill activation should report ok=false');
+    assert.ok(skillResult?.error?.includes('Simulated config write failure'), 'error should propagate');
+
+    // The custom acp symlink must be cleaned up by rollback
+    const acpLink = join(projectRoot, '.acp', 'skills', 'rollback-skill');
+    assert.equal(existsSync(acpLink), false, 'custom alias symlink should be removed by rollback');
+
+    // Standard providers were disabled — no symlinks should exist there either
+    for (const provider of ['claude', 'codex', 'gemini', 'kimi']) {
+      const linkPath = join(projectRoot, `.${provider}`, 'skills', 'rollback-skill');
+      assert.equal(existsSync(linkPath), false, `disabled ${provider} should have no symlink`);
+    }
   });
 });
 
@@ -1684,7 +2451,12 @@ describe('plugin routes safety', () => {
       limbRegistry: {
         getNodeHandle(nodeId) {
           if (nodeId !== 'yaml-node') return null;
-          return { healthCheck: async () => 'online' };
+          return {};
+        },
+        invoke: async (nodeId, command) => {
+          assert.equal(nodeId, 'yaml-node');
+          assert.equal(command, 'check_status');
+          return { success: true, data: { status: 'online' } };
         },
       },
       pluginsDir,
@@ -1769,7 +2541,12 @@ describe('plugin routes safety', () => {
       limbRegistry: {
         getNodeHandle(nodeId) {
           if (nodeId !== 'persisted-node') return null;
-          return { healthCheck: async () => 'online' };
+          return {};
+        },
+        invoke: async (nodeId, command) => {
+          assert.equal(nodeId, 'persisted-node');
+          assert.equal(command, 'check_status');
+          return { success: true, data: { status: 'online' } };
         },
       },
       pluginsDir,
@@ -1788,6 +2565,82 @@ describe('plugin routes safety', () => {
       });
       assert.equal(res.statusCode, 200, res.payload);
       assert.deepEqual(JSON.parse(res.payload), { ok: true, status: 'online' });
+    } finally {
+      await app.close();
+      if (previousOwner === undefined) delete process.env.DEFAULT_OWNER_USER_ID;
+      else process.env.DEFAULT_OWNER_USER_ID = previousOwner;
+      if (previousConfigRoot === undefined) delete process.env.CAT_CAFE_CONFIG_ROOT;
+      else process.env.CAT_CAFE_CONFIG_ROOT = previousConfigRoot;
+    }
+  });
+
+  it('runs limb health checks through registry auth gates instead of direct node invoke', async () => {
+    const previousOwner = process.env.DEFAULT_OWNER_USER_ID;
+    const previousConfigRoot = process.env.CAT_CAFE_CONFIG_ROOT;
+    process.env.DEFAULT_OWNER_USER_ID = 'owner-user';
+    const root = mkdtempSync(join(os.tmpdir(), 'plugin-route-health-'));
+    const projectRoot = join(root, 'project');
+    const pluginsDir = join(root, 'plugins');
+    mkdirSync(projectRoot, { recursive: true });
+    mkdirSync(join(pluginsDir, 'test-plugin', 'limbs'), { recursive: true });
+    process.env.CAT_CAFE_CONFIG_ROOT = projectRoot;
+    writeFileSync(
+      join(pluginsDir, 'test-plugin', 'limbs', 'node.yaml'),
+      [
+        'nodeId: yaml-node',
+        'displayName: YAML Node',
+        'platform: test',
+        'capabilities:',
+        '  - cap: publish',
+        '    commands: [publish_now]',
+        '    authLevel: gated',
+      ].join('\n'),
+    );
+    let invokeCalled = 0;
+    const limbRegistry = new LimbRegistry();
+    await limbRegistry.register({
+      nodeId: 'yaml-node',
+      displayName: 'YAML Node',
+      platform: 'test',
+      capabilities: [{ cap: 'publish', commands: ['publish_now'], authLevel: 'gated' }],
+      invoke: async () => {
+        invokeCalled += 1;
+        return { success: true, data: { status: 'online' } };
+      },
+    });
+    const app = Fastify();
+    app.addHook('preHandler', async (request) => {
+      const raw = request.headers['x-test-session-user'];
+      if (typeof raw === 'string' && raw.trim()) request.sessionUserId = raw.trim();
+    });
+    const deps = createRouteDeps({
+      healthCheck: { limbCommand: 'publish_now' },
+      resources: [{ type: 'limb', path: 'limbs/node.yaml' }],
+    });
+    registerPluginRoutes(app, {
+      pluginRegistry: deps.pluginRegistry,
+      pluginActivator: deps.pluginActivator,
+      limbRegistry,
+      pluginsDir,
+    });
+    await app.ready();
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/plugins/test-plugin/test',
+        headers: {
+          host: 'localhost:3004',
+          origin: 'http://localhost:5173',
+          'x-test-session-user': 'owner-user',
+        },
+        remoteAddress: '127.0.0.1',
+      });
+      assert.equal(res.statusCode, 200, res.payload);
+      const payload = JSON.parse(res.payload);
+      assert.equal(payload.ok, false);
+      assert.equal(payload.status, 'error');
+      assert.match(payload.error, /requires approval/);
+      assert.equal(invokeCalled, 0, 'gated health-check command must not execute the node handler');
     } finally {
       await app.close();
       if (previousOwner === undefined) delete process.env.DEFAULT_OWNER_USER_ID;
@@ -1834,11 +2687,10 @@ describe('plugin routes safety', () => {
       limbRegistry: {
         getNodeHandle(nodeId) {
           if (nodeId !== 'yaml-node') return null;
-          return {
-            healthCheck: async () => {
-              throw new Error('adapter timeout');
-            },
-          };
+          return {};
+        },
+        invoke: async () => {
+          throw new Error('adapter timeout');
         },
       },
       pluginsDir,

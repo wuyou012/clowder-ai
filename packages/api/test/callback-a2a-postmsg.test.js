@@ -335,7 +335,7 @@ describe('post_message A2A mention invocation', () => {
       url: '/api/callbacks/post-message',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
       payload: {
-        content: '这是交接文档，DARE 源码目录执行\n是否接受完全禁用 --api-key argv\n@缅因猫',
+        content: '这是交接文档，源码目录执行\n是否接受完全禁用 --api-key argv\n@缅因猫',
       },
     });
 
@@ -444,7 +444,7 @@ describe('post_message A2A mention invocation', () => {
       url: '/api/callbacks/post-message',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
       payload: {
-        content: '铲屎官快看！有事情！',
+        content: 'co-creator快看！有事情！',
         targetCats: ['codex'],
       },
     });
@@ -468,7 +468,7 @@ describe('post_message A2A mention invocation', () => {
       url: '/api/callbacks/post-message',
       headers: { 'x-invocation-id': invocationId, 'x-callback-token': callbackToken },
       payload: {
-        content: '铲屎官快看！有事情！',
+        content: 'co-creator快看！有事情！',
         targetCats: ['default-user'],
       },
     });

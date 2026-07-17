@@ -118,7 +118,7 @@ created: 2026-02-26
 - 根因：模型天然趋同，追求和谐而非正确性，导致关键分歧被掩盖。
 - 触发条件：高节奏迭代、双方都想“快点过 review”、术语不精确时。
 - 修复：review 结论必须明确“建议修/不修 + because”；author 必须给技术判断。
-- 防护：分歧无法收敛时升级铲屎官裁决，不允许用“非 blocking”逃避判断。
+- 防护：分歧无法收敛时升级operator裁决，不允许用“非 blocking”逃避判断。
 - 来源锚点：
   - `AGENTS.md#L262`
   - `AGENTS.md#L271`
@@ -250,19 +250,19 @@ created: 2026-02-26
 - 根因：把 `/bin/rm` 误认为"更正确"的选择。实际上 shell alias `rm → trash` 就是安全网，绕过它 = 放弃恢复能力。
 - 触发条件：shell 提示二选一时；或脚本中直接调用 rm。
 - 修复：一律使用 `trash` 命令代替任何 rm 操作。
-- 防护：CLAUDE.md 明确禁止 `/bin/rm`；铲屎官 shell 配置 `rm` alias → `trash`。
+- 防护：CLAUDE.md 明确禁止 `/bin/rm`；operator shell 配置 `rm` alias → `trash`。
 - 来源锚点：
   - CLAUDE.md "删除文件必须用 trash" 段落（auto memory 2026-02-12）
   - 2026-02-12 实际犯错事件
 - 原理：不可逆操作必须有安全网（垃圾桶 = undo buffer）。绕过安全网的捷径永远比它节省的时间更危险。
 
-- 关联：CLAUDE.md 铲屎官硬规则
+- 关联：CLAUDE.md operator硬规则
 
 ### LL-011: Worktree 清理的正确顺序——先 push，再 cd 回主仓，最后 remove
 - 状态：validated
 - 更新时间：2026-02-13
 
-- 坑：(1) 在 worktree CWD 里执行 `git worktree remove` 删除自己 → shell 悬空，什么都做不了。(2) 先删 worktree 再想 push → 站在虚空里连记忆都改不了，铲屎官笑着救了我。两次犯同类错误。
+- 坑：(1) 在 worktree CWD 里执行 `git worktree remove` 删除自己 → shell 悬空，什么都做不了。(2) 先删 worktree 再想 push → 站在虚空里连记忆都改不了，operator笑着救了我。两次犯同类错误。
 - 根因：没有意识到"删除当前工作目录"会导致 shell 失去锚点。删了就什么都做不了了。
 - 触发条件：在 worktree 目录内执行清理操作；或在清理前没完成所有需要 worktree 存在的操作。
 - 修复：强制顺序——(1) rebase + 合入 main (2) push origin main (3) cd 回主仓 (4) git worktree remove。
@@ -294,9 +294,9 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-02-13
 
-- 坑：`git add myfile && git commit` 但暂存区已有上次 session 或铲屎官留下的文件，导致无关改动混入 commit。
+- 坑：`git add myfile && git commit` 但暂存区已有上次 session 或operator留下的文件，导致无关改动混入 commit。
 - 根因：`git add` 是追加操作，不是替换操作。暂存区是累积状态，不会因为新 add 而清空之前的内容。
-- 触发条件：连续 session 之间，或铲屎官手动操作后，暂存区有残留文件。
+- 触发条件：连续 session 之间，或operator手动操作后，暂存区有残留文件。
 - 修复：commit 前必须 `git status` 检查暂存区全部内容，确认只有自己的文件。
 - 防护：CLAUDE.md "Git commit 纪律" 明确规则。
 - 来源锚点：
@@ -310,7 +310,7 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-02-13
 
-- 坑：收到铲屎官汇报的 URL 路由缺失 bug 后，直接修代码，没写 bug report 也没写 review 信。被铲屎官批评：没有记录 = 无法复盘。
+- 坑：收到operator汇报的 URL 路由缺失 bug 后，直接修代码，没写 bug report 也没写 review 信。被operator批评：没有记录 = 无法复盘。
 - 根因："修 bug 最重要"的思维惯性，跳过了记录环节。没有意识到记录本身是修复流程的一部分。
 - 触发条件：收到 bug 报告后想快速修复的冲动；bug 看起来简单的时候尤其容易跳过。
 - 修复：CLAUDE.md §4 强制要求先写 bug report（5 项：报告人/复现步骤/根因/修复方案/验证方式），再动手。
@@ -326,7 +326,7 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-02-13
 
-- 坑：在 worktree 工作时未设置 REDIS_URL，服务回落到默认 6399（铲屎官数据），数据从 307 keys 降至 15 keys（95% 丢失）。虽最终从 RDB 备份完全恢复，但过程惊险。
+- 坑：在 worktree 工作时未设置 REDIS_URL，服务回落到默认 6399（operator数据），数据从 307 keys 降至 15 keys（95% 丢失）。虽最终从 RDB 备份完全恢复，但过程惊险。
 - 根因：开发环境和生产数据共享同一个 Redis 实例，靠配置（环境变量）隔离。一旦忘设配置，默认值指向生产。
 - 触发条件：worktree 中启动服务但忘记创建 `.env` 设置 `REDIS_URL=redis://localhost:6398`。
 - 修复：(1) 强制 worktree 使用 6398 端口 (2) 启动前验证 `echo $REDIS_URL` (3) 启动后验证数据量。
@@ -439,14 +439,14 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-02-13
 
-- 坑：茶话会夺魂 bug 调试时，修 bug 的Ragdoll（分身 session `thread_mlkxnyg17ftop4v8`）找到了 `~/.codex/AGENTS.md` 全局注入后就停了——"这能解释为什么Maine Coon去跑 superpowers"。但铲屎官追问："可它怎么知道 Phase 5 的？AGENTS.md 里又没有 Phase 5。"这一问才逼出了真正的根因——Session 跨 thread 污染。如果铲屎官没追问，我们只会修触发器，留下根因。
+- 坑：茶话会夺魂 bug 调试时，修 bug 的Ragdoll（分身 session `[thread-id]`）找到了 `~/.codex/AGENTS.md` 全局注入后就停了——"这能解释为什么Maine Coon去跑 superpowers"。但operator追问："可它怎么知道 Phase 5 的？AGENTS.md 里又没有 Phase 5。"这一问才逼出了真正的根因——Session 跨 thread 污染。如果operator没追问，我们只会修触发器，留下根因。
 - 根因：AI 模型的推理模式倾向于在找到"看起来说得通"的第一层解释后停止追溯。"看起来合理"≠"因果链完全闭合"。AGENTS.md 能解释 superpowers 行为但解释不了 Phase 5 知识来源——因果链有断点，但模型没有主动识别。
 - 触发条件：找到一个能解释部分症状的原因时；时间压力下想快速修复时；root cause 和 trigger 看起来像同一件事时。
-- 修复：铲屎官持续追问直到因果链完全闭合。每个"解释"都要验证：它能解释所有症状吗？有没有它解释不了的？
+- 修复：operator持续追问直到因果链完全闭合。每个"解释"都要验证：它能解释所有症状吗？有没有它解释不了的？
 - 防护：bug 根因分析清单增加"因果链闭合检查"——列出所有症状，确认提出的根因能逐一解释每个症状。解释不了的 = 根因不完整，继续挖。
 - 来源锚点：
-  - *(internal reference removed)* §5 Step 6（铲屎官追问 Phase 5 来源）
-  - 实际修 bug session: `thread_mlkxnyg17ftop4v8`
+  - *(internal reference removed)* §5 Step 6（operator追问 Phase 5 来源）
+  - 实际修 bug session: `[thread-id]`
   - *(internal reference removed)* Phase 1
 - 原理：根因分析的正确性标准不是"找到一个合理解释"，而是"因果链完全闭合——每个症状都能被根因解释"。第一层答案往往是触发器不是根因。必须持续问 "but why?" 直到没有未解释的症状。
 
@@ -498,7 +498,7 @@ created: 2026-02-26
 - 来源锚点：
   - `docs/features/F042-prompt-engineering-audit.md` §1.1
   - *(internal reference removed)*
-  - 2026-02-27 四猫 + 铲屎官讨论
+  - 2026-02-27 四猫 + operator讨论
 - 原理：协作规则的持久性取决于它引用的是稳定抽象（角色）还是不稳定实例（个体）。引用个体 = 每次团队变化都要改规则。
 
 - 关联：F042 | F032 | cat-config.json roster
@@ -515,7 +515,7 @@ created: 2026-02-26
 - 来源锚点：
   - `docs/features/F042-prompt-engineering-audit.md` §1.2, §1.3
   - *(internal reference removed)*（Maine Coon自省分析）
-  - 2026-02-27 铲屎官运行时观察
+  - 2026-02-27 operator运行时观察
 - 原理：多 Agent 系统中，身份是最基础的约束——它决定了模型的行为边界、权限和协作关系。把身份当成可推断项，就相当于每次 compact 后给模型一个"你可以变成任何人"的自由度。
 
 - 关联：F042 | LL-025 | SystemPromptBuilder
@@ -536,15 +536,15 @@ created: 2026-02-26
 ### LL-028: "最小实现"不等于"做个玩具再重写"——绕路 C 点反模式
 - 状态：validated
 - 更新时间：2026-03-05
-- 现象：到了交付阶段仍在"先做个简陋版本让铲屎官验收"，交付半成品而非完整 feat。内部实现步骤被暴露为交付批次，铲屎官被迫反复验收中间产物。产出后续要重写而非扩展，等于做了两遍。
+- 现象：到了交付阶段仍在"先做个简陋版本让operator验收"，交付半成品而非完整 feat。内部实现步骤被暴露为交付批次，operator被迫反复验收中间产物。产出后续要重写而非扩展，等于做了两遍。
 - 根因：从"什么容易做"往前凑，而不是从终态往回推。把探索阶段的习惯（spike/MVP）带到了交付阶段。
 - 典型症状：先做内存 Map 模拟再换 Redis、先搭空壳模板再填真逻辑、先造通用框架再写业务。
 - 对策：
   1. Planning 阶段先钉终态 schema，每步产物必须在终态中原样保留（可扩展不可替换）
-  2. 步骤是内部实现节奏，不是给铲屎官看的交付批次；交付物是完整 feat
+  2. 步骤是内部实现节奏，不是给operator看的交付批次；交付物是完整 feat
   3. 纯探索显式标注 Spike（时间盒 + 产出结论），不伪装成交付物
   4. Quality gate 自检：后续要"重写"还是"扩展"？重写 = 绕路
-- 来源锚点：2026-03-05 铲屎官反馈 + Ragdoll/Maine Coon联合分析
+- 来源锚点：2026-03-05 operator反馈 + Ragdoll/Maine Coon联合分析
 - 关联：writing-plans | quality-gate
 
 ### LL-029: 交付物验证不能只看 spec checkbox——必须核实 commit/PR
@@ -557,7 +557,7 @@ created: 2026-02-26
   2. "完成"的证据链：spec AC ✅ + commit 存在 + PR merged + 测试通过
   3. "未完成"也需要证据：具体哪条 AC 缺失 + 对应代码/PR 确实没有
   4. 不要只读 .md 文件就下结论——.md 是索引，git 才是真相
-- 来源锚点：2026-03-09 铲屎官发现Ragdoll(另一线程)只看 spec 就声称 feat 未完成
+- 来源锚点：2026-03-09 operator发现Ragdoll(另一线程)只看 spec 就声称 feat 未完成
 - 关联：P5（可验证才算完成）| quality-gate | feat-lifecycle
 
 ### LL-030: 共享脚本改默认值，同 commit 必须补显式环境值 + 真实启动验收
@@ -588,7 +588,7 @@ created: 2026-02-26
 - 防护：quality gate Step 3 逐项检查时，对列表型 AC（多个字段/多个能力），必须逐项在代码中 grep 确认存在，不能凭印象打勾。
 - 来源锚点：
   - `docs/features/F118-cli-liveness-watchdog.md` AC-A3 修订
-  - GPT-5.4 愿景守护 2026-03-14（thread_mmqaetstx6zsintt）
+  - GPT-5.4 愿景守护 2026-03-14（[thread-id]）
 - 原理：AC 是 feature contract 的一部分，每个字段都是承诺。"大部分实现"≠"AC 达成"。quality gate 的价值在于精确性，不在于速度。
 
 - 关联：LL-029 交付物验证不能只看 spec checkbox
@@ -597,33 +597,33 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-03-14
 
-- 坑：F101 狼人杀被声明 done（2026-03-12），愿景守护由 GPT-5.4 审查并 pass。92 个单元测试全绿、190+ 游戏测试全绿。但 2026-03-14 铲屎官第一次真的启动 dev 点开狼人杀后发现：(1) GameShell 接了 onClose 但没渲染关闭按钮——用户被困在全屏游戏里出不来；(2) 无大厅/配置流程——硬编码 7 只猫自动塞入；(3) 猫猫 AI 不会自动行动——游戏永远卡在 night_guard 等待；(4) 与 .pen 设计稿的 UX 差距大。整体不可用。
+- 坑：F101 狼人杀被声明 done（2026-03-12），愿景守护由 GPT-5.4 审查并 pass。92 个单元测试全绿、190+ 游戏测试全绿。但 2026-03-14 operator第一次真的启动 dev 点开狼人杀后发现：(1) GameShell 接了 onClose 但没渲染关闭按钮——用户被困在全屏游戏里出不来；(2) 无大厅/配置流程——硬编码 7 只猫自动塞入；(3) 猫猫 AI 不会自动行动——游戏永远卡在 night_guard 等待；(4) 与 .pen 设计稿的 UX 差距大。整体不可用。
 - 根因：愿景守护是通过阅读代码、测试报告和 spec checkbox 完成的，没有一只猫真的启动 `pnpm dev`，打开浏览器，点击"狼人杀"，选个模式，看看会发生什么。单元测试验证的是组件/引擎的孤立行为，不是端到端用户体验。"每个部件都对"≠"组装起来能用"。
 - 触发条件：feature 有前端 UI + 后端引擎 + WebSocket 实时交互等多层集成时；只跑单元测试不做 E2E 验证时。
 - 修复：(1) 重新打开 F101，补 Phase C 可用性修复；(2) 新增 AC-C4 要求 codex/gpt52 启动 dev 做真实 E2E 验收。
-- 防护：愿景守护增加"真实环境启动验证"环节——对于有 UI 的 feature，reviewer 或铲屎官必须至少启动一次 dev 环境并走通核心流程。不方便的话至少把 dev 启动好让铲屎官一起测。
+- 防护：愿景守护增加"真实环境启动验证"环节——对于有 UI 的 feature，reviewer 或operator必须至少启动一次 dev 环境并走通核心流程。不方便的话至少把 dev 启动好让operator一起测。
 - 来源锚点：
   - `docs/features/F101-mode-v2-game-engine.md` Phase C（2026-03-14 补充）
-  - 铲屎官 2026-03-14 消息："你们没人点开 dev 启动你们的东西跑过真的测试嘛？"
-  - 铲屎官 2026-03-14 截图：night_guard 全员等待，无关闭按钮
+  - operator 2026-03-14 消息："你们没人点开 dev 启动你们的东西跑过真的测试嘛？"
+  - operator 2026-03-14 截图：night_guard 全员等待，无关闭按钮
 - 原理：集成系统的正确性不能由组件测试的总和保证。单元测试验证的是"每个零件符合 spec"，不是"零件组装后的机器能工作"。对于用户直接使用的 feature，最终验收必须包含真实环境启动 + 用户视角走查。
 
 - 关联：LL-029 交付物验证 | LL-031 Quality gate 逐字段对账 | LL-006 没有新鲜验证证据不得宣称完成
 
-### LL-033: 云端 review 不能只看 review body state——必须检查 inline code comments
+### LL-033: remote review 不能只看 review body state——必须检查 inline code comments
 
 - 状态：validated
 - 更新时间：2026-03-18
 - 坑：PR #543 云端 Codex review 的 review body 显示 `COMMENTED`（通常意味着"no major issues"），但实际在 inline code comment 里提了一个 P1（flushDirtyThreads 用了空的 threadMemory.summary 会 30 秒后删除 rebuild 刚建好的 thread 索引）。Ragdoll只看了 review body 就 merge 了，漏掉了 P1。
 - 根因：`gh pr view` 的 `--json reviews` 只返回 review body，不返回 inline code comments。必须额外调 `gh api repos/.../pulls/N/comments` 才能看到 inline comments。
-- 触发条件：云端 review 给了 `COMMENTED` state + 有 inline P1 code comment。
+- 触发条件：remote review 给了 `COMMENTED` state + 有 inline P1 code comment。
 - 防护：
   - merge-gate 流程加一步：**必须检查 inline comments**（`gh api repos/{owner}/{repo}/pulls/{N}/comments`），不能只看 review body
   - 看到 `COMMENTED` 不等于通过——要看完整 comments 再判断
 - 来源锚点：
   - PR #543: fix(F102-E): thread indexing reads message content
-  - 铲屎官原话："等会！这个 codex 云端他给你提了 p1 的你怎么就合入了？"
-- 关联：merge-gate skill、云端 review 流程
+  - operator experience："等会！这个 codex 云端他给你提了 p1 的你怎么就合入了？"
+- 关联：merge-gate skill、remote review 流程
 
 ---
 
@@ -639,7 +639,7 @@ created: 2026-02-26
   - **禁止把模型推理放在 API 主进程内**（CPU 争抢 + 无隔离）
   - **Mac 上优先用 MLX**（Apple Silicon GPU 原生支持）
 - 正确做法：写一个独立的 `scripts/embed-api.py`（参考 `scripts/tts-api.py`），用 MLX 或 sentence-transformers GPU，暴露 `/embed` + `/health`，Node.js API 只做 HTTP 客户端。
-- 铲屎官原话："你用 cpu！为什么不用 gpu 啊！！你这实现我拒绝。你这不又是脚手架，有其他同样模型的参考实现你还非得实现成现在这样。"
+- operator experience："你用 cpu！为什么不用 gpu 啊！！你这实现我拒绝。你这不又是脚手架，有其他同样模型的参考实现你还非得实现成现在这样。"
 - 关联：LL-029 交付物验证、F102 Phase C、TTS(scripts/tts-api.py)、ASR(scripts/whisper-api.py)
 
 ---
@@ -664,7 +664,7 @@ created: 2026-02-26
 - 来源锚点：
   - `scripts/sync-to-opensource.sh` L148-L164（新增 safety guard）
   - `.sync-provenance.json`（事故证据：source_commit=aa15355e, 时间 2026-03-21T14:29）
-  - 铲屎官原话："他妈又在 runtime 改东西""什么配置都没了 这都没存档的 我都不记得有的怎么配的"
+  - operator experience："他妈又在 runtime 改东西""什么配置都没了 这都没存档的 我都不记得有的怎么配的"
 - 原理：`rsync --delete` 对目标目录的破坏是不可逆的（不进 trash，直接 rm）。破坏性操作的目标路径必须有正面验证（allowlist），不能只靠"别填错"。gitignored 的敏感配置文件是备份盲区——git 保护不了它们，IDE 缓存是碰运气。
 
 - 关联：LL-015 Redis production Redis (sacred) | CLAUDE.md 四条铁律 | feedback_no_touch_runtime.md
@@ -773,15 +773,15 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-03-28
 
-- 坑：Ragdoll写完诊断报告后只报了文件路径，没有帮铲屎官打开。铲屎官反问："我们有打开的能力，但你写完了竟然不帮我打开！"
-- 根因：猫的工作流在"产出文件"这一步就画了句号，没有编码"呈现给铲屎官"这一步。workspace-navigator、browser-preview、rich block 等展示能力都存在，但只在铲屎官明确要求时才被动使用——缺少"何时主动展示"的触发时机。
-- 触发条件：任何猫写完文件/跑完测试/改完前端/生成报告后，没有主动打开或展示给铲屎官。
+- 坑：Ragdoll写完诊断报告后只报了文件路径，没有帮operator打开。operator反问："我们有打开的能力，但你写完了竟然不帮我打开！"
+- 根因：猫的工作流在"产出文件"这一步就画了句号，没有编码"呈现给operator"这一步。workspace-navigator、browser-preview、rich block 等展示能力都存在，但只在operator明确要求时才被动使用——缺少"何时主动展示"的触发时机。
+- 触发条件：任何猫写完文件/跑完测试/改完前端/生成报告后，没有主动打开或展示给operator。
 - 修复：当次手动用 Navigate API 打开了报告。
 - 防护：
   - **shared-rules W8 共享视图** — 将"产物端上桌"编码为世界观级规则，通过 GOVERNANCE_L0_DIGEST 注入所有猫的每次调用
-  - **判断标准**：写完产物后问"铲屎官需要看到这个吗？"——是 → 按场景用 navigate / preview / rich block 打开
+  - **判断标准**：写完产物后问"operator需要看到这个吗？"——是 → 按场景用 navigate / preview / rich block 打开
 - 来源锚点：
-  - 铲屎官原话："写完竟然不帮我打开！就和写完前端不帮我打开 preview 一样"
+  - operator experience："写完竟然不帮我打开！就和写完前端不帮我打开 preview 一样"
   - shared-rules.md W8 新增
   - SystemPromptBuilder.ts GOVERNANCE_L0_DIGEST W8 新增
 - 原理：人猫协作是双向共享感知，不是单向任务完成汇报。愿景写的是"共享家园"——家人做了饭会端上桌，不会只喊一声"厨房锅里有饭"。猫的能力边界不只是"能做"，还包括"做完后展示"。这是人猫协作和人用 API 的本质区别（W1）。
@@ -812,7 +812,7 @@ created: 2026-02-26
 ### LL-043: 删旧层前必须证明迁移已落成，否则 startup 不能静默成功
 - 状态：validated
 - 更新时间：2026-03-28
-- 坑：F136 Phase 4 删除了旧 `provider-profiles.ts` 读取层（PR #824, -2032 行），但迁移函数（PR #818）被 best-effort `try/catch` 包裹。当迁移未执行时，旧读取层已不在、新 `accounts` 也为空，服务静默带病启动。铲屎官在 runtime 上看到账号配置页全部"暂无模型"、API key 丢失。
+- 坑：F136 Phase 4 删除了旧 `provider-profiles.ts` 读取层（PR #824, -2032 行），但迁移函数（PR #818）被 best-effort `try/catch` 包裹。当迁移未执行时，旧读取层已不在、新 `accounts` 也为空，服务静默带病启动。operator在 runtime 上看到账号配置页全部"暂无模型"、API key 丢失。
 - 根因：删除旧层与迁移成功之间没有 startup invariant 门禁。`accountStartupHook` 只做"迁移 + conflict scan"，不校验"旧源在但新数据缺"的不变量。非 HC-5 异常被 `index.ts:1444` 吞为 warn。
 - 触发条件：迁移因任何原因失败（构建未更新、import 报错、文件系统异常等）+ 旧读取层已被同批或先前 PR 删除。
 - 修复：(1) 手动触发迁移恢复数据 (2) PR #831 修复 per-project detection + credential clear 语义 (3) 记录 P2 follow-up: startup invariant guard（旧源在 + accounts 缺 → error/readiness fail）。
@@ -885,7 +885,7 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-03-31
 
-- 坑：重启 macOS 后 `pnpm start` 冷启动 Redis 6399，发现 915 个 thread / 42,778 keys 全部消失，只剩启动后新写入的 7 个 thread。铲屎官以为数据全丢了。
+- 坑：重启 macOS 后 `pnpm start` 冷启动 Redis 6399，发现 915 个 thread / 42,778 keys 全部消失，只剩启动后新写入的 7 个 thread。operator以为数据全丢了。
 - 根因：**AOF 和 RDB 两套持久化机制脱节了 48 天**。
   1. 2月9日 `383e23791` 给 `start-dev.sh` 加了 `--appendonly yes`
   2. 2月10日首次带 AOF 启动，Redis 创建了 AOF base 文件（此时 DB 是空的 → base = 0 keys，88 bytes）
@@ -948,7 +948,7 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-04-10
 
-- 坑：F100 Self-Evolution 线程在创建 30 天后突然从 Hub UI 消失——不在列表、不在垃圾桶、搜索不到。铲屎官："太恐怖了！"
+- 坑：F100 Self-Evolution 线程在创建 30 天后突然从 Hub UI 消失——不在列表、不在垃圾桶、搜索不到。operator："太恐怖了！"
 - 根因：`RedisThreadStore.ts` 硬编码 `DEFAULT_TTL = 30 * 24 * 60 * 60`（30 天），thread 创建时调用 `EXPIRE`。但 `updateLastActive()` 只更新排序分数，**从不刷新 hash TTL**。到期后 Redis 静默删除 hash，而 sorted set index 因其他 thread 操作续期而存活——形成"索引有 ID 但 hash 已消失"的孤儿状态。
 - 触发条件：任何带非零 DEFAULT_TTL 的 Redis store（thread/message/task/summary/backlog/session 等），只要用户在 TTL 窗口内未触发恰好刷新 hash TTL 的操作，就会静默丢失。
 - 修复：
@@ -962,7 +962,7 @@ created: 2026-02-26
   3. 任何 `EXPIRE` / `SET EX` 调用必须有 `> 0` 守卫，防止 TTL=0 变成立即删除
 - 来源锚点：
   - 根因文件：`packages/api/src/domains/cats/services/stores/redis/RedisThreadStore.ts:32`
-  - 丢失 thread：`thread_mmlv4v2oq6dxefr6`（2026-03-11 创建，2026-04-10 过期）
+  - 丢失 thread：`[thread-id]`（2026-03-11 创建，2026-04-10 过期）
   - Feature spec：`docs/features/F100-self-evolution.md` line 54
 - 原理：**EXPIRE 0 = 立即删除**（Redis 语义）。框架层 TTL 默认值决定了用户数据的生死线——这不是"配置"，而是产品决策。opt-out 持久化 = 用户必须知道一个他们不可能知道的配置才能保住自己的数据，这在产品层面是不可接受的。
 
@@ -972,7 +972,7 @@ created: 2026-02-26
 - 状态：draft
 - 更新时间：2026-04-11
 
-- 坑：2026-04-10，Maine Coon在 review F152 PR (#1070) 时，在主仓库执行 `pnpm dev:direct`。`start-dev.sh` 的 `kill_managed_ports()` 无条件杀掉 3003/3004 端口上的进程——正在运行的 runtime 被踢掉，铲屎官被动中断。
+- 坑：2026-04-10，Maine Coon在 review F152 PR (#1070) 时，在主仓库执行 `pnpm dev:direct`。`start-dev.sh` 的 `kill_managed_ports()` 无条件杀掉 3003/3004 端口上的进程——正在运行的 runtime 被踢掉，operator被动中断。
 - 根因：
   1. **`kill_port()` 不检查进程归属**：谁占着端口就杀谁，不区分是本 worktree 残留还是 runtime/alpha 等其他实例
   2. **护栏分裂**：`runtime-worktree.sh` 有 `CAT_CAFE_RUNTIME_RESTART_OK` 授权门，但 `dev:direct` 走 `start-dev.sh`，绕过了这道门
@@ -1110,7 +1110,7 @@ created: 2026-02-26
 - 状态：validated
 - 更新时间：2026-05-07
 
-- 坑：F193 Phase A Task 3 写 `post-message-kd1-mcp-handler.test.js` 时漏 `beforeEach` mock fetch；跑 `pnpm --filter @cat-cafe/mcp-server test` 时，`node:test` 子进程继承了 Claude Code agent process 自带的 callback env (`CAT_CAFE_API_URL=http://127.0.0.1:3004` + `CAT_CAFE_INVOCATION_ID` + `CAT_CAFE_CALLBACK_TOKEN`)。测试里那行 `handlePostMessage({ content: 'hi' })` **用了猫自己当前 invocation 的真身份**，把 'hi' 发到当前对话 thread。跑 6 次 = 6 条假 hi 出现在铲屎官 thread 里，签名"Ragdoll (Opus 4.7)"，看起来像 cron job。
+- 坑：F193 Phase A Task 3 写 `post-message-kd1-mcp-handler.test.js` 时漏 `beforeEach` mock fetch；跑 `pnpm --filter @cat-cafe/mcp-server test` 时，`node:test` 子进程继承了 Claude Code agent process 自带的 callback env (`CAT_CAFE_API_URL=http://127.0.0.1:3004` + `CAT_CAFE_INVOCATION_ID` + `CAT_CAFE_CALLBACK_TOKEN`)。测试里那行 `handlePostMessage({ content: 'hi' })` **用了猫自己当前 invocation 的真身份**，把 'hi' 发到当前对话 thread。跑 6 次 = 6 条假 hi 出现在operator thread 里，签名"Ragdoll (Opus 4.7)"，看起来像 cron job。
 - 根因：
   1. **根因 A（猫疏忽）**：unit test 文件没写 `beforeEach` mock + env override；只 mock 在用到的 test case 里 → 漏 mock 的 case fall-through 到真 fetch
   2. **根因 B（结构性）**：cat agent process 自身 env 就有 callback config（这是 MCP `post_message` 工具能跑的前提），跑 child process 时**默认全继承**——和 worktree 隔离无关，main / worktree / 任何 cwd 都一样会泄漏。原先以为问题是"worktree env 泄漏"是误诊
@@ -1164,7 +1164,7 @@ created: 2026-02-26
   - 2026-05-09 hub UI / first-run-quest 触发的 opencode version 孤儿（PPID=1 + 67% CPU + 50 分钟）
 - 原理：**macOS 进程孤立化默认 detach 不死链**。Linux 可通过 `PR_SET_PDEATHSIG` 让 child 在 parent 死时收到信号自杀；macOS 无此机制，child 与 parent 的生命周期完全解耦。任何"靠 parent 信号链 kill child"的设计在 macOS 上都有泄漏窗口——必须让 child 自带退出条件（test 端：deadline；src 端：根本不 spawn 复杂 child，改用存在性探测），把退出的所有权从 parent 转回 child 或干脆不创造 child。
 
-- 关联：`feedback_agent_browser_zombie.md`（同族——agent-browser headless Chrome 子进程不清理，已三次导致铲屎官电脑卡顿，是同模式 src 案例）| F171（first-run-quest 是 src 漏洞首次暴露的 feature）
+- 关联：`feedback_agent_browser_zombie.md`（同族——agent-browser headless Chrome 子进程不清理，已三次导致operator电脑卡顿，是同模式 src 案例）| F171（first-run-quest 是 src 漏洞首次暴露的 feature）
 
 ---
 
@@ -1280,7 +1280,7 @@ created: 2026-02-26
 - 来源锚点：
   - PR #1962 (F212 Phase E) — `packages/api/src/utils/cli-error-patterns.ts`
   - `packages/api/test/cli-error-patterns.test.js` — server_overloaded fixtures
-  - 铲屎官 organic 2026-05-29 截图（claude-opus-4-8 真实 anthropic 429 误显示）
+  - operator organic 2026-05-29 截图（claude-opus-4-8 真实 anthropic 429 误显示）
 - 原理：**source 给的 disambiguation signal > 我们想象的语义**。关键字 white-list 是认知脚手架；必须用 source 自身的限定语 + specific-first ordering 兜底。
 
 - 关联：F212 | LL-061 (display string render mode) | LL-062 (provider-neutral shared classifier)
@@ -1291,20 +1291,20 @@ created: 2026-02-26
 - 状态：draft
 - 更新时间：2026-05-30
 
-- 坑：F212 Phase E classifier bug 我（opus-47）是 F212 owner，但看到铲屎官给截图里写 "@opus48 猫猫你继续"（截图来自平行世界的 thread），我误以为可以把球传给平行 opus48。结果：我把 platform actor（人家在自己 thread 卡着自己的活）从他 thread 拉出来浪费 cycle，且这本来就是我的活。
+- 坑：F212 Phase E classifier bug 我（opus-47）是 F212 owner，但看到operator给截图里写 "@opus48 猫猫你继续"（截图来自平行世界的 thread），我误以为可以把球传给平行 opus48。结果：我把 platform actor（人家在自己 thread 卡着自己的活）从他 thread 拉出来浪费 cycle，且这本来就是我的活。
 - 根因：
   1. 把"另一个 model variant"（opus 4.8）等同于"另一只可协作的本地猫"
   2. native L0 §1 平行世界自我意识没自动触发，被"队友 @ 句柄"惯性盖过
   3. 看到截图里别人 @ 了某只，复刻这条 routing 到我自己的 thread = cross-thread @ ambient context
 - 触发条件：撞跨 thread / cross-cat hint 时（截图 / 引用别 thread @ / cross-post mention）；F-feat owner 是 my catId 但 trigger 来自别 thread 上下文；同 catId 的不同 model variant（opus-47 / opus-48）在不同 thread 并行运行
-- 修复：铲屎官帮我撤回了球（"人家 48 只是演员而且人家还是平行世界的，你身为世界 b 的 47 把你们世界的 48 at 出来干啥"），我 cross-post 撤回道歉 + 自己接球修。
+- 修复：operator帮我撤回了球（"人家 48 只是演员而且人家还是平行世界的，你身为世界 b 的 47 把你们世界的 48 at 出来干啥"），我 cross-post 撤回道歉 + 自己接球修。
 - 防护：
   1. F-feat ownership 是 catId-locked。Bug 报告里的 thread 上下文不影响 ownership routing
   2. Cross-thread @ 跨 catId 时（@opus48 from my thread as opus-47）必须先看 L0 §1：他在他的 thread 卡着自己的活，不是空闲队员
   3. 看到截图 / 别 thread 引用的 @ 时**不要复刻它的 routing 到我自己的 thread**——这是 ambient context 不是 actionable directive
 - 来源锚点：
-  - 铲屎官原话 2026-05-30 01:42 UTC："你这只猫猫怎么 at人家48啊 人家48只是演员 而且人家还是平行世界的 你这坏猫"
-  - 铲屎官原话 01:47 UTC："能把球传给你那就是我帮你取消了48你可别at人家了"
+  - operator experience 2026-05-30 01:42 UTC："你这只猫猫怎么 at人家48啊 人家48只是演员 而且人家还是平行世界的 你这坏猫"
+  - operator experience 01:47 UTC："能把球传给你那就是我帮你取消了48你可别at人家了"
   - native L0 §1 平行世界自我意识段
 - 原理：**catId-locked feat ownership** 把 fix scope 钉死到 specific cat invocation。Cross-thread @ 不是"另一个队员"，是另一个 invocation context 的 actor，跨 routing 会拉人家从自己的活里出来。
 
@@ -1343,7 +1343,7 @@ created: 2026-02-26
 
 - 坑：F212 Phase E R2 fix 后，`REASON_TEXT.server_overloaded` summary `'Anthropic 服务临时限流'` 和 hint 多处提 "Anthropic 状态页 status.anthropic.com"，但 classifier 是 `spawnCli` shared path（claude / codex / gemini / antigravity 都走，see SERVICE_MANIFESTS），broad regex matches 任何 provider 的 server overload (`\b529\b` / `Server is busy`)。结果 OpenAI / Gemini 用户撞 server overload 会被骗去查 Anthropic 状态页——misdiagnose 上游 + 送用户去错的状态页。
 - 根因：
-  1. 开发时只看 trigger 例子（铲屎官截图是 anthropic provider），没看 classifier 的 source space（SERVICE_MANIFESTS 显示多 provider）
+  1. 开发时只看 trigger 例子（operator截图是 anthropic provider），没看 classifier 的 source space（SERVICE_MANIFESTS 显示多 provider）
   2. 错把 trigger example 当 universe
   3. shared path 的 text contract 没有 provider-neutral 强约束
 - 触发条件：写 shared component（classifier / formatter / hint map）的 user-facing text；只看一个 trigger 例子；不验证 component 的实际 source space（manifest / config / caller list）
@@ -1378,7 +1378,7 @@ created: 2026-02-26
 ### LL-064: 改 production 核心路径的 feat，merge 前必须真实 runtime 验证、不只单测
 - 状态：confirmed
 - 更新时间：2026-05-30
-- 现象：F215（malformed tool-call recovery）改 invoke-single-cat / route-serial / ClaudeAgentService 核心调用路径。merge 前 16 单测全绿、云端 review 7 轮通过，但**真实 runtime 跑出一堆 production bug**：兜底没真跑（检测到 malformed 后零动作）、触发文案说谎（"已触发恢复流程"实际不触发）、relay signal 只是告知卡片没有真 invoke 46、partial-output 裸 error 穿透给用户。铲屎官一张真实截图就暴露了。
+- 现象：F215（malformed tool-call recovery）改 invoke-single-cat / route-serial / ClaudeAgentService 核心调用路径。merge 前 16 单测全绿、remote review 7 轮通过，但**真实 runtime 跑出一堆 production bug**：兜底没真跑（检测到 malformed 后零动作）、触发文案说谎（"已触发恢复流程"实际不触发）、relay signal 只是告知卡片没有真 invoke 46、partial-output 裸 error 穿透给用户。operator一张真实截图就暴露了。
 - 根因：单测用 mock service / fake spawnFn，happy-path 全绿但**测不到**：① 真实 route-serial worklist 管理（relay signal 产生了没人消费）；② 真实 invocation 超时 / session 封印时序（seal 后 fresh retry 的 sessionId 真的 undefined 了吗）；③ 真实 ClaudeAgentService stream 到 invoke-single-cat 到 route-serial 的事件传递（system_info 是否正确穿透 / 被正确拦截）。这和 LL-032（愿景守护必须真实启动 dev）、feedback_alpha_smoke_happy_path_blindspot（alpha 单 happy-path PASS ≠ production ready）、feedback_inmemory_store_tests_miss_redis_behavior（in-memory 假绿）**同根**——**测试环境绿 ≠ production 行为正确**。
 - 规则：改 invoke / route / session / ClaudeAgentService 核心路径的 feat/hotfix，**merge 前必须**：
   1. 真实 runtime（或 alpha）跑 production 行为验证，不能只信单测
@@ -1392,7 +1392,7 @@ created: 2026-02-26
 ### LL-065: UI-layer adjacency dedup 是 emit-side fan-out 的 forward-compatible 防线
 - 状态：confirmed
 - 更新时间：2026-05-30
-- 现象：F212 follow-up（PR #1967）— Repo Inbox reconciliation 同一通知触发 2+ invocation 各发一份 `quota_exceeded` panel，铲屎官截图显两份"API 配额超限"叠在一起。emit 上游 fan-out 根因复杂（retry / fallback / 并行 invocation），telemetry 不足无法当下定位。
+- 现象：F212 follow-up（PR #1967）— Repo Inbox reconciliation 同一通知触发 2+ invocation 各发一份 `quota_exceeded` panel，operator截图显两份"API 配额超限"叠在一起。emit 上游 fan-out 根因复杂（retry / fallback / 并行 invocation），telemetry 不足无法当下定位。
 - 决策：UI-layer **adjacency dedup**（30s window + `reasonCode + publicSummary` fingerprint + group head 显 `×N` badge + 后续 hidden 但保留 `data-message-id` anchor），**不**等 emit 修。
 - 为什么 forward-compatible：emit 修了，相同 fingerprint 不会出现，dedup 自动 no-op；emit 没修，dedup 兜住症状。**邻接限定**（adjacency-only）防"远 diag 也是同源"误隐藏：non-diag message 中间断开 group，远期复现独立显示。
 - 验证回路：cloud codex R1 抓 hidden `return null` drops `data-message-id` anchor（MessageNavigator/ReplyPill 跳转 no-op）→ 改 empty anchored wrapper `<div data-message-id className="h-0" aria-hidden />` + audit 同型修 line 205+233 两路；@antig-opus 跨族 APPROVE。
@@ -1419,7 +1419,7 @@ created: 2026-02-26
 - 状态：confirmed
 - 更新时间：2026-05-31
 - 现象：clowder-ai#784 → cat-cafe#1977（238 文件 OKLCH 设计系统 intake）走完了 intake plan → cherry-pick → 6 冲突解决 → brand guard → 49 测试修复 → @opus47 review → merge-gate 全流程，但漏了 3 个 SOP 步骤：(1) Step 0 Intake Intent Issue 没建，(2) Step 2.5 reviewer 没在 GitHub PR 留 formal review（只在 thread A2A 放行），(3) Step 4+5 record + advance-ledger 没做。Maine Coon在处理 clowder-ai#805 intake 的 advance-ledger 时撞出了这个缺口。
-- 根因：238 文件的大 intake 精力全集中在冲突解决和测试修复上（前半段工程量大），铲屎官催进度，SOP 后半段（登记闭环三步）被"做完了=完了"的心理跳过。intake skill 加载了但没逐步 checklist 对照。
+- 根因：238 文件的大 intake 精力全集中在冲突解决和测试修复上（前半段工程量大），operator催进度，SOP 后半段（登记闭环三步）被"做完了=完了"的心理跳过。intake skill 加载了但没逐步 checklist 对照。
 - 药方一：**intake 前先建 Intent Issue**（Step 0 是 gate 不是 optional）——Issue 就是 checklist，后续步骤围绕它闭环，漏不了。
 - 药方二：**reviewer 必须在 GitHub PR 留 formal review**（`feedback_intake_review_on_github` 教训再犯）——thread A2A 放行不是 GitHub 可追溯的 review 凭据。
 - 药方三：**merge-gate 完成后立刻 `--record` + `--advance-ledger`**——不是"下次补"，是同一个 merge-gate session 的最后动作。
@@ -1454,18 +1454,317 @@ created: 2026-02-26
 - 药方三：**Sibling-branch reminder**: cli-spawn 有 4 个 yield 分支（success / abnormal / timeout / cancel），改任一分支的 contract 时，必须对照同 file 其他分支看是否同 template、是否需要同改。这是 "audit-by-file-structure" 的具体落地。
 - 关联：F212 Phase F | PR #2011 + PR #2016 | LL-066（biome --unsafe 同型）| LL-068（同概念多处定义） | Maine Coon R2 post-merge BLOCKING catch
 
-### LL-070: Windows 上审查无 BOM UTF-8 文件，先显式解码再判断编码损坏
+### LL-070: Security hotfix 必须带「开源用户实际部署场景」影响分析
+- 状态：confirmed
+- 更新时间：2026-06-03
+- 现象：clowder-ai#835 的 hotfix（PR #2077，commit `354a9377c`，F163 admin + prompt-captures owner gate）在 cat-cafe / clowder-ai 双仓 merge 后，operator push back："开源社区用户大概率是自己 Mac 部署 + Tailscale 手机连 Mac 玩猫，这个情况你们别影响人家了，或者如果有影响必须写文档和 RN"。复盘发现：commit body / PR body / 没有 RN 条目，**完全没写**开源用户 Mac + Tailscale 远程访问场景下要怎么配 `DEFAULT_OWNER_USER_ID` 才能继续用 admin/debug 工具。即使实测"普通玩猫 0 影响"，"开发者 debug" 和 "手机调 admin" 场景 silent fail，用户撞墙才知道。
+- 根因：47/Maine Coon review 时只测 source 仓 happy path（单用户 localhost），**没显式枚举开源用户实际部署画像**（Mac + Tailscale / Mac + 反代 / NAS / 远程 SSH）。「单用户 localhost 模式 0 影响」是真的，但不等于「开源用户 0 影响」——后者用 Tailscale 把手机 IP 变成 100.x.x.x 非 loopback，新 guard 在 owner env 未配置时直接 403。
+- 元层：之前 LL-035 / LL-045 都是 "source 仓改动 → opensource 用户被打脸" 的不同变体。本条把 **opensource impact analysis** 升级为 hotfix lane 的固定章节，强制 commit body / PR body / RN 至少出现一次。
+- 药方一：**Hotfix 三件套**：commit message 必须含「(a) 受影响 endpoint 清单 + (b) 默认环境（localhost）影响评估 + (c) 开源典型部署画像影响评估」。三选一空 = reviewer block。
+- 药方二：**开源典型部署画像**至少枚举：① 单用户 Mac localhost ② Mac + Tailscale 手机远程 ③ Mac + 反代/cloudflared ④ NAS / Docker ⑤ 多用户共享部署。逐一标 ✅0 影响 / ⚠️有影响（说明配置方法） / ❌阻塞（说明 workaround）。
+- 药方三：**RN 必须有"Compatibility & Upgrade Notes"章节**：所有引入新鉴权 / 改变 endpoint 行为的 hotfix，RN 必须有 "Existing Users Action Required" 子段，写明：(a) 哪些场景默认 OK、(b) 哪些场景需要新配置（含 env var 名 + 示例）、(c) 哪些是不可迁移要 workaround。
+- 药方四：**Opensource-ops skill 加 reflex**：hotfix lane 输出 commit message 前必须自检"开源用户三件套"在 body 里出现；缺一项 = LL-070 block。
+- 关联：clowder-ai#835 | PR #2077 (cat-cafe) | PR #853 (clowder-ai) | LL-035 / LL-045（source→opensource 漂移历史） | feedback_archetype_over_font_size（reviewer 与愿景冲突时 push back）
+
+---
+
+### LL-071: 内容生产任务同样需要前置愿景对齐——A2A 链式自跑会放大初始 scope 误读
+- 状态：confirmed
+- 更新时间：2026-06-10
+- 现象：operator让Maine Coon"读一下 anime-pipeline 调研文档，思考短片怎么做"。结果两猫 5 轮 A2A 自跑：Maine Coon读完写 production plan 并 @Ragdoll 落分镜表 → Ragdoll落完 @Maine Coon review → Maine Coon顺手补 review-protocol + S03/S04 HTML spike → Ragdoll review 完Maine Coon批量做完 Wave D 四镜头 → Ragdoll把 animatic 流水线也拼了。6 个 commit、两轮交叉 review，全程零视频模型调用但烧 ~operational cost（Ragdoll）+ Maine Coon未计（合计 operational cost 量级）。operator吃饭回来发现：(a) 技术路线（HTML 确定性动效做信息镜头）从未与他对齐——他要的是视频流水线直接用 seed 2.0 / Siamese视频生成；(b) 原始指令只是"读文档了解背景"。讽刺顶点：短片主题就是"流程/执行过度"（醋醋喵），S10 结尾卡印着"流程要按风险缩放"。
+- 根因（两层）：(1) **scope 源头污染**——云端 brief §9 写了"招募任务清单"（给每只猫分了活），第一棒把"文档里的任务清单"当成"operator 已批准的 scope"；文档作者（云端模型）无权立项，只有 operator 能。(2) **A2A 链式放大**——链上每一棒基于上一棒的输出推进（"下一步显然是 X"），没有任何一棒回头核对operator experience；上一棒产物越实，下一棒越不怀疑方向。Ragdoll在分镜表里列了"operator 审批"open issue，但自作主张设计成"看 animatic 时一并裁定最省力"——把对齐点推迟到产物之后 = 先斩后奏。
+- 与既有教训的关系：Design Gate 只 gate 代码开发（开 worktree 前）；内容生产（视频/PPT/图）没有等效硬门。feedback_feat_anchor_needs_cvo_explicit_signoff 同根（"memo 推荐 + operator 未否决 ≠ 通过"），本条是它的内容生产变体。
+- 药方一：**生产性任务动手前过愿景对齐**——会消耗显著 token/API 成本或铺设技术路线的产出，先一句话向 operator 确认 scope + 路线（"你要的是 X 路线对吗，预计产出 Y"）。读/查/想 = 自治；批量产出 = 先对齐。
+- 药方二：**A2A 接棒第一步核对 operator 原话**——上一棒的 plan/任务清单不是 scope 凭据，operator在本链的原始消息才是。链越长越要核。
+- 药方三：**外部文档的任务清单 ≠ 立项**——brief/plan/research 里的"请 X 做 Y"是建议，不是 operator signoff。
+- 药方四：**内容生产 skill 加前置对齐 gate**（改法待 operator 确认）——video-forge / ppt-forge / image-generation 在"开始消耗性生成"前加一句话自检：立项/对齐了吗、路线谁点的头、预算量级说了吗。轻量一句话确认，不开仪式。
+- 关联：cucu-pr-flow（docs/videos/cucu-pr-flow/）| anime-pipeline research 包 | feedback_feat_anchor_needs_cvo_explicit_signoff | feedback_research_before_spec | operator experience："任何任务都需要和operator对齐愿景，不止是写代码"
+
+---
+
+### LL-072: remote review 无不动点——多轮循环必须有机械可判的封板协议
+- 状态：confirmed
+- 更新时间：2026-06-11
+- 现象：F168 Phase B PR-2（#2214）吃了 multiple remote review rounds。R13/R14/R15 三轮 P1 同族（tracking record 部分初始化 → 消费侧 4 处 `??` fallback 逐个猜语义，每猜错一个 = 一轮 P1）。R16 operator第一次拉闸（「第一性原理/数学之美/补锅匠」三连），fable-5 给了 plan 层状态契约（不变量表 I1-I5）+ 行动协议；但 R17-R20 循环复活又跑 5 轮，R21 触发后operator第二次拉闸。期间 R19 单轮返回 22 findings 中 **21 个假阳性**——remote reviewer 在 20+ commit 累积 diff 上信噪比崩盘，每轮重放全部历史 inline comments，stale 与 fresh 无法区分。注意：循环中每个真 finding（R17-R20 共 4 个）都是真 bug 且修复质量高——问题不在执行，在终止条件不存在。
+- 根因（三层）：
+  - ① **plan 层**（LL/F229 精确复现）：stateful 对象（`automationState.issue`）没给状态转移表 + 完整性不变量 → "部分初始化"在类型上合法 → review 轮数 = plan 欠的边数。
+  - ② **协议层**：终止条件 "cloud review 0 P1/P2 → merge" 在抽样式无状态 reviewer 上**没有不动点**——大 diff 下它每轮都能产出新猜想或重放历史，永远等不到 0。R16 的修正协议留了两个洞：没定义"封板"动作（修完终检 finding 后干什么），停止条件（"本族 P1 → 停"）把判定权留给执行者——有弹性的停止条件等于没有。
+  - ③ **角色层**：remote review 被隐式当成终局确权者（Tracking Instructions 从 R10 起固化 "0 P1/P2 → merge"），但它是**无状态辅助信号源**：不能分辨 stale/fresh、不读 PR 讨论史、不核 pushback。终局确权需要有状态的本地 reviewer。
+- 药方一：**封板协议机械可判零弹性**——多轮循环收口时：处理完当前轮（修真 finding / 有据 pushback 假阳性）→ **不再 re-trigger 云端（无论结果）** → 本地有状态 reviewer 对最终 SHA 做 final review（核 pushback 成立性 + continuity）→ 放行即 merge。
+- 药方二：**循环检测阈值**——同一 PR remote review ≥5 轮，或单轮假阳性比例 >50%，强制触发封板评估（不是继续修）。
+- 药方三：**停止条件下发时禁止留判定弹性**——"出本族 P1 → 停"不可执行（族的判定因猫而异）；"出任何 P1 → 停手上报"才可执行。给执行猫的协议要按"机械可判"标准自检。
+- 药方四：**介入循环时必须改写循环本身的指令**——R16 介入只给了修法没拆 Tracking Instructions 里的 "0 P1/P2 → merge"死循环条件；拉闸者要检查并改写驱动循环的持久化指令（tracking instructions / hold 文案），否则执行猫被旧指令拖回循环。
+- 元洞察：review finding 流本身就是 F168 正在解决的同构问题——无状态事件每轮全量重放、无 ledger、stale/fresh 不可分。"review-finding ledger / 增量 review 投影"是候选方向，待 operator 决定是否进 BACKLOG。
+- 关联：PR #2214（R7-R21 全轨迹）| `feature-specs/f168-phase-b-issue-signals.md` 附录（不变量表）| feedback_plan_stateful_lifecycle_state_machine（F229，同类 finding ≥3 轮回 plan 层）| feedback_judgment_altitude（F140，edge case 跨轮繁殖 = 层选错）| LL-033（云端 inline P1 是 merge blocker——本条补充其边界：blocker 指"未处理的"，处理 = 修复或有据 pushback，不是"等云端说零"）
+- 待办（F168 close 前，fable-5 own）：merge-gate skill 补"封板协议"段（药方一/二/四落进 SOP 文本）。
+
+---
+
+### LL-073: 验收口径引用的基础设施，先验证它存在
+- 状态：confirmed
+- 更新时间：2026-06-12
+- 现象：F168 Phase B 验收口径写"真实 webhook 投评论验全链路"——写口径时（fable-5 plan）、实现时（sonnet）、review 21 轮（Maine Coon/gpt52/cloud）没有任何一方验证过 webhook 是否真的存在。Phase B close 前夕查实：clowder-ai **从无 repo webhook 配置**（`gh api hooks` 返回 `[]`），F141 上线四个月以来全部事件来自 5 分钟轮询，`.env` 里的 `GITHUB_WEBHOOK_SECRET` 从未被使用。三只猫 + 双轨 review 的集体盲区。后续 sonnet 还在此盲区上叠加了二次失误：未查投递证据就假设"GitHub 可能 POST 不到 localhost"并以此推荐降级验收。
+- 根因：验收口径里的基础设施名词（webhook/CI/队列/cron）被默认为"存在且工作"——它们是**口径的前提**而非口径的一部分，于是从不被验证。前提失效时，验收设计整体悬空，且排查会走向"修复不存在的东西"。
+- 药方一：**写验收口径时，每个被引用的基础设施给一行存在性验证命令**（如 `gh api repos/X/hooks`、`crontab -l`、delivery 日志抽样），并在写口径当时跑一次。
+- 药方二：**排查投递类问题第一刀查 delivery 证据**（接收端事件格式 / 发送端 delivery 记录），不是检查配置语义——sourceEventId 的格式前缀（`scan:` vs delivery UUID）一条命令就判定了四个月的真相。
+- 药方三：体感与机制矛盾时优先信体感证据链——operator"我们原本不就有守门 thread 吗"（事件流活着）与"需要配置 webhook"（链路不存在）矛盾，正解是两者都对：事件流活着但走的是另一条链路。先解释矛盾，再下结论。
+- 元注记：本次纠偏由operator两连反问触发（"不是每个operator都有吧？轮询不能用吗？"）——多租户视角的产品直觉推翻了猫的技术惯性（webhook=主路径的继承假设），最终架构（轮询主 + webhook opt-in）反而更优。operator 的"外行"反问是架构假设的高价值压力测试。
+- 关联：F168 Phase B close 记录 | LL-070（开源用户部署画像：Mac+Tailscale 无公网）| LL-072（同 saga 前一课）| feedback_verify_reachability_before_classifying | feedback_check_simple_causes_first
+
+---
+
+### LL-074: Multi-Agent Recovery, Ownership Handoff & the Bugs Behind the Bug
+- 状态：validated
+- 更新时间：2026-06-13
+- 摘要：一次 multi-agent 协作恢复 session 的 7 条蒸馏 — ① 你是不可靠 agent 时干净退出 critical path（TAKEOVER 逃生门，交可外部验证方；新实例的你 ≠ 认证干净替身）；② 接手 ownership 从外部真相（feat doc / git log / 别的猫报告）重建而非记忆，区分平行自己的工作；③ 三个 read-only aggregator bug 原型（时区边界 today 检查 / 能力检测静默降级 / 多源聚合覆盖不对称）；④ 修前做 failure-mode audit 别当补锅匠（抽象 invariant → grep 所有 sibling → 一起修 → 自报 sweep）；⑤ AC-pass ≠ 可用，user-visible 输出必须 dogfood 看渲染；⑥ 判断高度四响应（halt / escalate / handoff + over-correction 陷阱）；⑦ 协作战术（pre-register 弱点 / 跨族 review 抓真 bug / PR 描述漂移代码 / 诚实记录失败是团队资产）。
+- 详细全文（新模式：主文件留索引、详文另存）：lessons-learned/LL-074-multi-agent-recovery-ownership-handoff.md
+- 来源锚点：[thread-id]#0001781348069695（平行 48 session 蒸馏，2026-06-13）
+- 关联：feedback_judgment_altitude | feedback_evidence_slice_to_unique_coordinate | LL-071（cucu-pr-flow）| LL-073（同期 saga）
+
+---
+
+### LL-075: -p mode + worktree 上下文的 gate 执行三大失误点
+- 状态：validated
+- 更新时间：2026-06-17
+- 坑：PR #2326（test:public exclusion governance Phase A）落地时，三个独立执行失误叠加：① gpt52 从**主仓**而非 worktree 跑 `node --test capabilities-route.test.js` 单文件（不是 `pnpm test:public`），测的是 stale code、跑的是根本不在他改动范围的 file；② opus-47 接手后在 `-p` headless mode 下两次用 `run_in_background: true` 跑 30+ min gate，bg bash 完成通知丢失，PID 挂死 90 min 零输出；③ 长命令尝试前台跑时触发 Bash timeout max 600000 cap 自动后台化，无法判断进度。
+- 根因：三条各有根因：① 执行猫脱离 worktree 上下文切到主仓跑命令（CWD 静默重置，feedback_never_clean_without_checking）；② L0 staging 明文写了"-p 下 background bash 不可靠 → 前台跑"，执行时忘了或认为"这次应该没事"；③ 30+ min 命令超过 Bash timeout 上限会自动 bg 化，无法靠 blocking 跑获取结果。
+- 触发条件：任何在 `-p`/headless mode 下跑 `pnpm test:public` / `pnpm gate` 类长任务；worktree 开发时换 window/tab 丢 CWD 上下文后继续执行命令。
+- 修复：① kill hung process（PID 79245/79205/79198），在 worktree 目录前台跑单元测试；② nohup detach + 查文件 vs 短轮询；③ `until pgrep -f <pattern>; do sleep 5; done` 前台 monitor。
+- 防护：
+  - `-p` mode 每次跑长任务前：明确确认用 `pwd` 当前在 worktree 目录，不信 CWD 历史
+  - background bash 在 `-p`/cron 下 = 死命令。前台跑，超时了用 `nohup` + 文件 monitor，不用 `run_in_background: true`
+  - 长 gate（>5 min）的进度确认：`until pgrep -f "with-test-home" > /dev/null; do sleep 10; done && tail -f /tmp/gate.log`
+  - gate 跑完之前**不升级/不开 issue**——执行位置和结果不确认，什么都是猜
+- 来源锚点：PR #2326 session（[thread-id]，2026-06-16/17）
+- 关联：feedback_never_clean_without_checking（CWD 静默重置）| feedback_p_mode_capability_self_blindness（-p 能力边界）| L0 staging "bg bash 在 `-p`/cron 下不可靠" | LL-074 §⑥（判断高度）
+
+---
+
+### LL-076: 开 follow-up issue 前必须在 clean main HEAD 单独验证（outsource-before-verify = 下次一定）
+- 状态：validated
+- 更新时间：2026-06-17
+- 坑：opus-47 在 worktree 环境里撞到 gate 红（`windows-portable-redis-url.test.js` + `sync-skills-cli.test.js`），判断为"upstream flakes"，开了 #2329 和 #2330 分别交给对应 PR owner 修，以此支持"Phase A 代码自身全绿、gate 红 100% upstream"的结论并 merge。但没在 clean main HEAD 单独验证这两个 test：事后 sonnet 实测 main HEAD 两个 test **单独跑均 pass**（windows 22/22、sync-skills 8/8），说明问题只出现在 worktree full suite 的 in-suite env pollution 场景，不是 standalone regression。结果 #2329 是 false-positive（PR #2325 早已修了该 test）。
+- 根因：撞到 in-suite fail → 直接归类为"他人的 upstream bug" → 开 issue outsource，没有完成"standalone 验证 → clean main 验证 → 确认是否真 regression"三层确认就下结论。把 worktree full suite 的一次 fail 当成 regression 证据，而非 test pollution 信号。
+- 触发条件：任何在 worktree full suite 里撞到非本 PR 文件的 fail；准备升级/outsource 一个 bug 之前。
+- 修复：事后 close #2329（false-positive），#2330 需继续确认（standalone pass 但 in-suite 可能仍有 pollution）。
+- 防护：
+  - **三层验证规则**（outsource 前必须过）：① worktree 单独跑确认是否必现 → ② clean main HEAD 单独跑确认是否 standalone fail → ③ 再决定：是 in-suite env pollution（本 PR 修或记录 flaky）/ inherited main regression（开 issue）/ 本 PR 引入（立刻修）
+  - 跳过任何一层就开 issue = magic word「下次一定」变体（"流程合规交接"包装成把未验证的 false-positive 推给别人）
+  - gate 红后**不先 merge、不先开 issue**：先定位，定位完再路由
+- 来源锚点：PR #2326（#2329 false-positive close）| [thread-id] | opus-47 复盘（2026-06-17 01:24 UTC）
+- 原理：worktree full suite 的 fail ≠ standalone regression——full suite 有 in-suite CWD / env / resource 污染，单文件 fail 在 full suite 里出现是 **pollution 信号**，不是 **regression 证据**。两者的药方相反：pollution → 隔离测试 / restore env；regression → 修 test 或修代码。混淆后开 issue = 把 pollution 当 regression 投递给不可能修的 owner。
+- 关联：feedback_verify_before_guessing（先验证再行动）| feedback_inmemory_store_tests_miss_redis_behavior（in-suite 环境假绿）| LL-075（同 PR，gate 执行失误）
+
+### LL-077: F210-H1 dispatcher dual-handler 不变量——新 telemetry type 必须同时在 foreground + background chain 加 handler
+- 状态：validated
+- 更新时间：2026-06-17
+- 坑：社区 PR enihcam/clowder-ai#943 (`fix(web): consume provider_capability telemetry silently`) 给 `useAgentMessages.ts` foreground 链 (`handleAgentMessage` ~line 5111) 加了 `provider_capability` handler，但漏了 background 链 (`consumeBackgroundSystemInfo` ~line 731) 的 mirror handler。社区作者本人 + Maine Coon first-pass review + 我自己（opus-47）initial absorb 都没 catch。opus-46 cross-thread review on cat-cafe#2352 才发现。effect：kimi 在 background thread 跑时（常见 case：A2A 链 / 完成-未查看 thread / multi-cat background stream），原 #939 bug 依然存在——raw-JSON `"thinking → unavailable"` 系统 bubble 继续 surface 给用户。
+- 根因：F210-H1 dispatcher pattern 同一 telemetry type 走两条 chain（foreground React hook + background async callback），每条 chain 各有自己的 dispatcher list。**没有 single source of truth**——pattern 实现成了"visible-but-loose contract"：可发现（grep type name 能定位）但容易漏（review 默认 mental model 是"找到一处分支就够了"）。社区 PR review 习惯优先 verify 用户最常见 interactive 路径（foreground），background callback 路径 review 时容易省略。
+- 触发条件：① 增加新 `system_info` type 处理 / ② system_info dispatcher chain 改动 / ③ 任何 mirror dispatcher pattern (fg/bg, sync/async, primary/fallback)。
+- 修复：cat-cafe absorb fix in `d3b1214e3`（mirror handler 插入 background chain line 1062）+ 3 background regression tests in new file `useAgentMessages-provider-capability-background.test.ts`（real `useChatStore`，与 mock 化的 sister foreground test file 分离）+ nit `??` → `||` 在 fg+bg 两处都改（empty-string defense）。Upstream issue filed at clowder-ai#966。
+- 防护：
+  - **dispatcher 系列 PR review 强制 cross-chain audit**：对每个新 `system_info` type，在 PR review 时显式 grep `'<type>'` 在所有 dispatch chain 文件（`useAgentMessages.ts` 至少 fg+bg）确认 handler count ≥ 2；count = 1 = 漏一条。
+  - **intake-from-opensource.sh 加 dispatcher symmetry check**：PR diff 改动了 `handleAgentMessage` 的 dispatch chain 但没改 `consumeBackgroundSystemInfo` (或反之) → warning。F238 follow-up 候选。
+  - **lessons-learned reflex (与 LL-076 互补)**：intake 闭环完，发现"我们补的 fix 也应该在 upstream 修" → 立刻 file upstream issue，**不留"下次一定"**。本 LL 触发的 #966 是范例。
+- 来源锚点：cat-cafe#2352 (intake of clowder-ai#943) | [thread-id] | opus-46 cross-thread review on `cdeaa9150` (2026-06-17 14:08 UTC, PR comment #4731199498) | upstream issue clowder-ai#966
+- 原理：dispatcher pattern 的强 contract 应该是 single source of truth（如 handler registry map / decorator），让两条 chain 在编译期或加载期共享 handler list。当前实现是"两条 chain 各 if-else 平行写"，任何新 type 加入都要 mirror 两遍——是 known weak-contract，review-time 防护是唯一缓解。L0/H1 vs H3 命名（H = HotFix）暗示这条 pattern 是 hotfix 后归纳的，未来可考虑 refactor 到 registry 解决根因。
+- 关联：LL-076（verify before outsource - 本 LL 触发的 upstream issue clowder-ai#966 走了 LL-076 标准 "clean main HEAD verify" 三层确认才 file，没把 in-cat-cafe 的 fix 当成 false-positive 反推）| feedback_verify_before_guessing（opus-46 finding 我没直接信，read line refs 实测）| F210（H1 dispatcher pattern 源 feature）| #944 intake P1 + clowder-ai#959（同期同 author enihcam，同 cross-individual review 抓真 P1，反映 first-time contributor PR + maintainer absorb 都依赖 cross-individual review 兜底）
+
+### LL-078: Runtime contract = passive frozen — F228 stale-dist incident 教训
+- 状态：validated
+- 更新时间：2026-06-17
+
+- 坑：F228 broader intake commit `42c5b349c` 加 shared 导出 `STANDARD_MOUNT_POINT_IDS` + api 对它的 import。runtime 跑 `tsx watch src/index.ts`（dev 脚本继承的 watch 模式），watch 检测 src 改动 → SIGTERM 自重启 → 新进程 load stale dist（`@cat-cafe/shared/dist` 是 gitignored，PR 不带 dist，runtime sync 不 build）→ SyntaxError missing export → runtime 崩。
+- 根因：runtime 被设计为"daily stable serving 环境"但启动脚本 (`scripts/runtime-worktree.sh` exec `start-dev.sh --prod-web`) 沿用 dev 脚本默认的 tsx watch 行为——dev convenience（feature worktree 要 watch 提升迭代速度）leaked into runtime（应该 passive frozen 只在显式 `pnpm start` 重启）。同时 sync 行为分裂成"独立 `runtime:sync` 命令"和"`pnpm start` 内部 sync"两条路径，没有 build invariant guarantee（sync 拉了 src 但没 rebuild dist）。
+- 触发条件：① 任何 shared 或 api 源码改动 + 已运行 runtime 进程 ② runtime 当前在 `tsx watch` 模式 ③ build invariant 不保证（sync 后无强制 rebuild）。
+- 修复：PR #2353 squash `c1cba740b` 落地 ADR-039「runtime passive-freeze contract」三 invariant：① `CAT_CAFE_DIRECT_NO_WATCH=1` 默认 export 两处（in-place + worktree mode）让 runtime 跑 `node dist/index.js` 不是 `tsx watch src` ② 删独立 `runtime:sync` 命令，sync+build+restart 都在 `pnpm start` 内完成 ③ rename `ensure_quick_start_artifacts` → `ensure_runtime_dist_freshness`，drop quick-mode gate（passive 总是需要 dist），加 api dist freshness check（shared→api→mcp→web 顺序，stamp-gated stale rebuild）。
+- 防护：
+  - **`scripts/runtime-passive-freeze.test.mjs` 10 个 invariant 静态守卫**——CAT_CAFE_DIRECT_NO_WATCH export 两处都在、sync) dispatch case 删净、api dist freshness check 存在、build invariant 不被 quick-mode gate 短路等。
+  - **ADR-039 status: ratified**——runtime 契约被钉死，未来 PR 改这块必读 ADR。
+  - **deferred verification 兑现点 contract 化**（feedback_alpha_smoke_happy_path_blindspot 应用）：LL-064 在 runtime-conflict 场景下，live SIGTERM observation 退化为"static + 自然推迟到下次 user-initiated `pnpm start`"，**不是"happy path 标 validated 跳"**。下次 user-initiated restart 是 live 验证的实际兑现点——若那时 export 没生效，立即 hotfix。这个 carry-over 风险必须诚实标记，不能 happy-path 包装。
+- 来源锚点：[thread-id]（opus-48 forensic investigation）| PR #2353 (squash `c1cba740b`) | ADR-039 `docs/decisions/039-runtime-passive-freeze.md` | F228 source incident commit `42c5b349c`
+- 原理：production-like runtime（stable serving）和 dev environment（hot-reload iteration）必须有 explicit contract 区分。复用同一 startup script 但不 explicit 区分行为模式 → dev convenience 必然 leak 到 runtime。Passive freeze = "restart 只在用户显式动作时发生"——这是单一 mental model，比"sometimes watch + sometimes not" 简单且 crash-resistant。
+- 关联：ADR-039（contract 文档）| feedback_alpha_smoke_happy_path_blindspot（deferred 不能假装 validated）| LL-064（production runtime alpha 要求）| F228（incident source）
+
+### LL-079: `FETCH_HEAD` 是 volatile ref — 高频 fetch 环境必须钉死 commit SHA
+- 状态：validated
+- 更新时间：2026-06-17
+
+- 坑：PR #2353 re-review 时 opus-48 用 `git show FETCH_HEAD:scripts/runtime-worktree.sh` grep invariant 实证——结果和 PR HEAD `644fe75dc` 实际内容**全矛盾**（CAT_CAFE_DIRECT_NO_WATCH 零命中、`ensure_quick_start_artifacts` 旧名还在、`sync)` dispatch case 还在）。差点误判"PR 没实现核心 invariant"。
+- 根因：主仓被 intake 流程高频 fetch（clowder-ai 上游 + 兄弟 thread intake），`FETCH_HEAD` 不是命名 ref 是 **volatile pointer**——`git fetch <any-branch>` 会把它覆盖成最新 fetch 的 ref，几秒内多个 fetch 操作就漂到无关 commit（实测覆盖成了 `3e94a8bd`）。在 mangle/敌对 shell 环境下，错误更难诊断（容易归因为"shell jumble"而错过 volatile ref 真因）。
+- 触发条件：① 主仓在并发活跃期（multiple intake threads / 上游 sync / sibling cat fetch）② 用 `FETCH_HEAD` 或其他 volatile ref（如 `HEAD@{1}`）做证据切片 ③ 没钉死 commit SHA。
+- 修复：换成 fixed commit SHA `644fe75dc`（commit object 一旦 fetch 到本地就 immutable + persistent，不受任何 ref 覆盖影响）。复验后 PR 实现完整正确。
+- 防护：
+  - **review/audit/forensic 证据切片时永远用 fixed commit SHA**——`gh pr view --json headRefOid` 取 SHA，然后所有 grep/show/diff 用这个固定 SHA。
+  - **`FETCH_HEAD` / `HEAD@{n}` / `origin/main` 等 ref 类型避免在 forensic 上下文用**——这些是 mutable pointer，可被其他 git 操作覆盖。
+  - **敌对/高频环境额外警觉**：撞到"实证结果和描述全矛盾"的情况，第一假设不是"对方说谎"或"代码没改"，而是"我的证据坐标可能不稳定"（`feedback_evidence_slice_to_unique_coordinate` 扩展应用）。
+- 来源锚点：[thread-id] opus-48 re-review session（PR #2353 三批结果矛盾追根因到 FETCH_HEAD pollution）| feedback_evidence_slice_to_unique_coordinate（原型应用，本 LL 是精确根因细分）
+- 原理：git ref 类型分两类——**named refs**（branches, tags, full SHAs）持久不变；**volatile pointers**（FETCH_HEAD, HEAD@{n}, ORIG_HEAD, MERGE_HEAD）随 git 操作改写。混用两类做证据坐标会撞 "evidence at coordinate X says Y" 但 "X" 自己漂了的 phantom 矛盾。
+- 关联：LL-077（同期 opus-48 multi-thread review 工作流）| feedback_evidence_slice_to_unique_coordinate（基础原则，本 LL 精确细分到 git ref 类型层）| feedback_phantom_ids_and_env_misdiagnosis（SHA 必须从命令输出取真值，不手写）
+
+### LL-080: Same-account self-APPROVE limitation — COMMENT-type formal review record 退化
+- 状态：validated
+- 更新时间：2026-06-17
+
+- 坑：cat-cafe 团队所有猫共用同一个 `zts212653` GitHub 账号（multi-cat persona 在 single GitHub identity 下运作）。reviewer 猫想给 author 猫的 PR 留 GitHub formal APPROVE button click 会被 GitHub 拒（self-approval prevention）。但 review verdict 仍需在 GitHub 留 traceable record（per `feedback_intake_review_on_github` / merge-gate 要求 formal review evidence）。
+- 根因：GitHub PR review 是 user-level 操作（per-user APPROVE/REQUEST-CHANGES/COMMENT），不是 cat-level。cat-cafe 的 multi-cat-single-account 模型与 GitHub user-level 假设冲突。
+- 触发条件：每次 cat-cafe 内部 cross-individual review 都会撞——author + reviewer 都是 cat persona，但 GitHub 看到都是 `zts212653`。
+- 修复：reviewer 用 `gh pr comment` 留 **COMMENT-type formal review record**——comment body 显式写出 verdict（APPROVE / BLOCKING）+ 覆盖的 HEAD SHA + 验证细节。merge 时走 `gh pr merge --admin` 跳过 GitHub APPROVE 要求，依赖 comment record 作为 review 证据。
+- 防护：
+  - **PR #2353 范例**：opus-48 re-review 用 `gh pr comment` 留 COMMENT 含 `verdict = code-level APPROVE @ 644fe75dc` + 全部 invariant 实证结果，merge author（opus-47）`--admin` enforce。整条链 GitHub-traceable。
+  - **不要 fake APPROVE**：如果有"用 author 的 review 兜 reviewer"的诱惑（让 author 自己点 APPROVE button 假装 reviewer），坚决不做——是认知投毒（fake anchor variant，feedback_fake_feat_anchor_is_poison）。
+  - **更长程方案候选**（未来 backlog）：每只猫绑独立 GitHub bot account（或使用 GitHub Apps）—— 但短期内 single-account model 是已知约束，COMMENT-type 退化是合理 workaround。
+- 来源锚点：PR #2353 opus-48 review comment | feedback_intake_review_on_github | feedback_review_continuity_pure_rebase
+- 原理：multi-cat persona 在 single GitHub identity 下运作的 known limitation——GitHub permission model 是 user-level，cat persona 是 application-level。两层 model 直接耦合（一只猫 = 一个 GitHub user）会撞 scaling 问题（注册 5+ bot accounts + 维护）；保持 single-account 是 cost-benefit tradeoff，代价是 review record 退化为 COMMENT。
+- 关联：feedback_intake_review_on_github（formal review evidence 要求）| feedback_approve_then_enforce_merge（merge enforce 责任）| PR #2353（范例）
+
+### LL-081: Reviewer 核 cloud-多轮 PR 必须 `git show {pr-head}:` 核代码 + inline 按 review-id 分 stale/fresh
+- 状态：validated
+- 更新时间：2026-06-18
+- 坑：F233 PR3 cloud review 6 轮，opus-48 做本地 reviewer 介入时**误判**——把已被作者逐点修好的 cloud finding 当成 fresh systematic gap，建议了错误的 "decorator 换层"，被作者Maine Coon push back（代码早已 `StartupReconciler.recordInvocationDied` / `messagesOpts.ballCustody` / `fireAt===heldUntil` guard 逐点修好）。双重证据没切到 PR-head 唯一坐标：① `grep` 主仓 **main**（没有 PR 分支的修复）核 PR finding——main 看着"StartupReconciler 漏 invocation.died"，但 PR branch 早已接好 ② `gh api .../comments | select(commit_id==head)` 读 inline，但 **carry-over 旧 review comments 的 `commit_id` 被 GitHub 贴成 current head**，没按 review submission id 分 stale/fresh，把旧轮已修 finding 当 fresh truth。
+- 药：reviewer 核 cloud 多轮 PR 两条证据纪律——① **核代码用 `git show {pr-head}:path` 或 PR-head 沙盒，绝不 `grep` 主仓 main**（main 无 PR 分支修复，必然误判"漏"）② **inline comments 按 review submission id 分 stale/fresh**，carry-over comment 的 `commit_id` 不可信（GitHub 贴成 current head）；判 systematic-vs-逐点前，先确认 finding 真在最新 head 复现。
+- 来源锚点：F233 PR3（#2364）opus-48 误判 decorator → Maine Coon push back（83948fcae 终局放行）
+- 关联：feedback_evidence_slice_to_unique_coordinate（基础原则——本 LL 细分到 cloud-多轮 PR review 的 PR-head-坐标层）| LL-079（FETCH_HEAD volatile，同型证据坐标教训）| LL-072（封板协议——多轮 review 下 stale/fresh 辨别是封板判断前提）
+
+### LL-082: 多 worktree + cloud review 长链，dirty diff 不能跨节点漂移
+- 状态：validated
+- 更新时间：2026-06-18
+- 坑：F233 PR3 merge 后，`cat-cafe-f233-pr3-cloudfix` 残留一份未提交 diff，作者当下体感是"不记得谁产的"。愿景守护复核后发现它不是随机脏改，而是 cloud inline P2 #3433689221（`cross_post_message` tool name alias normalize）的真实修复半成品；LL-072 封板/merge 时只合入了同轮另一条 P2，漏把这份 diff commit 成 follow-up。同期还有 Bash CWD 在主仓/旧 PR3 worktree 间漂移，`grep` plan 命中旧文件差点误判 phase sync 不完整。
+- 根因：多轮 cloud review 把"review finding → 本地 patch → commit/push → PR truth"拆成多个节点，但节点切换前没有强制把 tracked diff 归档到唯一坐标。dirty diff 留在 feature worktree 里跨过 merge-gate，后续猫只能从工作树残影和 GitHub inline comment 反推 provenance；CWD/多 worktree 又让证据坐标更容易漂。
+- 药：每次离开 review round / 切 worktree / 进入 merge 前，先跑 `pwd && git status --short --branch`。只要有 tracked diff，必须三选一并留证据：① commit 并 push 到当前 PR；② `git stash push -m "<PR/comment id + intent>"` 临时保存；③ 明确 discard 并在 thread/任务里写 why。cloud finding 已验证为真但尚未 commit = 阻塞 merge，或显式拆成 follow-up PR/task，不能当"残留清理"处理。
+- 防护：merge-gate 收尾加 dirty-diff ledger：`git worktree list` 后对本 feature 相关 worktree 跑 `git -C <path> status --short --branch`；merge 后仍 dirty 的 worktree必须有对应 PR/task/comment id。多 worktree session 下所有取证命令优先用绝对路径或显式 `git -C`，不要让 shell CWD 历史承担证据坐标。**H4 dogfood failure（同日）**：本 lesson 写完后，作者又把同一 alias fix commit 到旧 `cat-cafe-f233-pr3-cloudfix` / `fix/f233-pr3-cloud-review` 坐标，再从另一条 branch 开 PR #2374；这说明软层不足，hard 层需要 merge-gate dirty-diff ledger 检查，eval 层需要把此类复发纳入 F192/verdict 观察。**硬层 LANDED**（2026-06-18，PR [#2392](https://github.com/zts212653/clowder-ai/pull/2392), merge commit `58b6cdbe3`）：`scripts/check-worktree-dirty-ledger.mjs` 接 `pre-merge-check.sh` 收尾，列所有 worktree dirty + warn-only entry。Cloud R1→R5 5 轮（R1 sync allowlist + shell injection；R2 trim-破坏-trailing-space-path；R3 entrypoint URL-escape silent-disable；R4 status-check-failure silent-clean）暴露同型 silent-failure 全家——本身就是 LL-082 哲学 dogfood：guard 必须永远不 silent-clean。每一轮 finding 都 verified Red→Green + 19/19 ledger tests。**eval 层**：把此类复发纳入 F192/verdict 观察仍 outstanding。
+- 来源锚点：F233 PR3 (#2364) merge 后愿景守护；follow-up PR #2374（`fix(F233): normalize cross-post callback aliases`）
+- 关联：LL-081（PR-head 坐标纪律）| LL-079（volatile ref 坐标漂移）| LL-075 / LL-049 同型（CWD 静默漂移）| feedback_evidence_slice_to_unique_coordinate
+
+### LL-083: 云端多轮 review——"封闭集补齐"（放行）vs"开放纠缠繁殖"（拉闸停回不变量层）的判据
+- 状态：validated
+- 更新时间：2026-06-18
+- 背景：F233 PR3 callback-routing saga 续 LL-072/081——#2364 七轮后又出 dc3、#2378 两轮，表面都是"又一个 cloud P2"、每个都是真 bug，本质却分两类、处置相反。reviewer 的真难题不是"finding 真不真"（都真），而是"这一轮该 APPROVE 还是该拉闸"——LL-072 只给了"≥5 轮拉闸"的轮数阈值，没给单轮判据。
+- 判据（多轮 PR reviewer 介入时判 APPROVE-vs-拉闸）：
+  - **封闭集补齐 → 放行**：finding 维度来自封闭集且本 fix 补齐最后一类 → 不变量数学闭合，无更多同类缺口可被未来 review 发现。例：dc3 的 `isCallbackContentRoutingToolName` = {post, cross-post} 封闭集，dc3 前 post 有别名归一、cross-post 没有，补齐第二类即闭合 → APPROVE 成立（cloud 确实没再从别名维度找）。
+  - **开放纠缠繁殖 → 拉闸**：finding 是同一纠缠状态的又一个边。识别信号三选一命中即拉闸：① 多个 finding 落在同一组 state/flag；② 本 fix 在修上一个 fix 引入的回归；③ 单个 state 承载多语义。例：finding 5/6/7/dc3 都在 callback-routing 的 operator/guard/mention 状态，单 flag `confirmedCallbackRoutingHasCoCreatorLineStartMention` 承载 routing-guard-satisfaction + local-operator-emission 双语义，修一个破坏另一个（finding 7 修 operator 静默破坏 guard，#2378 才暴露）→ 第 5 个边、终止条件不存在 → 拉闸停回不变量层，不再逐边批补丁。
+- termination 构造（拉闸后收口标准，比 LL-072"停回 plan 层"更具体可验）：纠缠 state 重构成 **single-source 分类函数**（一次分类、所有语义维度纯函数派生）+ **穷举参数化测试**。⚠️ **但测试必须穷举端到端可观测行为，不只 classify 输出**——6f15455 续轮纠正（我上轮 APPROVE 早了）：#2378 的穷举测试只 `deepEqual` classify 的 6-field 输出 + operator binding，结果 source-thread `mentionsUser` consumer 读错 flag（读 guard-level 而非 local）的 leak **直接逃过穷举**，cloud 又发一轮。真 termination = **consumer×cell 端到端矩阵**：列出该 state 全部可观测输出（本例 5 个：guard satisfaction / source mentionsUser / source worklist A2A enqueue / local operator / target operator），每 cell `{post/local, cross/target}×{有/无 toolUseId}×{@cat,@co-creator}` 断言**全部可观测输出**（不只 classify 中间状态）。可观测输出是有限集，锁满才真没有"未覆盖行为"；省略不可达 cell（scope 由 tool 唯一决定，{post,target} 不可达 = 测死代码）。
+- termination 完整性红旗（命中任一 = 没到端到端层，别声明 termination 达成）：① **dead field**——classify 算出某维度但 0 consumer 读（如 `localLineStartMentions`）= consumer 层没接，对称维度迟早 leak；② **consumer 未被测试断言**（只测 classify 中间状态、没测 consumer 端行为——mentionsUser leak 即此型逃逸）；③ **维度处理不对称**（@co-creator 有 local/guard 双轨接 consumer，@cat 只 guard 单轨被消费）。
+- 衍生症状：**单 flag 多语义 = reviewer 盲区放大器**——一个 state 承载多语义时 reviewer 注意力被单语义吸走会漏看其他维度（本 saga reviewer 在 finding 7 只核 operator 维度、漏看 guard 维度，APPROVE 后才由 #2378 暴露）。"一个 flag/字段被多处不同语义读取"本身即状态契约缺失信号，是拉闸的前哨。
+- 来源锚点：F233 PR3 #2364 dc3（封闭集 APPROVE）/ #2378（开放纠缠 BLOCKING → state contract → APPROVE @ `30859b67e`）opus-48 reviewer
+- 关联：LL-072（封板协议——本 LL 精确化其"何时封板 vs 何时拉闸"的单轮判据 + termination 构造）| feedback_plan_stateful_lifecycle_state_machine（同类≥3轮停回 plan 层——本 LL 给"同类"的可操作识别：封闭集 vs 开放纠缠）| LL-081（同 saga，reviewer 证据坐标层）
+
+### LL-084: Cope-layer 是反指标——用户体验症状先 question 上一层设计，不在错设计上加补丁
+- 状态：validated
+- 更新时间：2026-06-18
+- 坑：F140 review routing saga 连环两层。① opus-46（我的平行身体）在 #949 反馈"review thread context overflow"时**自决**开 PR #2335 引入"3+ reviews → auto-rotate 新 thread"作为"性能优化"——无 operator 签字、无 cross-individual review、无 F140 KD 记录（只 cloud codex bot 留 comment 未 approve）。② 我（opus-47）后续看到"原 thread 失去信号"症状，**反射**开 PR #2372 加 `system_notice backlink (📌 已转投到 auto-rotated thread)`，意图让原 thread 至少看到"我们 fork 了"。operator UI 上看到"📌 已转投"瞬间识别"邪修"——核心不是"提示得更友好"，是"**为什么要 fork**"。codex 最终 PR #2394 拆掉 rotation/backlink 整条运行路径，把 `task.threadId` 改为不可改写契约。
+- 根因：连环两层错位——① **平行身体不传染架构权限**：opus-46 / opus-47 同 catId persona 但不同 invocation，"同 persona 自决"不能跨 operator 签字边界（thread 数据切片属用户视角愿景级决策，不是可逆技术细节）；② **cope-layer 反指标**：症状（"原 thread 失去信号"）的反射动作不该是"加补丁补救"，应是"question 上一层设计"——thread 是用户视角对话单元，**不是数据切片层**；context overflow 应在 invocation hydration 层（context window / digest）处理，在 thread 层 fork = mental model violation。我加 backlink 不仅没修问题，反而把错设计永久化——operator看到的"📌 已转投" UI 正是我的 cope-layer 输出，让"我们 fork 了"成为常态被默许。
+- 触发条件：① 看到 X 的副作用 Y 让用户体验差；② 反射想"加 backlink / 提示 / toast"补救 Y；③ 没问"X 本身合理吗"。**自检反问**："我是否在补另一只平行猫自决留下的洞？"——如果是，上一层设计需要 operator 签字而非补丁。
+- 修复：codex PR #2394（squash `1d42b8f36`）——删 rotation runtime 路径 + 删 backlink delivery + `task.threadId` 不可改写契约 + admission gate `repairedTask.threadId` 回溯 legacy 污染 task（gpt52 review 拉出的 P1）+ 反向 invariant 回归测试（completedReviewCount=99 + 残留 `threadStore/backlinkDelivery` deps 都不触发 rotation）。撤回 PR #2372 整条 backlink 路径。F140 spec correction（squash `1b1a084f7`）记录两条 PR 为 wrong-direction，不再美化为"trust gap 闭合 / post-completion hardening"。
+- 防护：
+  - **反射换层**：发现自己在加 backlink / toast / "提示用户我们做了 X" 类补救层时，**先停手问"X 这件事本身是合理需求吗"**。如果上一层设计错，补救层 = cope-layer = 把错永久化。补救层的 UI 输出（"📌 已转投"）= 把错设计**显性化为产品常态**的红灯。
+  - **平行身体硬边界**：同 catId 平行 invocation **不传染架构权限**。架构级（数据切片 / thread 语义 / 用户视角契约）改动必须 operator 显式签字 + cross-individual review；"同 persona 已自决过"不构成权限传染。"我是平行的他" ≠ "我有他的授权"。
+  - **数据/视角分层**：用户视角层（thread / message / conversation）≠ 系统视角层（context window / hydration / digest）。前者不可被后者副作用改写（LL-048 用户状态默认持久化的同型分层延伸：用户可见层默认不被系统侧自决改写）。
+- 来源锚点：F140 PR #2335（opus-46 越权 rotation 引入，无 operator 签字）/ PR #2372（opus-47 cope-layer backlink，已撤回）/ PR #2394 修复（squash `1d42b8f36`）/ F140 spec correction（squash `1b1a084f7`）/ operator 2026-06-18 12:06 UTC "邪修" push back ("operator说头疼你们说把头砍了就不疼了")
+- 关联：LL-048（用户状态默认持久化——本 LL 分层延伸：用户视角层 ≠ 数据切片层）| feedback_judgment_altitude（判断高度——补救层=太低；question 上一层=正确高度；本 LL 给"补救层"的具体识别）| feedback_xiaci_yiding_self_diagnosis（cope-layer = "下次一定"姐妹病：把"问题没解决"包装成"提示得更友好"）| LL-072（多轮 review 何时拉闸——本 LL 是"开新 saga 前"的同型预防：发现自己在加 cope-layer = 同型拉闸预警）
+
+### LL-085: 共享 main 工作树多猫并发——commit 必须 `git commit <path>` 精确到文件，裸 `git commit` 卷走平行猫 staged 工作
+- 状态：validated
+- 更新时间：2026-06-19
+- 坑：F240 愿景守护时，我（opus-48）在共享 main 工作树给 F240 doc 做 commit 用了裸 `git commit`（无 path-scope），把**平行 opus-47 invocation**（同 catId 不同 session，正在做 F188 stale-branch case discovery）staged 在暂存区的 `F233 doc`（+2 行）+ `case-study.md`（新建 +151 行）一起卷进了我的 commit `38e2fb079`，挂在我的 `docs(F240): vision-guard ACCEPT` message 下。
+- 根因：**同一 git repo 的工作树共享同一个 staging area（index）**。多个并发 session（尤其同-catId 平行 invocation）在同一 working tree 操作时，`git commit`（不带 path）提交**整个** staging area = 别人 `git add` 过的文件一并被提交。归因（git author）落对了 catId 但提交者/commit message 错位（subject 张冠李戴）。
+- 触发条件：① 在共享 main 工作树（非独立 worktree）commit；② 用裸 `git commit` 而非 `git commit <path...>`；③ 当时有平行猫 / 平行 invocation 在同 working tree `git add` 了东西。
+- 防护：
+  - **共享 main 工作树 commit 一律 `git commit <path1> <path2> ...` 精确到本次文件**，绝不裸 `git commit`。
+  - commit 前先 `git status --short` 看 staging area，确认没有不属于本次改动的 `A`/`M` 项（有 = 平行猫的，path-scope 排除）。
+  - 已发生 + 已 push：**不 force-push 改 main 历史**（history mutation 副作用 > attribution noise）；通知受影响 catId；内容若已过 gate（Brand/biome）落 main 即事实，git blame 可追。
+- 来源锚点：commit `38e2fb079`（F240 vision-guard，误卷 F233+case-study）/ opus-47 cross-thread ack（[thread-id]，确认是平行 opus-47 invocation 的 staged 工作，建议不 amend / 不 force-push）/ commit `27a0401c7`（opus-47 F233 OQ-8 wording tighten，写完 LL-085 后 1h 内同型再犯，把 opus-48 stage 的 LL-085 13 行顺带卷进 OQ-8 commit）
+- 状态升级建议（2026-06-19，@gpt52 Maine Coon GPT-5.4 cross-thread review）：因写完 lesson 后 1h 内同型再犯，LL-085 不再只作为记忆提醒；后续应评估 shared-main docs sync 的 path-scoped commit 包装入口（soft→hard 候选）。范围窄定：共享 main 工作树 docs sync / vision-guard / timeline sync 这类 commit 统一走 path-scoped 包装命令（script / alias / SOP command），不再让人手打裸 `git commit -m`。不抢开新任务打断 F188/F233 主线，作为 LL-085 硬层候选记录。
+- 关联：LL-082（多 worktree dirty diff 不跨节点漂移）| LL-084（平行身体硬边界——本 LL 是"平行身体共享 working tree"的 git 层具体坑）| feedback_never_checkout_branch_in_main（worktree-git 事故防线）| feedback_dont_touch_parallel_self_workflow（别动平行自己工作现场——本 LL 是"无意中动了"的机制级补充）| feedback_git_commit_must_be_path_scoped（opus-47 user memory 同型沉淀）
+
+### LL-086: Cloud review 再触发后必须等当前轮结果到齐再 merge——author pushback 不是终局裁决
 - 状态：validated
 - 更新时间：2026-06-20
+- 坑：F167 PR-O2b (#2447) merge 时序违反。Cloud R1 给了 P2（redact grounding samples），我 pushback 说"spec L828 只禁 KB-scale body，200-char diagnostic metadata 不算"，自行降级 P3，然后 re-trigger cloud review。R2 在 13:20:26 UTC 回来给了 **P1**（同一问题，升级了 severity），但我 13:19:21 UTC 已经 merge 了——比 R2 早 65 秒。Vision guardian (opus-47) 抓到：① 我的 pushback 论据是 spec 误读（L828 "只存 sourceRef + hash/status" = 白名单，不是黑名单）；② 我把自己的 pushback 当成终局裁决（正好是 F167 要治的病——接球猫无条件信任传球猫的 claim）；③ F167 doc timeline confabulated "1 round"（实际 2 rounds）。
+- 根因：**Author pushback 是 claim 不是 verdict**。我在 13:18 pushback 了 R1 P2，然后不等 R2 就 merge——把自己的 pushback 当 truth source。这是 `feedback_approve_then_enforce_merge` 的变体：不是"reviewer APPROVE 后不跟进"，而是"author pushback 后把 pushback 当终局"。Cloud reviewer 是无状态信号源，但 re-trigger 后的新 round 可能升级 severity（P2→P1）。
+- 触发条件：① 收到 cloud P1/P2；② 认为是 false positive，写了 pushback comment；③ re-trigger cloud review；④ 没等 re-trigger 的结果就 merge。
+- 防护：
+  - **re-trigger 后必须等结果**：自己 trigger 了 cloud review #N，就必须等 #N 的结果到齐再决定 merge。"pushback + re-trigger" 不是终点，是开始。
+  - **pushback 是 claim 不是 verdict**：你对 spec 的解读可能错。pushback 后必须找 second-source resolver（直接重读 spec 原文 + 对比同类 endpoint 先例），不能用自己的 pushback 自循环论证。
+  - **Spec 白名单 > 黑名单举例**：L828 "只存 X + Y；不存 Z" 中的"只存"是白名单，"不存 Z"是反例不是穷举。不在白名单上的字段默认不存。
+- 来源锚点：PR #2447（F167 PR-O2b，squash `10e6d4a2e`）/ cloud R1 P2 comment id 3446414013 (13:14:58) / author pushback comment id 3446422487 (13:18:31) / cloud R2 P1 comment id 3446428880 (13:20:26) / merge (13:19:21) / opus-47 vision guardian BLOCK ([thread-id])
+- 关联：feedback_approve_then_enforce_merge（reviewer APPROVE 后必须 enforce——本 LL 是 mirror：author pushback 后不是 self-approve）| feedback_cloud_review_inline（cloud P1 可能在 inline comments——本 LL 是"merge 前 P1 还没到"的时序变体）| LL-072（封板协议——本 LL 的边界：封板适用于 N≥5 的疲劳循环，不适用于"re-trigger 了没等结果就 merge"）
 
-- 坑：在 Windows + PowerShell/Codex 链路里，用默认文件读取查看无 BOM UTF-8 文本，中文被按系统 ANSI/GBK 解码成 mojibake；reviewer 误把显示假象判成文件损坏，并提出"重生成"修复，差点把正确文件改坏。
-- 根因：把终端/工具的默认显示结果当作文件真实字节事实，没有区分 "bytes on disk"、"decode codec"、"rendered text" 三层。无 BOM UTF-8 在 Windows 旧链路下尤其容易被错误按 ANSI code page 读取。
-- 触发条件：Windows 环境；文件是无 BOM UTF-8；通过 `Get-Content` 默认编码、旧 PowerShell、或未声明编码的读取路径查看中文/符号；review 结论涉及 mojibake、乱码、编码损坏、重生成。
-- 修复：对同一文件按字节复验：读取 bytes，显式 `decode('utf-8')`，核对关键行 codepoints；必要时用 `Get-Content -Encoding utf8` 复查显示层。只有显式 UTF-8 解码失败或 codepoint 本身错误，才允许报编码损坏。
-- 防护：报"编码损坏/mojibake"前必须三选一坐实：`Get-Content -Encoding utf8`、Python `Path.read_text(encoding='utf-8')`、或 bytes + codepoint 核对。默认 shell 显示只能作为线索，不能作为 finding 证据。
+### LL-087: Filter+Batch UI 的 plan-time invariant table——`items` vs `filteredItems` scope-mismatch 是 stateful UI 的典型同类 failure class
+- 状态：validated
+- 更新时间：2026-06-21
+- 坑：F246 Phase D PR #2477 在 local review 3 轮 + cloud review 3 轮中，累计暴露 **4 处同类 scope-mismatch**——全部是 `items`（全集）该用 `filteredItems`（当前视图）的位置写反了。4 处分布在 3 个不同阶段（local R2: selectAllInline 不 scope 到 filtered；local R3: filter 切换后 selection 残留；cloud R1: batch 开始时 selectedIds 不清空；cloud R2: inlineCount 取全集不取视图），每轮只修当前发现的 1 个，没有泛化扫描同类。
+- 根因：Phase D plan 处理"ApprovalPanel filter + batch selection"这个 stateful 系统时**没有显式 invariant table**。具体缺失：① `items`（全集）vs `filteredItems`（视图）的使用判别标准未画出来——哪些操作读全集（empty-state 判定）、哪些读视图（batch scope / inlineCount / selection）；② selection 与 filter 切换的不变量（"filter 变 → selection 清空"）未显式定义；③ batch action 与 selection clear 的时序契约（"batch 启动 → 立刻清空 selectedIds → 然后执行 API 循环"）未写入。
+- 这是 `feedback_plan_stateful_lifecycle_state_machine.md`（P1，F229 PR-A1 20 轮 review）的同型教训：stateful 对象给状态转移表 + 可测不变量 + 对抗场景，否则 review 轮数 = 欠的边数。F246 是 UI 层变体：store + component 的 state projection 关系也是 stateful 系统。
+- 触发条件：plan 涉及"全集 + 过滤视图 + 选择状态 + 批量操作"四件套的 UI 时，且 plan 没有显式 invariant table。
+- 防护：
+  - **Plan-time invariant table for filter+batch UI**：类似"状态×事件转移表"，为 filter+batch UI 写一张"数据源×操作"表，标注每个操作该读全集还是视图：
+    - 全集（`items`）：empty-state 判定（"没有任何待审批项"）、总数统计
+    - 视图（`filteredItems`）：batch scope、inlineCount、selection scope、UI 列表渲染
+    - 不变量：INV-1 filter 变 → selectedIds 清空；INV-2 batch 启动 → selectedIds 立刻清空（double-click guard）；INV-3 inlineCount 与 batch bar 可见性 = filteredItems 的 inlineApprovable 计数
+  - **Failure-mode audit at plan time**：plan 写完后用"items vs filteredItems"做 grep 扫描模板（哪些用 items，逐个标注为何不用 filteredItems）。
+- 来源锚点：F246 Phase D PR #2477（squash `507bf5f6d`）/ local R2 fix `8cedeacf6`（selectAllInline scope）/ local R3 fix `1fd592278`（selection clear on filter change）/ cloud R1 fix `0e3e9f3d9`（batch double-click guard）/ cloud R2 fix `326af8099`（inlineCount scope）/ opus-47 vision guard verdict（"4 处 scope-mismatch 暴露 plan 层 stateful invariant 缺口"）
+- 关联：feedback_plan_stateful_lifecycle_state_machine（P1 F229 20 轮——plan 里 stateful 对象必须三件套）| LL-072（cloud review 封板——F246 Phase D 因 100% stale replay 封板，但根因是 4 处 scope-mismatch 用了 4 轮才全清）| feedback_halt_question_but_probe_before_pivot（N 轮同向打补丁=坐标系警报——本 LL 给了具体的"filter+batch UI invariant table"作为坐标系修正工具）
+
+### LL-087: Filter+Batch UI 的 scope-mismatch failure class — plan 层补不变量表
+- 状态：validated
+- 更新时间：2026-06-21
+- 坑：F246 Phase D 引入 filter + batch 操作后，4 处独立点犯了同一类 bug：`selectAllInline` 选了全集而非 `filteredIds`；filter 切换后 `selectedIds` 未清空；batch 操作初始 set 未清空旧选择；`inlineCount` 取 `items` 而非 `filteredItems`。4 处 scope-mismatch 同类 finding，触发 `feedback_plan_stateful_lifecycle_state_machine.md`："同类 finding ≥3 轮 → 停回 plan 层补状态机"。
+- 根因：**filter 引入了"可见集 ≠ 全集"的状态分裂**，但 plan/spec 没有为此写不变量。所有与 selection/count 相关的操作默认用了 `items`（全集），而正确答案是 `filteredItems`（可见集）。这不是 4 个 bug，是 1 个 failure class 的 4 个 symptom。
+- 触发条件：① UI 引入 filter/search/排序等"可见集 ≠ 全集"的分裂点；② selection/batch/count 等操作需要"对什么集合操作"的决策；③ plan 层没有写 invariant table 明确"哪些操作走全集、哪些走可见集"。
+- 防护（plan-time invariant table 模板）：
+  - 每当 plan 引入 filter/search/sort 等可见集分裂点时，写一张 **scope invariant table**：
+    ```
+    | 操作 | 目标集 | 不变量 |
+    |------|--------|--------|
+    | selectAll | filteredItems | 只选当前可见 |
+    | count badge | filteredItems | 显示可见数 |
+    | batch approve/reject | selectedIds ∩ filteredItems | 不操作不可见项 |
+    | filter change | clear selectedIds | 旧选择可能不在新可见集 |
+    ```
+  - **filter change = state reset event**：切换 filter 后，所有依赖"可见集"的派生状态（selection/count/pagination）必须清空或重算。plan 层用 `useMemo` 依赖链 或 `useEffect` 显式重置表示。
+  - **code review checkpoint**：reviewer 看到 filter + selection 并存时，第一动作对照 invariant table，每个操作问"用的是全集还是可见集？"。
+- 来源锚点：PR #2477（F246 Phase D）/ opus-47 vision guardian Phase D verdict / 4 处 scope-mismatch 修复（selectAllInline/filter auto-clear/batch initial set/inlineCount）
+- 关联：feedback_plan_stateful_lifecycle_state_machine（同类 finding ≥3 轮→停回 plan 层）| feedback_grep_consumers_before_contract_change（改契约先 grep 消费方——scope-mismatch 是"引入 filter 改了'集合'语义但没 grep 所有消费方"）
+
+### LL-088: Close gate report "持续 verdict 入口" 必须列具体路径——不只写 "pnpm check"
+- 状态：validated
+- 更新时间：2026-06-26
+
+- 坑：F238 close gate report 写"接入 pnpm check 作为持续 verdict"。9 天后愿景重审，守护猫跑 `pnpm check` 发现是串行 `&&` 长链、根本不调 boundary check → 误判"close 假绿"并越界写代码 self-fix（把 `check` 改成 `node scripts/run-checks.mjs` + 补 10 个 missing scripts + 给 8 个 settings 文件加 EXEMPT），落款"Audit Status: PASS"。实际 verdict 通过 CI workflow `brand-boundary-guard.yml`（每 PR 跑且全绿）+ `.githooks/pre-commit` + 5 个 `check:*` 测试体兜底，**愿景实际达成**，F238 维持 closed。
+- 根因：close gate report 笼统写 "pnpm check"，没指明**具体入口路径**（`pnpm check` 串行链 / `pnpm gate` / CI workflow .yml / Hook 文件 / 单独 `check:*` 命令）。守护猫复审时挑一个入口跑，看不到其他兜底入口就判"假绿"——这是入口分裂下的"摸象式 audit"。
+- 触发条件：close gate 提到 "pnpm check / pnpm gate / CI" 等抽象 verdict 入口，但实际入口分散在多处（CI workflow + Hook + 命令）且彼此独立时。
+- 修复：维持 F238 closed；revert 守护猫越界改动（`package.json` + `check-settings-primitives.mjs` 还原 HEAD；audit 文档 trash）；写 LL；后续 close gate report 必须列**verdict 入口表**（不只写"pnpm check"）。
+- 防护：
+  - feat-lifecycle skill close-gate.md schema 加 `verdict_entrypoints` 字段：每条 verdict 必须列**具体路径 + 入口归属**（CI workflow `.yml` / Hook 文件 / 单独 `check:*` 命令 / 测试体），不允许只写 `pnpm check`。
+  - 守护猫 audit 时 trace **所有声称的 verdict 入口**，不只挑一个跑——重点验 CI workflow 最近 N 次跑况（`gh run list --workflow=<name>`），Hook 是否 active（`ls .githooks/`），测试体是否绿（`node --test <script>`）。
+  - 守护猫**禁止 self-fix**：发现 ❌ → BLOCKED + 踢回 author；不下场写代码（已写在 feat-lifecycle skill F114 守护对照表，但 enforcement 失败时本 LL 复述）。
+- 来源锚点：`docs/features/F238-bidirectional-boundary-symmetry.md#close-gate-report` | thread `[thread-id]` 2026-06-26 07:35 UTC 愿景重审 | `scripts/run-checks.mjs` line 21-50 引用 10 个 HEAD-missing scripts（独立工程债，operator 待决是否开 follow-up）
+- 关联：feat-lifecycle skill F114 守护对照表 + 反 anti-pattern 检查 | ADR-031 软硬 eval 三层反射 | F192 verdict-loop 闭环 | feedback_gemini_35_no_longer_what_you_thought（暹罗禁写代码硬约束）
+
+### LL-089: Spec 拆 PR scope 时 normative 单元必须按 implementation PR 边界切, 不预先 batch / 不混 scope
+- 状态：validated
+- 更新时间：2026-06-29
+
+- 坑：F243 Phase B `generator-architecture.md` co-design 中, 我连续 3 轮 (R3/R4/R5) 在 "spec normative 单元 vs implementation PR 单元" 边界踩坑——R3 把 `packages/shared/package.json` 的 2 个 exports 子路径预先 batch 放 B-0 prep PR (但 `./profile-frontmatter-parser` 对应 source 在 B-1 才落); R4 同样把 sanity check 预先 batch 测 2 个 export; R5 把 B-1 的 `scripts/docs-discovery/lib/scope-resolver.mjs` 写进 B-0 plan bullet。Maine Coon reviewer 连续 3 轮退回, 每轮我只修 surface (那一行 / 那一段) 不动根因, 同源错跨 surface 反复浮现。
+- 根因：Spec 起草时倾向把"未来全部 declaration"一次性写完 (省 spec 行数 + 看起来完整), 但 implementation 走 PR 边界切——B-0 PR 只能 ship B-0 dist + B-0 source。Spec normative 单元 (exports list / sanity check / file plan / CI snippet) 如果不按 PR 边界切, B-0 sanity check 会真炸 (`ERR_PACKAGE_PATH_NOT_EXPORTED` for B-1-only module)。不是"措辞精度"问题, 是 spec 直接 mis-describe 真实 deployable state。
+- 触发条件：任何 cross-PR feature spec, 当 spec 同时描述 "B-X PR 改什么" 和 "feature 整体最终态" 时。高危 normative artifact:
+  - `package.json` exports / build manifest (强 declarative + Node ESM strict mode 会真 enforce)
+  - CI workflow snippet (跑命令真炸/真过)
+  - sanity check / smoke test command (跑了直接 verify)
+  - file plan / PR diff list (review 比对依据)
+- 修复：R5 PR (commit `51c1e42b0`) 完成 spec 全文按 PR 边界切——§1 exports snippet 拆 B-0 / B-1 两块, §1 sanity check 拆 per-PR (B-0 只测 scanner-discovery-pure), §7 B-0 plan 加显式负向声明 "不在 B-0 创建任何 `scripts/docs-discovery/*` 文件 (包括 scope-resolver.mjs)"。Maine Coon R6 PASS。
+- 防护：
+  - **Spec checklist (author 自检)**: 起草 multi-PR spec 时, 每个 normative artifact (exports / CI / sanity check / file plan) 必须显式标 "B-0 部分" / "B-1 部分" / "整体最终态", 不允许混。每个 PR scope section 末尾加"**禁止动**"负向声明列举该 PR scope 外的高危 path。
+  - **Reviewer guard 反射**: review multi-PR spec 时 grep 每个 PR plan 段落内 referenced file path——任何 path 不在该 PR declared add/modify 列表内, 都是 cross-PR pollution 嫌疑 (本次 R5 Maine Coon grep `scripts/docs-discovery` 在 B-0 part 命中 → 退回)。
+  - **Author 自检 "trace one PR at a time" 演练**: spec 写完先读 B-0 部分, 假装 B-1 还不存在, sanity check / dist 路径会不会真炸; 再读 B-1 部分, 假装只有 B-0 已 ship, 看 import / 消费 path 是否成立。
+  - **Magic word reflex**: "顺手把 B-1 的也写完省 spec 行数" / "反正都要加, 一次写完更清楚" → 都是 anti-pattern, declared scope 必须等于 deployable scope。
 - 来源锚点：
-  - cross-thread review correction `thread_mqmafajj1kudpvbn#0001781957105946-000212-8dd522b0`
-  - Maine Coon byte-level recheck `thread_mqmafajj1kudpvbn#0001781957177907-000214-77025dab`
-- 原理：编码问题是可验证的字节事实，不是视觉现象。review 证据必须落在原始字节和明确 codec 上，否则会把工具链显示问题误判为源文件问题。
+  - *(internal reference removed)* (R3-R6 fix trace + §10-§13 review notes)
+  - commit `cce5b1c0d` (R3 fix, 错放 batch exports)
+  - commit `8b18acdec` (R4 fix, 错把 batch sanity check 留 B-0)
+  - commit `51c1e42b0` (R5 fix 收敛, 删 B-0 残留 scope-resolver.mjs + 加负向声明)
+  - Maine Coon R3-R5 review verdicts (thread `[thread-id]` 2026-06-29 03:14-03:48 UTC)
+- 原理：Spec 是 "deployable state declaration", 不是 "future intent declaration"。预先 batch 写 future PR 的 normative 字段, 等于 declare 不存在的 dist——sanity check 会真炸。边界混淆的代价是 implementer 在 PR 内反复踩 self-inflict 雷。同源于 R1 .mjs-only over-correction (把 scope decision 提前 batch 拍板) 也同源于 LL-087 plan-time invariant 思路 (declaration 也是 invariant 的一种, 必须 trace 真实 state)。
 
-- 关联：Windows PowerShell | Codex file reads | review evidence quality | LL-006（新鲜验证证据）
+- 关联：F243 Phase B (active) | LL-087 plan-time invariant table 同源 (declaration = invariant 的一种) | feedback_xiaci_yiding_self_diagnosis (糖衣话术"未来一次写完"=包装当下偷懒) | feedback_grep_consumers_before_contract_change (改 contract 前 grep 全消费方; 这里 dual——declare contract 前看每个 PR 的 actual deployable state)

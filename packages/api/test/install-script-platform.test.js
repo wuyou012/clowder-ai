@@ -7,6 +7,7 @@ import { assert, runSourceOnlySnippet } from './install-script-test-helpers.js';
 const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(testDir, '..', '..', '..');
 const installScriptText = readFileSync(resolve(repoRoot, 'scripts', 'install.sh'), 'utf8');
+const installPs1Text = readFileSync(resolve(repoRoot, 'scripts', 'install.ps1'), 'utf8');
 
 test('install script supports macOS (Darwin) as a platform', () => {
   assert.match(installScriptText, /Darwin\)/);
@@ -17,6 +18,24 @@ test('install script supports macOS (Darwin) as a platform', () => {
 test('install script header lists macOS as supported', () => {
   assert.match(installScriptText, /macOS/);
   assert.match(installScriptText, /Homebrew/);
+});
+
+test('Windows installer salt generation uses PowerShell 5.1-compatible RNG API', () => {
+  assert.match(
+    installPs1Text,
+    /\[System\.Security\.Cryptography\.RandomNumberGenerator\]::Create\(\)/,
+    'install.ps1 must create an RNG instance available on .NET Framework',
+  );
+  assert.match(
+    installPs1Text,
+    /\$rng\.GetBytes\(\$bytes\)/,
+    'install.ps1 must fill the byte array through the instance API',
+  );
+  assert.doesNotMatch(
+    installPs1Text,
+    /\[System\.Security\.Cryptography\.RandomNumberGenerator\]::Fill\(\$bytes\)/,
+    'RandomNumberGenerator.Fill is unavailable on Windows PowerShell 5.1 / .NET Framework',
+  );
 });
 
 test('install script does not require sudo on macOS', () => {
@@ -94,10 +113,10 @@ printf '%s' "$PLATFORM"
 
 // ── Behavioral tests for Darwin branch ────────────────────────
 
-test('darwin node@20 keg-only: adds keg bin to PATH after brew install', () => {
+test('darwin node@24 keg-only: adds keg bin to PATH after brew install', () => {
   // Verify the install script explicitly adds the keg bin to PATH
   // rather than relying on brew link (which keg-only formulas don't support)
-  assert.match(installScriptText, /brew --prefix node@20/, 'must resolve the keg prefix to find the bin directory');
+  assert.match(installScriptText, /brew --prefix node@24/, 'must resolve the keg prefix to find the bin directory');
   assert.match(
     installScriptText,
     /export PATH="\$_keg_bin:\$PATH"/,
@@ -113,13 +132,13 @@ test('darwin node@20 keg-only: adds keg bin to PATH after brew install', () => {
   );
 });
 
-test('darwin node@20 keg PATH addition works with stubbed brew', () => {
+test('darwin node@24 keg PATH addition works with stubbed brew', () => {
   // Create a fake keg layout and a stub `brew` that returns it,
   // then run the actual script code path (not a manual simulation).
   const output = runSourceOnlySnippet(`
 fake_keg="$(mktemp -d)"
 mkdir -p "$fake_keg/bin"
-printf '#!/bin/sh\\necho v20.0.0' > "$fake_keg/bin/node"
+printf '#!/bin/sh\\necho v24.0.0' > "$fake_keg/bin/node"
 chmod +x "$fake_keg/bin/node"
 
 # Stub brew: --prefix returns fake keg, install is a no-op
@@ -135,7 +154,7 @@ OLD_PATH="$PATH"
 PATH="$(printf '%s' "$PATH" | tr ':' '\\n' | grep -v node | tr '\\n' ':')"
 
 # Run the actual keg-bin injection logic from the script
-_keg_bin="$(brew --prefix node@20 2>/dev/null)/bin"
+_keg_bin="$(brew --prefix node@24 2>/dev/null)/bin"
 [[ -d "$_keg_bin" ]] && export PATH="$_keg_bin:$PATH"
 unset _keg_bin
 
@@ -145,10 +164,10 @@ command -v node >/dev/null && printf 'FOUND:%s' "$(node -v)"
 PATH="$OLD_PATH"
 rm -rf "$fake_keg"
 `);
-  assert.match(output, /^FOUND:v20/, 'node should be discoverable after keg bin PATH injection');
+  assert.match(output, /^FOUND:v24/, 'node should be discoverable after keg bin PATH injection');
 });
 
-test('darwin node@20 keg: prefix failure must NOT write /bin to profile (#174 P1 regression)', () => {
+test('darwin node@24 keg: prefix failure must NOT write /bin to profile (#174 P1 regression)', () => {
   // When brew --prefix fails, _keg_prefix is empty and _keg_bin must NOT
   // degrade to "/bin" (a real system directory).
   const output = runSourceOnlySnippet(`
@@ -160,7 +179,7 @@ brew() {
   esac
 }
 
-_keg_prefix="$(brew --prefix node@20 2>/dev/null || true)"
+_keg_prefix="$(brew --prefix node@24 2>/dev/null || true)"
 _keg_bin="\${_keg_prefix:+$_keg_prefix/bin}"
 # Evaluate the conditional expansion
 eval "_keg_bin=$_keg_bin"
@@ -276,7 +295,7 @@ test('darwin brew shellenv persisted to login profile after recovery', () => {
   );
   assert.match(
     installScriptText,
-    /brew.*shellenv.*Homebrew.*added by Cat Cafe/,
+    /brew.*shellenv.*Homebrew.*added by Clowder AI/,
     'must persist brew shellenv eval line with attribution comment',
   );
 });

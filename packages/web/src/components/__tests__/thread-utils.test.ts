@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Thread } from '@/stores/chat-types';
 import {
+  buildSidebarTabContent,
+  buildSidebarTabs,
   formatRelativeTime,
   getProjectPaths,
   mergeLiveActivityIntoThreads,
   projectDisplayName,
+  type SidebarTabId,
   sortAndGroupThreads,
   sortAndGroupThreadsWithWorkspace,
 } from '../ThreadSidebar/thread-utils';
@@ -68,7 +71,7 @@ describe('sortAndGroupThreads', () => {
     expect(last.threads.map((t) => t.id)).toEqual(['f2', 'f1']); // lastActiveAt 5000 before 1000
   });
 
-  it('pinned + favorited thread appears in pinned only', () => {
+  it('pinned + favorited thread appears in pinned and favorites (pinned is additive)', () => {
     const threads = [
       makeThread({
         id: 'both',
@@ -86,7 +89,23 @@ describe('sortAndGroupThreads', () => {
     expect(pinnedGroup).toBeDefined();
     expect(pinnedGroup?.threads).toHaveLength(1);
     expect(pinnedGroup?.threads[0].id).toBe('both');
-    expect(favGroup).toBeUndefined(); // should not appear in favorites
+    // Pinned is additive — thread now also appears in favorites
+    expect(favGroup).toBeDefined();
+    expect(favGroup?.threads).toHaveLength(1);
+    expect(favGroup?.threads[0].id).toBe('both');
+  });
+
+  it('pinned-only thread appears in both pinned and its project group', () => {
+    const threads = [
+      makeThread({ id: 'pinned-t', pinned: true, pinnedAt: 100, projectPath: '/proj/x', lastActiveAt: 5000 }),
+      makeThread({ id: 'regular', projectPath: '/proj/x', lastActiveAt: 1000 }),
+    ];
+    const groups = sortAndGroupThreads(threads);
+    const pinnedGroup = groups.find((g) => g.type === 'pinned');
+    const projGroup = groups.find((g) => g.type === 'project');
+    expect(pinnedGroup?.threads.map((t) => t.id)).toEqual(['pinned-t']);
+    expect(projGroup?.threads.map((t) => t.id)).toContain('pinned-t');
+    expect(projGroup?.threads.map((t) => t.id)).toContain('regular');
   });
 
   it('order is pinned → project → favorites', () => {
@@ -293,7 +312,7 @@ const DAY = 86400_000;
 describe('sortAndGroupThreadsWithWorkspace', () => {
   it('produces groups in order: pinned → recent → active projects → archived → favorites', () => {
     const threads = [
-      makeThread({ id: 'p1', pinned: true, lastActiveAt: NOW }),
+      makeThread({ id: 'p1', pinned: true, projectPath: '/proj/active', lastActiveAt: NOW }),
       makeThread({ id: 't1', projectPath: '/proj/active', lastActiveAt: NOW - 2 * DAY }),
       makeThread({ id: 't2', projectPath: '/proj/old', lastActiveAt: NOW - 30 * DAY }),
       makeThread({ id: 'f1', favorited: true, lastActiveAt: NOW - 1 * DAY }),
@@ -422,6 +441,53 @@ describe('sortAndGroupThreadsWithWorkspace', () => {
     expect(recent?.threads.find((t) => t.id === 'eval-thread')).toBeUndefined();
   });
 
+  it('pinned system thread appears in BOTH pinned and system sections (pinned is additive)', () => {
+    const threads = [
+      makeThread({
+        id: 'pinned-system',
+        title: 'A2A Harness Eval',
+        systemKind: 'eval_domain',
+        pinned: true,
+        lastActiveAt: NOW,
+      }),
+      makeThread({ id: 'regular-system', title: 'IM Hub', systemKind: 'connector_hub', lastActiveAt: NOW - DAY }),
+      makeThread({ id: 'regular', title: 'Chat', lastActiveAt: NOW - 2 * DAY }),
+    ];
+    const groups = sortAndGroupThreadsWithWorkspace(
+      threads,
+      undefined,
+      new Set(),
+      { activeCutoffMs: 7 * DAY, recentLimit: 8 },
+      NOW,
+    );
+    const pinned = groups.find((g) => g.type === 'pinned');
+    const system = groups.find((g) => g.type === 'system');
+    expect(pinned).toBeDefined();
+    expect(pinned?.threads.map((t) => t.id)).toEqual(['pinned-system']);
+    expect(system).toBeDefined();
+    expect(system?.threads.map((t) => t.id)).toContain('pinned-system');
+    expect(system?.threads.map((t) => t.id)).toContain('regular-system');
+  });
+
+  it('pinned regular thread appears in both pinned and its project group', () => {
+    const threads = [
+      makeThread({ id: 'pinned-proj', pinned: true, projectPath: '/proj/alpha', lastActiveAt: NOW }),
+      makeThread({ id: 'regular-proj', projectPath: '/proj/alpha', lastActiveAt: NOW - DAY }),
+    ];
+    const groups = sortAndGroupThreadsWithWorkspace(
+      threads,
+      undefined,
+      new Set(),
+      { activeCutoffMs: 7 * DAY, recentLimit: 8 },
+      NOW,
+    );
+    const pinned = groups.find((g) => g.type === 'pinned');
+    const project = groups.find((g) => g.type === 'project' && g.projectPath === '/proj/alpha');
+    expect(pinned?.threads.map((t) => t.id)).toEqual(['pinned-proj']);
+    expect(project?.threads.map((t) => t.id)).toContain('pinned-proj');
+    expect(project?.threads.map((t) => t.id)).toContain('regular-proj');
+  });
+
   it('groups both connector_hub and eval_domain threads into system section', () => {
     const threads = [
       makeThread({
@@ -442,5 +508,139 @@ describe('sortAndGroupThreadsWithWorkspace', () => {
     const system = groups.find((g) => g.type === 'system');
     expect(system).toBeDefined();
     expect(system?.threads).toHaveLength(2);
+  });
+});
+
+// ── sidebar tab selectors ─────────────────────────────
+
+describe('sidebar tab selectors', () => {
+  const tabThreads = [
+    makeThread({ id: 'default', title: '大厅', lastActiveAt: NOW }),
+    makeThread({ id: 'regular-new', title: 'Zoo', projectPath: '/proj/beta', lastActiveAt: NOW - 1_000 }),
+    makeThread({ id: 'regular-old', title: 'Alpha', projectPath: '/proj/alpha', lastActiveAt: NOW - DAY }),
+    makeThread({ id: 'pinned', title: 'Pinned', pinned: true, projectPath: '/proj/beta', lastActiveAt: NOW - 2 * DAY }),
+    makeThread({
+      id: 'fav',
+      title: 'Favorite',
+      favorited: true,
+      projectPath: '/proj/alpha',
+      lastActiveAt: NOW - 3 * DAY,
+    }),
+    makeThread({ id: 'system', title: 'System', systemKind: 'eval_domain', lastActiveAt: NOW - 4 * DAY }),
+  ];
+
+  it('builds tabs with pinned first, then recent/project/system/favorites', () => {
+    const tabs = buildSidebarTabs(tabThreads);
+    const tabIds: SidebarTabId[] = tabs.map((tab) => tab.id);
+    expect(tabIds).toEqual(['pinned', 'recent', 'project', 'system', 'favorites']);
+    expect(tabs.map((tab) => tab.label)).toEqual(['置顶', '最近', '项目', '系统', '收藏']);
+    // pinned tab has 1 (the pinned thread); recent still includes it (additive) so stays 4
+    // system tab has 2: 'default' (lobby) + 'system' (eval_domain) — isSystemThread matches both
+    expect(tabs.map((tab) => tab.count)).toEqual([1, 4, 4, 2, 1]);
+  });
+
+  it('pinned tab is a flat view of pinned threads sorted by lastActiveAt desc', () => {
+    const content = buildSidebarTabContent('pinned', tabThreads, new Set());
+    expect(content.kind).toBe('flat');
+    expect(content.threads.map((thread) => thread.id)).toEqual(['pinned']);
+  });
+
+  it('recent tab excludes lobby and system threads, then sorts pinned first and activity desc', () => {
+    const content = buildSidebarTabContent('recent', tabThreads, new Set(['/proj/alpha']));
+
+    expect(content.kind).toBe('flat');
+    expect(content.threads.map((thread) => thread.id)).toEqual(['pinned', 'regular-new', 'regular-old', 'fav']);
+  });
+
+  it('system and favorites tabs are flat isolated views', () => {
+    const system = buildSidebarTabContent('system', tabThreads, new Set());
+    const favorites = buildSidebarTabContent('favorites', tabThreads, new Set());
+
+    expect(system.kind).toBe('flat');
+    // 'default' (lobby) is also a system thread (id === 'default'), sorted by title: 大厅 > System
+    expect(system.threads.map((thread) => thread.id)).toEqual(['default', 'system']);
+    expect(favorites.kind).toBe('flat');
+    expect(favorites.threads.map((thread) => thread.id)).toEqual(['fav']);
+  });
+
+  it('project tab groups non-system threads by path with pinned projects first and item titles alphabetical', () => {
+    const content = buildSidebarTabContent('project', tabThreads, new Set(['/proj/beta']));
+
+    expect(content.kind).toBe('project');
+    expect(content.projectGroups?.map((group) => group.projectPath)).toEqual(['/proj/beta', '/proj/alpha']);
+    expect(content.projectGroups?.[0].threads.map((thread) => thread.id)).toEqual(['pinned', 'regular-new']);
+    expect(content.projectGroups?.[1].threads.map((thread) => thread.id)).toEqual(['regular-old', 'fav']);
+  });
+
+  // Regression: unread-first ordering must survive the tab rewrite.
+  // The pre-tab sidebar sorted unread threads before read ones inside each
+  // group; the new tab selectors must preserve that or an older unread thread
+  // gets buried below a newer read one. Covers maintainer review on PR #1095.
+  it('recent tab puts unread threads before read threads regardless of activity', () => {
+    const threads = [
+      makeThread({ id: 'default', title: '大厅', lastActiveAt: NOW }),
+      makeThread({ id: 'read-new', title: 'Read New', projectPath: '/proj/a', lastActiveAt: NOW - 1_000 }),
+      makeThread({ id: 'unread-old', title: 'Unread Old', projectPath: '/proj/a', lastActiveAt: NOW - DAY }),
+    ];
+    const unreadIds = new Set(['unread-old']);
+
+    // Without unreadIds: read-new first (newer activity wins)
+    const noUnread = buildSidebarTabContent('recent', threads, new Set(), new Set());
+    expect(noUnread.threads.map((t) => t.id)).toEqual(['read-new', 'unread-old']);
+
+    // With unreadIds: unread-old first (unread takes precedence over activity)
+    const withUnread = buildSidebarTabContent('recent', threads, new Set(), unreadIds);
+    expect(withUnread.threads.map((t) => t.id)).toEqual(['unread-old', 'read-new']);
+  });
+
+  it('project tab sorts unread threads before read threads within a group', () => {
+    const threads = [
+      makeThread({ id: 'default', title: '大厅', lastActiveAt: NOW }),
+      makeThread({ id: 'read-new', title: 'Read New', projectPath: '/proj/a', lastActiveAt: NOW - 1_000 }),
+      makeThread({ id: 'unread-old', title: 'Unread Old', projectPath: '/proj/a', lastActiveAt: NOW - DAY }),
+    ];
+    const unreadIds = new Set(['unread-old']);
+
+    const content = buildSidebarTabContent('project', threads, new Set(), unreadIds);
+    expect(content.kind).toBe('project');
+    // Within /proj/a: unread-old before read-new, despite read-new being newer
+    expect(content.projectGroups?.[0].threads.map((t) => t.id)).toEqual(['unread-old', 'read-new']);
+  });
+
+  // Regression: Locate button must switch to the correct tab when the active thread
+  // is absent from the current tab. The sidebar's findTabForThread() scans all tabs
+  // via buildSidebarTabContent to find membership. This test verifies the underlying
+  // tab membership: a system thread is NOT in 'recent' but IS in 'system'.
+  it('locates a system thread in system tab, not recent (findTabForThread regression)', () => {
+    const threads = [
+      makeThread({ id: 'default', title: '大厅', lastActiveAt: NOW }),
+      makeThread({
+        id: 'eval-thread',
+        title: 'Eval Runner',
+        systemKind: 'eval_domain',
+        lastActiveAt: NOW - 1_000,
+      }),
+      makeThread({ id: 'normal', title: 'Normal Thread', projectPath: '/proj/a', lastActiveAt: NOW }),
+    ];
+
+    // Simulate findTabForThread scan order: recent → system → project → pinned → favorites
+    const tabOrder: SidebarTabId[] = ['recent', 'system', 'project', 'pinned', 'favorites'];
+    const targetId = 'eval-thread';
+
+    let foundTab: SidebarTabId = 'recent';
+    for (const tabId of tabOrder) {
+      const bucket = buildSidebarTabContent(tabId, threads, new Set());
+      if (bucket.threads.some((t) => t.id === targetId)) {
+        foundTab = tabId;
+        break;
+      }
+    }
+
+    // The system thread must be found in 'system', not 'recent'
+    expect(foundTab).toBe('system');
+
+    // Double-check: it's genuinely absent from 'recent' tab
+    const recentBucket = buildSidebarTabContent('recent', threads, new Set());
+    expect(recentBucket.threads.some((t) => t.id === targetId)).toBe(false);
   });
 });

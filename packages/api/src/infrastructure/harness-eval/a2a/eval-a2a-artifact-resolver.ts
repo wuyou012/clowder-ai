@@ -35,16 +35,35 @@ const bundleComponentSchema = z
     };
   });
 
+/**
+ * Bundle-layer feature id invariant. Both snapshot.json and attribution.json
+ * enforce this — generators MUST align their packet/field guards with this
+ * regex to fail up-front (clean 400) instead of after writing bundle (500).
+ * Cloud Codex R10 P2 surfaced this as a layered consistency requirement.
+ */
+export const BUNDLE_FEATURE_ID_REGEX = /^F\d{3}$/;
+
 const bundleSnapshotSchema = z.object({
   verdictId: z.string().min(1),
   evalSnapshotId: z.string().min(1),
-  featureId: z.string().regex(/^F\d{3}$/, 'featureId must match F followed by 3 digits'),
+  featureId: z.string().regex(BUNDLE_FEATURE_ID_REGEX, 'featureId must match F followed by 3 digits'),
   generatedAt: z.string().datetime({ offset: true }),
   window: z.object({
     startMs: z.number().int().optional(),
     endMs: z.number().int().optional(),
     durationHours: z.number().min(0),
   }),
+  // F167 sibling-PR (P1 gpt52 review fix): allow counterWindow to round-trip
+  // through bundle JSON validation. Counter-domain window reflects process
+  // lifetime (boot → now) and is independent from `window` (trace window).
+  // Optional for backward compat with older bundles that pre-date this field.
+  counterWindow: z
+    .object({
+      startMs: z.number().int().optional(),
+      endMs: z.number().int().optional(),
+      durationHours: z.number().min(0),
+    })
+    .optional(),
   components: z.array(bundleComponentSchema).min(1),
 });
 
@@ -80,7 +99,7 @@ const attributionFindingSchema = z.object({
 
 const bundleAttributionSchema = z.object({
   verdictId: z.string().min(1),
-  featureId: z.string().regex(/^F\d{3}$/, 'featureId must match F followed by 3 digits'),
+  featureId: z.string().regex(BUNDLE_FEATURE_ID_REGEX, 'featureId must match F followed by 3 digits'),
   evalSnapshotId: z.string().min(1),
   generatedAt: z.string().datetime({ offset: true }),
   findings: z.array(attributionFindingSchema),
@@ -242,7 +261,36 @@ function componentForEvidenceAnchor(
 
 function metricKeyForEvidenceAnchor(componentId: string, anchor: string): string | undefined {
   if (anchor === componentId) return undefined;
-  return anchor.slice(componentId.length + 1);
+  const rest = anchor.slice(componentId.length + 1);
+  // 砚砚 cross-thread BLOCKER (thread_eval_a2a 2026-06-15T03:00Z): PR #2144/#2222/#2250
+  // started writing per-fire sample evidence rows of shape
+  // `<componentId>/<base_metric>/<sampleHash>` (e.g. `C2/c2.verdict_without_pass_count/f7c5de78f39dc5fc`).
+  // Snapshot metric keys (activationCounts + frictionCounts) are plain
+  // `<base_metric>` strings — no slashes. Strip the `/<sampleHash>` suffix here
+  // so sampled anchors validate against the same base metric key set the
+  // aggregate row uses. Without this, `assertAttributionAnchors` rejects every
+  // valid sampled-finding bundle with "anchor does not match bundled snapshot
+  // metrics" and publish_verdict returns 500 generator_failed.
+  //
+  // Cloud Codex R1 P2: enforce EXACTLY ONE sample suffix segment. The resolver
+  // is the fail-closed bundle-integrity gate before publish; malformed refs
+  // like `<base>/<foo>/<bar>` must not be silently normalized into the valid
+  // `<base>` shape and forwarded in `sampleTraceRefs`. Throw on any extra
+  // path segments past the documented one-suffix shape.
+  const sampleSeparator = rest.indexOf('/');
+  if (sampleSeparator < 0) return rest;
+  const sampleSuffix = rest.slice(sampleSeparator + 1);
+  // Valid sample shape: exactly one non-empty `/<sampleHash>` segment past the
+  // component/metric prefix. Cloud Codex R1 P2 caught multi-segment garbage;
+  // R2 P2 caught the empty-suffix case (trailing slash like `<base>/`) where
+  // `sampleSuffix.includes('/')` returned false and silently stripped the
+  // empty suffix → publish forwarded an invalid ref into `sampleTraceRefs`.
+  if (sampleSuffix.length === 0 || sampleSuffix.includes('/')) {
+    throw new Error(
+      'attribution evidence anchor has malformed sample suffix (expected exactly one non-empty /<sampleHash> segment past the component/metric prefix)',
+    );
+  }
+  return rest.slice(0, sampleSeparator);
 }
 
 function looksLikeComponentMetricAnchor(evidence: z.output<typeof attributionEvidenceSchema>): boolean {

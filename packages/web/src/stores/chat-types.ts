@@ -27,6 +27,8 @@ export interface TokenUsage {
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   costUsd?: number;
+  /** True when costUsd is estimated from a pricing table, not reported by CLI */
+  costEstimated?: boolean;
   durationMs?: number;
   durationApiMs?: number;
   numTurns?: number;
@@ -274,11 +276,14 @@ export interface ChatMessage {
     stream?: {
       invocationId?: string;
       turnInvocationId?: string;
+      textMode?: 'append' | 'replace';
       cliStdout?: string;
       speechContent?: string;
     };
     /** F098-C1: Explicit target cats from post_message API */
     targetCats?: string[];
+    /** #814: True when message originated from an explicit post_message callback (not stream duplicate) */
+    isExplicitPost?: boolean;
     /** Scheduler presentation metadata (hidden trigger / ephemeral lifecycle toast) */
     scheduler?: SchedulerMessageExtra['scheduler'];
     /** F118 AC-C3: Timeout diagnostics for enhanced error display */
@@ -302,7 +307,7 @@ export interface ChatMessage {
      * pipeline race; without marker it ends up visually after the bubble it
      * should precede.
      */
-    systemKind?: 'a2a_routing';
+    systemKind?: 'a2a_routing' | 'context_briefing';
     /** Machine-readable A2A route metadata. The visible pill text is human-readable; this survives F5. */
     a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string };
   };
@@ -318,7 +323,7 @@ export interface ChatMessage {
   whisperTo?: string[];
   /** F35: Timestamp when whisper was revealed (made public) */
   revealedAt?: number;
-  /** F057-C2: Whether this message mentions the user (@user / @铲屎官) */
+  /** F057-C2: Whether this message mentions the user (@user / @co-creator) */
   mentionsUser?: boolean;
   /** F121: ID of the message this is replying to */
   replyTo?: string;
@@ -366,7 +371,7 @@ export interface Thread {
   parentThreadId?: string;
   /** F095 Phase D: Soft-delete timestamp. Null/undefined = not deleted. */
   deletedAt?: number | null;
-  /** F087: CVO Bootcamp onboarding state. */
+  /** F087: operator Bootcamp onboarding state. */
   bootcampState?: BootcampStateV1;
   /** F192 livefix: System thread kind for sidebar grouping (connector_hub | eval_domain). */
   systemKind?: 'connector_hub' | 'eval_domain';
@@ -376,7 +381,7 @@ export interface Thread {
   labels?: string[];
 }
 
-/** F087: Bootcamp state for CVO onboarding threads */
+/** F087: Bootcamp state for operator onboarding threads */
 export interface BootcampStateV1 {
   v: 1;
   phase: string;
@@ -486,6 +491,24 @@ export interface CatInvocationInfo {
   taskProgress?: TaskProgressState;
   /** F118 Phase C: Latest liveness warning snapshot */
   livenessWarning?: LivenessWarningSnapshot;
+  /** #939 part A (kimi auth dual-path): Latest provider capability reports keyed by capability
+   *  name (e.g. 'thinking', 'image_input'). Backend emits these as `system_info` events with
+   *  inner type `provider_capability`. Stored silently — MUST NOT render as a user-facing
+   *  system bubble (that was the bug: frontend fell through to default addMessage path and
+   *  surfaced raw JSON, which users read as "thinking failed"). A dedicated capability UI
+   *  (tooltip / status badge) is a future follow-up; for now the data is preserved here so
+   *  such UI can read it. */
+  providerCapabilities?: Record<string, ProviderCapabilityReport>;
+}
+
+/** #939 part A (kimi auth dual-path): per-capability report from a provider backend.
+ *  Populated by the `provider_capability` system_info handler in useAgentMessages.ts;
+ *  consumed silently there so the bubble layer never sees these. */
+export interface ProviderCapabilityReport {
+  status: 'available' | 'limited' | 'unavailable';
+  reason: string;
+  provider: string;
+  receivedAt: number;
 }
 
 /** F118 Phase C: Liveness warning snapshot from ProcessLivenessProbe */
@@ -539,11 +562,34 @@ export interface QueueEntry {
   /** F175: dequeue priority */
   priority?: 'urgent' | 'normal';
   /** F175: source category for visual grouping */
-  sourceCategory?: 'ci' | 'review' | 'conflict' | 'scheduled' | 'a2a' | 'continuation';
+  sourceCategory?: 'ci' | 'review' | 'conflict' | 'scheduled' | 'a2a' | 'continuation' | 'issue';
   /** Queue-internal dedup key for continuation work. */
   continuationKey?: string;
   /** F175: explicit dequeue position from drag-reorder */
   position?: number;
+  /** #706: Server-enriched message preview for QueuePanel display + recall-edit.
+   *  Attached by emitQueueUpdated() at push time via messageStore join. */
+  messagePreview?: {
+    contentBlocks?: ReadonlyArray<{ type: string; url?: string; text?: string; alt?: string }>;
+    replyTo?: string;
+  };
+}
+
+/** #706: Typed composer draft for recall-edit and cross-feature insert.
+ *  Carries all state needed to restore the composer to a previous message's state.
+ *  Consumed by ChatInput — when pendingChatInsert is set, the composer restores
+ *  text, images, and (after #833) the quoted reply context. */
+export interface ComposerDraftInsert {
+  threadId: string;
+  text: string;
+  imageUrls?: string[];
+  /** Message ID of the quoted parent — maps to messagePreview.replyTo from queue enrichment.
+   *  After #833 merge: ChatInput consumes this to restore quote composing state. */
+  replyToId?: string;
+  /** Pre-resolved reply preview — avoids an extra hydrate when restoring quote UI.
+   *  Populated from backend-enriched messagePreview (visibility-filtered by
+   *  resolveVisibleReplyParent on the server side). */
+  replyToPreview?: ReplyPreview;
 }
 
 /** F39: Message delivery mode — undefined = smart default, 'queue' = enqueue, 'force' = cancel + execute */
@@ -615,6 +661,29 @@ export interface PresentationLockSnapshot {
   line: number | null;
   tabs: string[];
   scrollTop: number | null;
+}
+
+/** F226: Presentation Surface — file/md tear-off floating window for demo mode */
+export interface PresentationSurfaceContent {
+  worktreeId: string | null;
+  filePath: string;
+  tabs: string[];
+  fileKind: 'file' | 'image' | 'markdown';
+  renderMode: 'rendered' | 'raw';
+  line: number | null;
+  scrollTop: number | null;
+  title: string;
+}
+
+export interface PresentationSurfaceState {
+  content: PresentationSurfaceContent;
+  pos: { x: number; y: number };
+  size: { width: number; height: number };
+  minimized: boolean;
+  /** F226 尺寸快捷: 一键适配 PPT 的放大态 */
+  maximized: boolean;
+  /** geometry before maximize — toggle restores the user's manual size/pos so they needn't re-drag */
+  preMaximizeGeometry: { pos: { x: number; y: number }; size: { width: number; height: number } } | null;
 }
 
 /** F097: CLI Output unified event stream */

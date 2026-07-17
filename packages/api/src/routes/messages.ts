@@ -21,6 +21,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { getDefaultCatId } from '../config/cat-config-loader.js';
 import { resolveFrontendBaseUrl } from '../config/frontend-origin.js';
+import type { IBallCustodyIngest } from '../domains/ball-custody/BallCustodyIngest.js';
 import {
   type CollaborationContinuityCapsuleV1,
   extractContinuityCapsuleFromAgentMessage,
@@ -33,8 +34,12 @@ import { getThreadLiveInvocations } from '../domains/cats/services/agents/invoca
 import type { InvocationQueue } from '../domains/cats/services/agents/invocation/InvocationQueue.js';
 import type { InvocationRegistry } from '../domains/cats/services/agents/invocation/InvocationRegistry.js';
 import type { InvocationTracker } from '../domains/cats/services/agents/invocation/InvocationTracker.js';
-import type { QueueProcessor } from '../domains/cats/services/agents/invocation/QueueProcessor.js';
+import type {
+  QueueProcessor,
+  SessionContinuationCoordinatorLike,
+} from '../domains/cats/services/agents/invocation/QueueProcessor.js';
 import { reconcileZombies } from '../domains/cats/services/agents/invocation/reconcileZombies.js';
+import type { ConsumedContinuationToken } from '../domains/cats/services/agents/invocation/SessionContinuationCoordinator.js';
 import type { TaskProgressStore } from '../domains/cats/services/agents/invocation/TaskProgressStore.js';
 import { stampVisibleTurn } from '../domains/cats/services/agents/invocation/visible-turn.js';
 import type { PersistenceContext } from '../domains/cats/services/agents/routing/route-helpers.js';
@@ -55,9 +60,10 @@ import type { IDraftStore } from '../domains/cats/services/stores/ports/DraftSto
 import type { IGameStore } from '../domains/cats/services/stores/ports/GameStore.js';
 import type { IInvocationRecordStore } from '../domains/cats/services/stores/ports/InvocationRecordStore.js';
 import type { IMessageStore } from '../domains/cats/services/stores/ports/MessageStore.js';
+import { isDelivered } from '../domains/cats/services/stores/ports/MessageStore.js';
 import type { ISummaryStore } from '../domains/cats/services/stores/ports/SummaryStore.js';
 import type { IThreadStore } from '../domains/cats/services/stores/ports/ThreadStore.js';
-import { isSystemUserMessage } from '../domains/cats/services/stores/visibility.js';
+import { isInternalNonQuotableParent, isSystemUserMessage } from '../domains/cats/services/stores/visibility.js';
 import { mergeTokenUsage, type TokenUsage } from '../domains/cats/services/types.js';
 import { buildThreadDeepLink } from '../infrastructure/connectors/connector-command-helpers.js';
 import { createModuleLogger } from '../infrastructure/logger.js';
@@ -93,7 +99,9 @@ interface StreamingHookLike {
 }
 
 import { normalizeErrorMessage } from '../utils/normalize-error.js';
+import { emitQueueUpdated, enrichQueueEntries } from '../utils/queue-enrichment.js';
 import { resolveUserId } from '../utils/request-identity.js';
+import { cancelWakeWhenRunner } from './callback-hold-ball-routes.js';
 import { buildGameSeats, parseGameCommand, sanitizeCatIds } from './game-command-interceptor.js';
 import type { HoldBallCancelDeps } from './hold-ball-cancel.js';
 import { cancelPendingHoldsForThread } from './hold-ball-cancel.js';
@@ -101,6 +109,7 @@ import { sendMessageSchema } from './messages.schema.js';
 import { parseMultipart } from './parse-multipart.js';
 
 const STREAM_START_TIMEOUT_MS = 5_000;
+const INVOCATION_STARTUP_WATCHDOG_MS = 180_000;
 
 /**
  * Dependencies injected via Fastify plugin options.
@@ -134,19 +143,100 @@ export interface MessagesRoutesOptions {
   invocationQueue?: InvocationQueue;
   /** F39: Queue processor for auto-dequeue on invocation complete */
   queueProcessor?: QueueProcessor;
+  /** F224: Shared continuation lifecycle coordinator for direct immediate invocations. */
+  sessionContinuationCoordinator?: SessionContinuationCoordinatorLike;
+  /** Test/diagnostic override for releasing invocations that never produce a provider/session event. */
+  invocationStartupWatchdogMs?: number;
   /** F101: Game store for /game command interception */
   gameStore?: IGameStore;
   /** F101: Injectable auto-player for lifecycle-safe teardown in tests/routes */
   autoPlayer?: Pick<GameDriver, 'startLoop' | 'stopLoop' | 'stopAllLoops'>;
+  /** F233 PR3: ball-custody event sink for zombie reconciliation side effects. */
+  ballCustody?: IBallCustodyIngest;
   /** F088 ISSUE-15: Outbound delivery hook for connector platforms (late-bound after gateway bootstrap) */
   outboundHook?: OutboundDeliveryHookLike;
   /** F088 ISSUE-15: Streaming hook for connector platforms (late-bound after gateway bootstrap) */
   streamingHook?: StreamingHookLike;
   /** F167 Phase J: deps for auto-cancelling pending hold-ball tasks on user message */
   holdBallCancelDeps?: HoldBallCancelDeps;
+  /** F192 Phase G AC-G12 / F227 归一: callback when magic words detected in a user
+   * message. messageId is the stored user-message id — the Event Memory teleport
+   * coordinate. */
+  onMagicWordDetected?: (
+    hits: Array<{ word: string }>,
+    threadId: string,
+    catId: string | null,
+    messageId: string,
+    ownerUserId: string,
+    messageExcerpt?: string,
+  ) => void;
 }
 
 const log = createModuleLogger('routes/messages');
+
+async function shouldEnqueueDirectContinuation(
+  capsule: CollaborationContinuityCapsuleV1,
+  userId: string,
+  coordinator?: SessionContinuationCoordinatorLike,
+): Promise<boolean> {
+  if (!coordinator?.resolveSessionStrategy) return true;
+  try {
+    const strategy = await coordinator.resolveSessionStrategy(capsule.threadId, capsule.catId, userId);
+    if (strategy === 'reborn') {
+      log.info(
+        { threadId: capsule.threadId, catId: capsule.catId },
+        '[messages] F224: reborn session — skipping continuation enqueue',
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    log.warn(
+      { err, threadId: capsule.threadId, catId: capsule.catId },
+      '[messages] F224: resolveSessionStrategy failed for continuation enqueue, defaulting to enqueue',
+    );
+    return true;
+  }
+}
+
+/**
+ * F192 Phase G AC-G12: detect magic words in user message content.
+ * Best-effort, fire-and-forget — failures are silently swallowed.
+ * Called from both queued and immediate message paths.
+ */
+async function tryDetectMagicWords(
+  content: string | null | undefined,
+  threadId: string,
+  targetCats: string[],
+  messageId: string | null | undefined,
+  ownerUserId: string | null | undefined,
+  onMagicWordDetected?: MessagesRoutesOptions['onMagicWordDetected'],
+): Promise<void> {
+  // F227 归一: messageId is the Event Memory teleport coordinate — never guess it
+  // from thread/time. If it is unavailable, skip rather than store a
+  // coordinate-less event.
+  if (!onMagicWordDetected || !content || !messageId) return;
+  // F227 (cloud-review P1 / 砚砚): the live write must carry the authenticated owner —
+  // skip + report rather than store an unscoped event (no unknown/default fallback).
+  if (!ownerUserId) {
+    log.warn({ threadId, messageId }, 'magic-word event skipped: message has no owner userId');
+    return;
+  }
+  try {
+    const { detectMagicWords } = await import('../infrastructure/harness-eval/task-outcome/magic-word-detector.js');
+    const hits = detectMagicWords(content);
+    if (hits.length > 0) {
+      // 砚砚 (non-blocking): pass a short excerpt of the triggering message so the
+      // Event summary carries 原话 context, not just the magic word itself.
+      const excerpt = content.length > 200 ? `${content.slice(0, 200)}…` : content;
+      onMagicWordDetected(hits, threadId, targetCats[0] ?? null, messageId, ownerUserId, excerpt);
+    }
+  } catch {
+    // Best-effort: the detection/dispatch wrapper must not fail message send. The
+    // Event-write fail-loud policy lives inside onMagicWordDetected itself (it logs
+    // + observes rather than throwing), so it is not swallowed here.
+  }
+}
 
 /**
  * F-invocation-stale-recovery P1-2: Format routing_warnings for user-visible system_info broadcast.
@@ -161,6 +251,8 @@ function formatRoutingWarnings(warnings: CatRoutingError[]): string {
         .map((a) => a.mention)
         .join('、');
       parts.push(`@${w.catId} 已停用，已跳过${alts ? `（可用替代：${alts}）` : ''}。`);
+    } else if (w.kind === 'target_not_in_thread') {
+      parts.push(`@${w.catId} 不在目标 thread (${w.threadId}) 的参与者列表中，请确认 threadId 是否正确。`);
     } else {
       parts.push(`${w.mention} 不存在，已跳过。`);
     }
@@ -173,6 +265,15 @@ function tryAutoCancelPendingHolds(threadId: string, deps: HoldBallCancelDeps | 
   try {
     const cancelled = cancelPendingHoldsForThread(threadId, deps);
     if (cancelled.length > 0) {
+      // P1-3 fix (cloud R2): also cancel running wakeWhen commands for each cancelled hold.
+      // Without this, the runner continues executing after the fallback task is removed,
+      // and posts a stale wake when it completes.
+      for (const task of cancelled) {
+        const catId = task.createdBy?.replace('hold-ball:', '') ?? '';
+        if (catId) {
+          cancelWakeWhenRunner(threadId, catId);
+        }
+      }
       log.info(
         { threadId, cancelledCount: cancelled.length, taskIds: cancelled.map((t) => t.id) },
         'F167 Phase J: auto-cancelled pending hold-ball tasks on user message',
@@ -288,6 +389,9 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
     // F39: Delivery mode
     let deliveryMode: 'immediate' | 'queue' | 'force' | undefined;
 
+    // #699: Reply-to (quote) reference
+    let replyTo: string | undefined;
+
     if (request.isMultipart()) {
       // Parse multipart: text fields + image files
       const parsed = await parseMultipart(request, uploadDir);
@@ -308,6 +412,10 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
       if (parsed.deliveryMode) {
         deliveryMode = parsed.deliveryMode;
       }
+      // #699: Extract replyTo from multipart
+      if (parsed.replyTo) {
+        replyTo = parsed.replyTo;
+      }
     } else {
       // JSON mode (backwards compatible)
       const parseResult = sendMessageSchema.safeParse(request.body);
@@ -322,6 +430,8 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
         whisperVisibility = 'whisper';
         whisperRecipients = parseResult.data.whisperTo as CatId[] | undefined;
       }
+      // #699: Extract replyTo from JSON body
+      replyTo = parseResult.data.replyTo;
     }
 
     const userId = resolveUserId(request, {
@@ -371,6 +481,37 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
         detail: '请稍后重试，或新建一个对话继续',
         code: 'THREAD_DELETING',
       };
+    }
+
+    // #699 P1-2: Validate replyTo — must exist in same thread, not deleted, and delivered
+    if (replyTo) {
+      const replyTarget = await opts.messageStore.getById(replyTo);
+      if (
+        !replyTarget ||
+        replyTarget.deletedAt ||
+        replyTarget.threadId !== resolvedThreadId ||
+        !isDelivered(replyTarget) ||
+        // #699 P1 (gpt52 intake review): align user-direct path with isEligibleReplyParent —
+        // system/briefing are internal, non-routable, must not be quotable (else hydrateReplyPreview leaks raw content)
+        isInternalNonQuotableParent(replyTarget)
+      ) {
+        replyTo = undefined;
+      } else if (replyTarget.visibility === 'whisper') {
+        // #699: Prevent public replies from quoting hidden whispers.
+        // hydrateReplyPreview fetches raw content without visibility checks,
+        // so a public reply's preview would leak whisper content to non-recipients.
+        if (whisperVisibility !== 'whisper') {
+          // Public message replying to a whisper → drop replyTo
+          replyTo = undefined;
+        } else {
+          // Whisper replying to a whisper → ensure all new recipients can see the parent
+          const parentRecipients = new Set(replyTarget.whisperTo ?? []);
+          const newRecipients = whisperRecipients ?? [];
+          if (newRecipients.some((catId) => !parentRecipients.has(catId))) {
+            replyTo = undefined;
+          }
+        }
+      }
     }
 
     // F101: /game command interception — start game directly, skip AI routing
@@ -564,11 +705,15 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
 
       // Queue full → 429, no message written (no ghost message)
       if (enqueueResult.outcome === 'full') {
+        const fullQueue = await enrichQueueEntries(
+          opts.invocationQueue.list(resolvedThreadId, userId),
+          opts.messageStore,
+        );
         opts.socketManager.emitToUser(userId, 'queue_full_warning', {
           threadId: resolvedThreadId,
           source: 'user',
           queueSize: opts.invocationQueue.size(resolvedThreadId, userId),
-          queue: opts.invocationQueue.list(resolvedThreadId, userId),
+          queue: fullQueue,
         });
         reply.status(429);
         return {
@@ -597,8 +742,19 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             ...(whisperVisibility && whisperRecipients
               ? { visibility: whisperVisibility, whisperTo: whisperRecipients }
               : {}),
+            ...(replyTo ? { replyTo } : {}),
           });
           storedUserMessageId = userMessage.id;
+
+          // F192 Phase G AC-G12 / F227: detect magic words → Event Memory (queued path)
+          void tryDetectMagicWords(
+            content,
+            resolvedThreadId,
+            targetCats,
+            storedUserMessageId,
+            userId,
+            opts.onMagicWordDetected,
+          );
 
           const queueEntryId = enqueueResult.entry?.id;
           if (queueEntryId) {
@@ -614,11 +770,14 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
       }
 
       // Emit queue update to this user only (privacy: scopeKey isolation)
-      opts.socketManager.emitToUser(userId, 'queue_updated', {
-        threadId: resolvedThreadId,
-        queue: opts.invocationQueue.list(resolvedThreadId, userId),
-        action: enqueueResult.outcome,
-      });
+      await emitQueueUpdated(
+        opts.socketManager,
+        userId,
+        resolvedThreadId,
+        opts.invocationQueue.list(resolvedThreadId, userId),
+        opts.messageStore,
+        enqueueResult.outcome,
+      );
 
       tryAutoCancelPendingHolds(resolvedThreadId, opts.holdBallCancelDeps);
 
@@ -657,11 +816,14 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
 
       // F39 bugfix: Notify frontend that force-cancel happened (clear stale queue UI)
       if (opts.invocationQueue) {
-        opts.socketManager.emitToUser(userId, 'queue_updated', {
-          threadId: resolvedThreadId,
-          queue: opts.invocationQueue.list(resolvedThreadId, userId),
-          action: 'force_cleared',
-        });
+        await emitQueueUpdated(
+          opts.socketManager,
+          userId,
+          resolvedThreadId,
+          opts.invocationQueue.list(resolvedThreadId, userId),
+          opts.messageStore,
+          'force_cleared',
+        );
       }
       // Fall through to immediate execution below
     }
@@ -688,11 +850,15 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
               intent: intent.intent,
             });
             if (enqueueResult.outcome === 'full') {
+              const toctouFullQueue = await enrichQueueEntries(
+                opts.invocationQueue.list(resolvedThreadId, userId),
+                opts.messageStore,
+              );
               opts.socketManager.emitToUser(userId, 'queue_full_warning', {
                 threadId: resolvedThreadId,
                 source: 'user',
                 queueSize: opts.invocationQueue.size(resolvedThreadId, userId),
-                queue: opts.invocationQueue.list(resolvedThreadId, userId),
+                queue: toctouFullQueue,
               });
               reply.status(429);
               return { error: '消息队列已满', code: 'QUEUE_FULL' };
@@ -715,6 +881,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
                   ...(whisperVisibility && whisperRecipients
                     ? { visibility: whisperVisibility, whisperTo: whisperRecipients }
                     : {}),
+                  ...(replyTo ? { replyTo } : {}),
                 });
                 toctouUserMessageId = toctouUserMessage.id;
                 const queueEntryId = enqueueResult.entry?.id;
@@ -729,11 +896,14 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
                 throw err;
               }
             }
-            opts.socketManager.emitToUser(userId, 'queue_updated', {
-              threadId: resolvedThreadId,
-              queue: opts.invocationQueue.list(resolvedThreadId, userId),
-              action: enqueueResult.outcome,
-            });
+            await emitQueueUpdated(
+              opts.socketManager,
+              userId,
+              resolvedThreadId,
+              opts.invocationQueue.list(resolvedThreadId, userId),
+              opts.messageStore,
+              enqueueResult.outcome,
+            );
             tryAutoCancelPendingHolds(resolvedThreadId, opts.holdBallCancelDeps);
             reply.status(202);
             return {
@@ -814,12 +984,23 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
           ...(whisperVisibility && whisperRecipients
             ? { visibility: whisperVisibility, whisperTo: whisperRecipients }
             : {}),
+          ...(replyTo ? { replyTo } : {}),
         });
 
         // ③ Backfill InvocationRecord.userMessageId
         await opts.invocationRecordStore.update(createResult.invocationId, {
           userMessageId: storedUserMessage.id,
         });
+
+        // F192 Phase G AC-G12 / F227: detect magic words → Event Memory (immediate path)
+        void tryDetectMagicWords(
+          content,
+          resolvedThreadId,
+          targetCats,
+          storedUserMessage.id,
+          userId,
+          opts.onMagicWordDetected,
+        );
       } catch (preExecErr) {
         // Release slots — we haven't entered background coroutine yet
         opts.invocationTracker?.completeAll(resolvedThreadId, targetCats, controller);
@@ -857,15 +1038,79 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
 
         // F088 ISSUE-15: Hoisted so catch/abort branches can clean up streaming sessions
         let streamStartPromise: Promise<void> | undefined;
+        let firstRouteEventSeen = false;
+        let startupWatchdogFired = false;
+        let startupTimeoutFailureRecorded = false;
+        let queueCompletionNotified = false;
+
+        const notifyQueueCompletion = (status: 'succeeded' | 'failed' | 'canceled' | 'canceled_by_user') => {
+          if (queueCompletionNotified) return;
+          queueCompletionNotified = true;
+          opts.queueProcessor?.onInvocationComplete(resolvedThreadId, primaryCat, status).catch((err) => {
+            log.error(
+              { err, threadId: resolvedThreadId, catId: primaryCat, finalStatus: status },
+              '[messages] onInvocationComplete failed — queued messages may be stuck (#595)',
+            );
+          });
+        };
 
         // F148 fix: Hoisted so abort/catch branches can ack completed cats' cursors
         const cursorBoundaries = new Map<string, string>();
+        const continuationCapsules = new Map<string, CollaborationContinuityCapsuleV1>();
+        let consumedContinuation: ConsumedContinuationToken | undefined;
 
         // F194 Phase Z3 (AC-Z3): mark chain start for finally fallback. routeExecution may
         // hang / silently exit / swallow exceptions and never reach explicit terminal write
         // (root cause of bubble-still-split symptom). Without this signal, finally would
         // fallback failed even on success. start→succeeded/failed → finally CAS terminal.
         routeChainTracker.start(createResult.invocationId);
+
+        const markStartupTimeoutFailed = async () => {
+          if (startupTimeoutFailureRecorded) return;
+          startupTimeoutFailureRecorded = true;
+          finalStatus = 'failed';
+          routeChainTracker.fail(createResult.invocationId);
+          await opts.invocationRecordStore?.update(createResult.invocationId, {
+            status: 'failed',
+            error: 'Invocation startup timed out before provider/session initialized',
+          });
+          opts.socketManager.broadcastAgentMessage(
+            {
+              type: 'system_info',
+              catId: targetCats[0] ?? getDefaultCatId(),
+              content: JSON.stringify({
+                type: 'invocation_startup_timeout',
+                message: '猫猫启动超时，已释放卡住的调用。',
+                invocationId: createResult.invocationId,
+              }),
+              timestamp: Date.now(),
+            },
+            resolvedThreadId,
+          );
+          await cleanupStreamingOnFailure(resolvedThreadId, createResult.invocationId, streamStartPromise, opts, log);
+        };
+
+        const startupWatchdogMs = opts.invocationStartupWatchdogMs ?? INVOCATION_STARTUP_WATCHDOG_MS;
+        const startupWatchdog: ReturnType<typeof setTimeout> | undefined =
+          startupWatchdogMs > 0
+            ? setTimeout(() => {
+                if (firstRouteEventSeen || controller?.signal.aborted) return;
+                startupWatchdogFired = true;
+                controller?.abort('startup_timeout');
+                opts.invocationTracker?.completeAll(resolvedThreadId, targetCats, controller);
+                notifyQueueCompletion('failed');
+                void markStartupTimeoutFailed().catch((err) => {
+                  log.warn(
+                    { err, invocationId: createResult.invocationId },
+                    '[messages] startup watchdog failed to mark invocation failed',
+                  );
+                });
+              }, startupWatchdogMs)
+            : undefined;
+
+        const clearStartupWatchdog = () => {
+          if (startupWatchdog) clearTimeout(startupWatchdog);
+        };
 
         try {
           await opts.invocationRecordStore?.update(createResult.invocationId, {
@@ -880,7 +1125,6 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
           const collectedUsage = new Map<string, TokenUsage>();
           // F070: track governance block errorCode for recoverable failure marking
           let governanceErrorCode: string | undefined;
-          const continuationCapsules = new Map<string, CollaborationContinuityCapsuleV1>();
 
           // F088 ISSUE-15: Collect per-turn content for outbound delivery to connector platforms
           const outboundTurns: Array<{
@@ -914,6 +1158,38 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             return;
           }
 
+          // F224: direct immediate invocations must consume the same pending continuation
+          // as QueueProcessor. Only single-cat content is safe to rewrite with a cat-specific prompt.
+          if (opts.sessionContinuationCoordinator && targetCats.length === 1) {
+            const singleCatId = targetCats[0]!;
+            try {
+              const prepared = await opts.sessionContinuationCoordinator.prepareInvocationContext({
+                threadId: resolvedThreadId,
+                catId: singleCatId,
+                userId,
+                content,
+              });
+              content = prepared.content;
+              consumedContinuation = prepared.consumedContinuation;
+              if (prepared.sessionPolicy === 'reborn') {
+                log.info(
+                  { threadId: resolvedThreadId, catId: singleCatId },
+                  '[messages] F224: reborn session — coordinator skipped continuation consume',
+                );
+              } else if (prepared.consumedContinuation) {
+                log.info(
+                  { threadId: resolvedThreadId, catId: singleCatId },
+                  '[messages] F224: consumed pending continuation for direct invocation',
+                );
+              }
+            } catch (err) {
+              log.warn(
+                { err, threadId: resolvedThreadId, catId: singleCatId },
+                '[messages] F224: prepareInvocationContext failed, proceeding without continuation context',
+              );
+            }
+          }
+
           // F118 D2: Broadcast spawn_started immediately — fills the intent_mode blind spot.
           // intent_mode only fires after the first CLI NDJSON event (0–2 min delay).
           // spawn_started fires here, before routeExecution, so the UI can show
@@ -944,6 +1220,14 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
                     queueHasQueuedMessages: (tid: string) =>
                       opts.invocationQueue?.hasQueuedNonAgentForThread(tid) ?? false,
                     deferA2AEnqueue: (e) => opts.invocationQueue?.enqueue(e as any),
+                    // F254 B3: freshness re-invoke enqueue for immediate (foreground) invocations.
+                    // Without this, freshnessReinvoke metadata from invoke-single-cat is silently
+                    // dropped in the immediate path — re-invoke only fires for queue-driven entries.
+                    // Matches QueueProcessor pattern: strip freshnessContext before enqueue.
+                    freshnessReinvokeEnqueue: (e: any) => {
+                      const { freshnessContext: _ctx, ...queueFields } = e;
+                      opts.invocationQueue?.enqueue(queueFields);
+                    },
                     hasQueuedOrActiveAgentForCat: (tid: string, catId: string) =>
                       opts.invocationQueue?.hasActiveOrQueuedAgentForCat(tid, catId) ?? false,
                   }
@@ -958,8 +1242,14 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
               cursorBoundaries,
               persistenceContext,
               parentInvocationId: createResult.invocationId,
+              // F222 P1: user direct entry → eligible for frustration auto-issue
+              frustrationAutoIssueEligible: true,
             },
           )) {
+            if (!firstRouteEventSeen) {
+              firstRouteEventSeen = true;
+              clearStartupWatchdog();
+            }
             if (controller?.signal.aborted) {
               break;
             }
@@ -1067,19 +1357,23 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
           // every target cat singly cancelled → canceled. A single-cat cancel no longer aborts the
           // batch gate, so raw controller.signal.aborted only covers the whole-invocation case.
           // (completeAll runs in finally, AFTER this, so cancel tombstones are still visible here.)
-          const aggFinalStatus = opts.invocationTracker?.resolveFinalStatus
-            ? opts.invocationTracker.resolveFinalStatus(resolvedThreadId, targetCats, {
-                aborted: controller?.signal.aborted ?? false,
-                reason: controller?.signal.reason as string | undefined,
-              })
-            : controller?.signal.aborted
-              ? // Fallback (tracker without resolveFinalStatus): whole-invocation abort → reason
-                // decides canceled_by_user vs canceled (matches resolveFinalStatus semantics).
-                controller.signal.reason === 'user_cancel' || controller.signal.reason === 'cancel_all'
-                ? 'canceled_by_user'
-                : 'canceled'
-              : 'succeeded';
-          if (aggFinalStatus !== 'succeeded') {
+          const aggFinalStatus = startupWatchdogFired
+            ? 'failed'
+            : opts.invocationTracker?.resolveFinalStatus
+              ? opts.invocationTracker.resolveFinalStatus(resolvedThreadId, targetCats, {
+                  aborted: controller?.signal.aborted ?? false,
+                  reason: controller?.signal.reason as string | undefined,
+                })
+              : controller?.signal.aborted
+                ? // Fallback (tracker without resolveFinalStatus): whole-invocation abort → reason
+                  // decides canceled_by_user vs canceled (matches resolveFinalStatus semantics).
+                  controller.signal.reason === 'user_cancel' || controller.signal.reason === 'cancel_all'
+                  ? 'canceled_by_user'
+                  : 'canceled'
+                : 'succeeded';
+          if (aggFinalStatus === 'failed') {
+            await markStartupTimeoutFailed();
+          } else if (aggFinalStatus !== 'succeeded') {
             finalStatus = aggFinalStatus;
             await opts.invocationRecordStore?.update(createResult.invocationId, {
               status: 'canceled',
@@ -1162,12 +1456,26 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             routeChainTracker.succeed(createResult.invocationId);
 
             for (const continuationCapsule of continuationCapsules.values()) {
-              opts.queueProcessor?.enqueueContinuation({
-                threadId: resolvedThreadId,
-                userId,
-                catId: continuationCapsule.catId,
-                capsule: continuationCapsule,
-              });
+              if (
+                !(await shouldEnqueueDirectContinuation(
+                  continuationCapsule,
+                  userId,
+                  opts.sessionContinuationCoordinator,
+                ))
+              ) {
+                continue;
+              }
+              await opts.queueProcessor
+                ?.enqueueContinuation({
+                  threadId: resolvedThreadId,
+                  userId,
+                  catId: continuationCapsule.catId,
+                  capsule: continuationCapsule,
+                })
+                .catch((err) => {
+                  log.warn({ err, threadId: resolvedThreadId }, 'enqueueContinuation failed (best-effort)');
+                  return undefined;
+                });
             }
 
             // Push notification: cat(s) finished responding
@@ -1214,7 +1522,9 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
           }
         } catch (err) {
           // F39 bugfix: detect abort (cancel/force) vs real failure
-          if (controller?.signal.aborted) {
+          if (startupWatchdogFired) {
+            await markStartupTimeoutFailed();
+          } else if (controller?.signal.aborted) {
             finalStatus =
               controller.signal.reason === 'user_cancel' || controller.signal.reason === 'cancel_all'
                 ? 'canceled_by_user'
@@ -1275,6 +1585,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             await cleanupStreamingOnFailure(resolvedThreadId, createResult.invocationId, streamStartPromise, opts, log);
           } // end else (non-abort error)
         } finally {
+          clearStartupWatchdog();
           clearInterval(heartbeatInterval);
           opts.invocationTracker?.completeAll(resolvedThreadId, targetCats, controller);
           // F194 Phase Z3 (AC-Z3): defensive terminal write. If routeExecution silently exited
@@ -1300,13 +1611,25 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             }
           }
           routeChainTracker.release(createResult.invocationId);
+          if (opts.sessionContinuationCoordinator) {
+            try {
+              await opts.sessionContinuationCoordinator.commitInvocationOutcome({
+                finalStatus,
+                threadId: resolvedThreadId,
+                catId: primaryCat,
+                userId,
+                consumedContinuation,
+                producedCapsules: [...continuationCapsules.values()],
+              });
+            } catch (err) {
+              log.warn(
+                { err, threadId: resolvedThreadId, targetCats },
+                '[messages] F224: commitInvocationOutcome failed',
+              );
+            }
+          }
           // F39: Notify queue processor for auto-dequeue chain
-          opts.queueProcessor?.onInvocationComplete(resolvedThreadId, primaryCat, finalStatus).catch((err) => {
-            log.error(
-              { err, threadId: resolvedThreadId, catId: primaryCat, finalStatus },
-              '[messages] onInvocationComplete failed — queued messages may be stuck (#595)',
-            );
-          });
+          notifyQueueCompletion(finalStatus);
         }
       })();
     } else {
@@ -1421,14 +1744,68 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
 
     // Always thread-scoped — default to 'default' thread for lobby
     const resolvedThreadId = threadId ?? 'default';
-    const messages =
-      beforeTs != null
-        ? await opts.messageStore.getByThreadBefore(resolvedThreadId, beforeTs, limit + 1, beforeId, userId)
-        : await opts.messageStore.getByThread(resolvedThreadId, limit + 1, userId);
 
-    // Fetch limit+1 to determine hasMore; drop oldest (first) probe item
-    const hasMore = messages.length > limit;
-    const page = hasMore ? messages.slice(1) : messages;
+    // Loop-scan: iteratively fetch batches from the store, filtering out
+    // internal system messages, until we have `limit + 1` visible items
+    // (the +1 probes hasMore) or the store is exhausted. This guarantees
+    // reachability regardless of how many consecutive internal messages
+    // cluster together — the old fixed-overscan approach would return
+    // {messages:[], hasMore:true} when internal clusters exceeded the cap.
+    //
+    // Termination guarantee: both in-memory and Redis store implementations
+    // use strict cursor advancement (exclusive `< cursor`), so each batch
+    // is strictly older than the previous. The store has finite data, so
+    // storeExhausted (rawBatch.length < BATCH_SIZE) is guaranteed to fire.
+    // The prevCursorId check is a defensive backstop against store bugs
+    // where the cursor fails to advance — it breaks the loop rather than
+    // spinning forever, and does NOT impose any functional scan limit.
+    const BATCH_SIZE = limit + 1 + 20; // generous first batch for common case
+    const needed = limit + 1;
+
+    type StoredMsg = Awaited<ReturnType<typeof opts.messageStore.getByThread>>[number];
+    const allVisible: StoredMsg[] = [];
+    let cursorTs = beforeTs;
+    let cursorId = beforeId;
+    let storeExhausted = false;
+
+    while (allVisible.length < needed && !storeExhausted) {
+      const rawBatch =
+        cursorTs != null
+          ? await opts.messageStore.getByThreadBefore(resolvedThreadId, cursorTs, BATCH_SIZE, cursorId, userId)
+          : await opts.messageStore.getByThread(resolvedThreadId, BATCH_SIZE, userId);
+
+      if (rawBatch.length < BATCH_SIZE) {
+        storeExhausted = true;
+      }
+
+      // Filter internal messages:
+      // - systemKind='context_briefing': F148 routing context for cats
+      //   (NOT F233 duty briefing, which also uses origin='briefing' but lacks this marker)
+      // - routing-guard-failure: internal route guard diagnostic
+      const batchVisible = rawBatch.filter(
+        (m) => m.extra?.systemKind !== 'context_briefing' && m.source?.connector !== 'routing-guard-failure',
+      );
+
+      // Prepend: each subsequent batch is chronologically older
+      allVisible.unshift(...batchVisible);
+
+      // Advance cursor to the oldest message in this batch for next iteration.
+      // Store returns oldest-first (after internal .reverse()), so [0] is oldest.
+      // Defensive: if cursor didn't advance, break to prevent infinite loop.
+      if (rawBatch.length > 0) {
+        const oldest = rawBatch[0]!;
+        const nextTs = oldest.deliveredAt ?? oldest.timestamp;
+        const nextId = oldest.id;
+        if (nextTs === cursorTs && nextId === cursorId) break; // cursor stuck — store bug
+        cursorTs = nextTs;
+        cursorId = nextId;
+      }
+    }
+
+    // hasMore: true if we collected more visible items than the page size,
+    // or if we haven't exhausted the store (more may exist deeper).
+    const hasMore = allVisible.length > limit || !storeExhausted;
+    const page = allVisible.length > limit ? allVisible.slice(allVisible.length - limit) : allVisible;
 
     // Map chat messages (union type allows summary items to be pushed later)
     type TimelineItem = {
@@ -1460,6 +1837,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
       ...(m.thinking ? { thinking: m.thinking } : {}),
       ...(m.extra?.rich ||
       m.extra?.crossPost ||
+      m.extra?.isExplicitPost ||
       m.extra?.stream ||
       m.extra?.targetCats ||
       m.extra?.scheduler ||
@@ -1469,6 +1847,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             extra: {
               ...(m.extra.rich ? { rich: m.extra.rich } : {}),
               ...(m.extra.crossPost ? { crossPost: m.extra.crossPost } : {}),
+              ...(m.extra.isExplicitPost ? { isExplicitPost: true } : {}),
               ...(m.extra.stream ? { stream: m.extra.stream } : {}),
               ...(m.extra.targetCats ? { targetCats: m.extra.targetCats } : {}),
               ...(m.extra.scheduler ? { scheduler: m.extra.scheduler } : {}),
@@ -1489,6 +1868,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
               icon: m.source.icon,
               ...(m.source.url ? { url: m.source.url } : {}),
               ...(m.source.meta ? { meta: m.source.meta } : {}),
+              ...(m.source.sender ? { sender: m.source.sender } : {}),
             },
           }
         : {}),
@@ -1600,6 +1980,7 @@ export const messagesRoutes: FastifyPluginAsync<MessagesRoutesOptions> = async (
             void reconcileZombies(liveness.zombies, {
               invocationRecordStore: recordStore,
               taskProgressStore: opts.taskProgressStore,
+              ballCustody: opts.ballCustody,
               log: request.log,
             }).catch((err) => request.log.warn({ err, feature: 'F194' }, 'reconcileZombies failed'));
           }

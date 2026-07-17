@@ -10,7 +10,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ChatInput, threadDrafts, threadImageDrafts } from '@/components/ChatInput';
+import { ChatInput, threadDrafts, threadImageDrafts, threadReplyDrafts } from '@/components/ChatInput';
 import { useChatStore } from '@/stores/chatStore';
 
 // ── Mocks ──
@@ -24,6 +24,14 @@ vi.mock('@/components/icons/AttachIcon', () => ({
   AttachIcon: () => React.createElement('span', null, 'attach'),
 }));
 vi.mock('@/utils/compressImage', () => ({ compressImage: (f: File) => Promise.resolve(f) }));
+vi.mock('@/hooks/useCoCreatorConfig', () => ({
+  useCoCreatorConfig: () => ({
+    name: 'ME',
+    aliases: [],
+    mentionPatterns: ['@co-creator'],
+    color: { primary: '#D4A76A', secondary: '#FFF8F0' },
+  }),
+}));
 vi.mock('@/hooks/useCatData', () => ({
   useCatData: () => ({
     cats: [
@@ -60,11 +68,13 @@ const originalRevokeObjectURL = URL.revokeObjectURL;
 beforeEach(() => {
   threadDrafts.clear();
   threadImageDrafts.clear();
+  threadReplyDrafts.clear();
   useChatStore.setState({
     currentThreadId: 'default',
     hasDraft: false,
     threadStates: {},
     pendingChatInsert: null,
+    replyToMessage: null,
   });
   URL.createObjectURL = vi.fn((file: Blob) => `blob:${(file as File).name ?? 'image'}`);
   URL.revokeObjectURL = vi.fn();
@@ -140,6 +150,24 @@ describe('ChatInput draft persistence', () => {
     expect(getTextarea().value).toBe('hello from A');
   });
 
+  it('hydrates saved reply drafts before mount-time persistence can clear them', () => {
+    const onSend = vi.fn();
+    const savedReply = {
+      id: 'msg-parent',
+      content: 'quoted parent',
+      senderCatId: 'opus',
+      threadId: 'thread-REPLY',
+    };
+    threadReplyDrafts.set('thread-REPLY', savedReply);
+
+    act(() => {
+      root.render(React.createElement(ChatInput, { threadId: 'thread-REPLY', onSend }));
+    });
+
+    expect(useChatStore.getState().replyToMessage).toEqual(savedReply);
+    expect(threadReplyDrafts.get('thread-REPLY')).toEqual(savedReply);
+  });
+
   it('maintains independent drafts per thread', () => {
     const onSend = vi.fn();
 
@@ -186,7 +214,7 @@ describe('ChatInput draft persistence', () => {
     act(() => {
       textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
-    expect(onSend).toHaveBeenCalledWith('will be sent', undefined, undefined, undefined);
+    expect(onSend).toHaveBeenCalledWith('will be sent', undefined, undefined, undefined, undefined);
 
     // Unmount and remount — draft should be gone
     act(() => root.unmount());
@@ -195,6 +223,28 @@ describe('ChatInput draft persistence', () => {
       root.render(React.createElement(ChatInput, { threadId: 'thread-C', onSend }));
     });
     expect(getTextarea().value).toBe('');
+  });
+
+  it('consumes pending chat insert into the matching thread composer', async () => {
+    const onSend = vi.fn();
+
+    act(() => {
+      root.render(React.createElement(ChatInput, { threadId: 'thread-RECALL', onSend }));
+    });
+    act(() => {
+      typeInto(getTextarea(), 'current draft');
+    });
+
+    await act(async () => {
+      useChatStore.getState().setPendingChatInsert({
+        threadId: 'thread-RECALL',
+        text: 'recalled queued message',
+      });
+      await Promise.resolve();
+    });
+
+    expect(getTextarea().value).toBe('current draft\nrecalled queued message');
+    expect(useChatStore.getState().pendingChatInsert).toBeNull();
   });
 
   it('restores image preview when remounting with same threadId', async () => {
@@ -263,7 +313,7 @@ describe('ChatInput draft persistence', () => {
     act(() => {
       getTextarea().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
-    expect(onSend).toHaveBeenCalledWith('msg with image', [fakeImage], undefined, undefined);
+    expect(onSend).toHaveBeenCalledWith('msg with image', [fakeImage], undefined, undefined, undefined);
     expect(getPreviewImage('pic.png')).toBeNull();
 
     act(() => root.unmount());

@@ -238,6 +238,7 @@ describe('F212 CliDiagnosticsPanel (AC-B2/B3/B4)', () => {
       'network_error',
       'spawn_failed',
       'missing_rollout',
+      'session_not_found',
       'context_window_exceeded',
       'invalid_thinking_signature',
       'tool_call_parse_failed',
@@ -321,7 +322,7 @@ describe('F212 CliDiagnosticsPanel (AC-B2/B3/B4)', () => {
   it('P2-5 path redaction: macOS/Linux/Windows home paths in command sanitized to ~', async () => {
     const { CliDiagnosticsPanel } = await import('../CliDiagnosticsPanel');
     const fixtures = [
-      { command: '/home/user/codex --json', expectIn: '~/.npm/bin/codex', expectNotIn: 'you' },
+      { command: '/home/user/.npm/bin/codex --json', expectIn: '~/.npm/bin/codex', expectNotIn: 'you' },
       { command: '/home/alice/.local/bin/claude', expectIn: '~/.local/bin/claude', expectNotIn: 'alice' },
       { command: 'C:\\Users\\bob\\AppData\\codex.exe', expectIn: '~\\AppData\\codex.exe', expectNotIn: 'bob' },
       // 云端 codex P2-6 (round-6): Linux root home (container/server installs)
@@ -376,6 +377,42 @@ describe('F212 CliDiagnosticsPanel (AC-B2/B3/B4)', () => {
     expect(ref?.textContent).toContain('invocationId:');
     // truncation: middle ellipsis "…" present for long invocationId
     expect(ref?.textContent).toMatch(/…/);
+  });
+
+  it('debugRef strip surfaces path-safe provider spawn context', async () => {
+    const { CliDiagnosticsPanel } = await import('../CliDiagnosticsPanel');
+    const diag = build({
+      reasonCode: 'auth_failed',
+      debugRef: {
+        command: 'agy',
+        exitCode: 0,
+        signal: null,
+        invocationId: 'inv-agy-auth',
+        homeMode: 'agy_profile_home',
+        spawnCwdMode: 'agy_profile_cwd',
+        spawnCwdKey: '230809973b9c83ac',
+        profileId: 'f210-gemini35-flash-high',
+      },
+    });
+
+    act(() => {
+      root.render(
+        React.createElement(CliDiagnosticsPanel, {
+          errorMessage: 'Error: auth failed',
+          diagnostics: diag,
+        }),
+      );
+    });
+
+    const ref = container.querySelector('[data-testid="cli-diagnostics-debug-ref"]');
+    expect(ref?.textContent).toContain('homeMode:');
+    expect(ref?.textContent).toContain('agy_profile_home');
+    expect(ref?.textContent).toContain('spawnCwdMode:');
+    expect(ref?.textContent).toContain('agy_profile_cwd');
+    expect(ref?.textContent).toContain('spawnCwdKey:');
+    expect(ref?.textContent).toContain('230809973b9c83ac');
+    expect(ref?.textContent).toContain('profileId:');
+    expect(ref?.textContent).toContain('f210-gemini35-flash-high');
   });
 
   it('falls back to errorMessage when publicSummary is empty', async () => {

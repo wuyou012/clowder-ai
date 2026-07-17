@@ -102,7 +102,7 @@ export interface BridgeConnection {
 export interface TrajectoryStep {
   type: string;
   status: string;
-  /** Internal replay hint for Cat Cafe consumers; never sent by Antigravity LS directly. */
+  /** Internal replay hint for Clowder AI consumers; never sent by Antigravity LS directly. */
   catCafeTextMode?: 'append' | 'replace';
   plannerResponse?: {
     response?: string;
@@ -241,6 +241,14 @@ export interface DeliveryCursor {
   awaitingUserInput?: boolean;
   lastTrajectoryAt?: number;
   livenessEvidence?: BridgeLivenessEvidence;
+  /**
+   * F211 (#2558): the COMPLETE text of the latest planner response in the latest
+   * turn, computed from the raw trajectory. The emitted `steps` carry suffix-only
+   * deltas when a planner grows in place, so consumers that need the full terminal
+   * text (e.g. deferred/progress-only detection) must read this snapshot, not the
+   * delta batch. Null when no planner text is present in the latest turn.
+   */
+  latestPlannerText?: string | null;
 }
 
 export interface StepBatch {
@@ -264,6 +272,79 @@ function hasGeneratingPlannerResponse(steps: TrajectoryStep[]): boolean {
   return steps.some(
     (step) => step.type === 'CORTEX_STEP_TYPE_PLANNER_RESPONSE' && step.status === 'CORTEX_STEP_STATUS_GENERATING',
   );
+}
+
+function latestUserInputIndex(steps: TrajectoryStep[]): number {
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    if (steps[index]?.type === 'CORTEX_STEP_TYPE_USER_INPUT') return index;
+  }
+  return -1;
+}
+
+function isNonEmptyText(value: string | undefined): boolean {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function hasTerminalPlannerTextInLatestTurn(steps: TrajectoryStep[]): boolean {
+  const userInputIndex = latestUserInputIndex(steps);
+  const latestTurnSteps = userInputIndex >= 0 ? steps.slice(userInputIndex + 1) : steps;
+  return latestTurnSteps.some((step) => {
+    if (step.type !== 'CORTEX_STEP_TYPE_PLANNER_RESPONSE') return false;
+    if (step.status !== 'CORTEX_STEP_STATUS_DONE' && step.status !== 'FINISHED' && step.status !== 'DONE') {
+      return false;
+    }
+    if (step.plannerResponse?.stopReason === 'STOP_REASON_CLIENT_STREAM_ERROR') return false;
+    if (isNonEmptyText(step.plannerResponse?.modifiedResponse)) return true;
+    return isNonEmptyText(step.plannerResponse?.response);
+  });
+}
+
+function plannerStepHasDisplayableText(step: TrajectoryStep): boolean {
+  if (step.plannerResponse?.stopReason === 'STOP_REASON_CLIENT_STREAM_ERROR') return false;
+  if (isNonEmptyText(step.plannerResponse?.modifiedResponse)) return true;
+  return isNonEmptyText(step.plannerResponse?.response);
+}
+
+function latestPlannerResponseInLatestTurn(steps: TrajectoryStep[]): TrajectoryStep | undefined {
+  const userInputIndex = latestUserInputIndex(steps);
+  for (let index = steps.length - 1; index > userInputIndex; index -= 1) {
+    const step = steps[index];
+    if (step?.type === 'CORTEX_STEP_TYPE_PLANNER_RESPONSE') return step;
+  }
+  return undefined;
+}
+
+function latestTurnHasErrorMessage(steps: TrajectoryStep[]): boolean {
+  const userInputIndex = latestUserInputIndex(steps);
+  const latestTurnSteps = userInputIndex >= 0 ? steps.slice(userInputIndex + 1) : steps;
+  return latestTurnSteps.some((step) => step.type === 'CORTEX_STEP_TYPE_ERROR_MESSAGE');
+}
+
+function latestTurnHasClientStreamErrorPlanner(steps: TrajectoryStep[]): boolean {
+  const userInputIndex = latestUserInputIndex(steps);
+  const latestTurnSteps = userInputIndex >= 0 ? steps.slice(userInputIndex + 1) : steps;
+  return latestTurnSteps.some(
+    (step) =>
+      step.type === 'CORTEX_STEP_TYPE_PLANNER_RESPONSE' &&
+      step.plannerResponse?.stopReason === 'STOP_REASON_CLIENT_STREAM_ERROR',
+  );
+}
+
+function idleCascadeReuseBlockerReason(trajectory: CascadeTrajectory): string | undefined {
+  if (trajectory.status !== 'CASCADE_RUN_STATUS_IDLE') return undefined;
+  const steps = trajectory.trajectory?.steps;
+  if (!Array.isArray(steps)) return undefined;
+  if (steps.length === 0) return undefined;
+  // This is intentionally all-steps, not latest-turn: any half-open planner means the cascade is not reuse-clean.
+  if (hasGeneratingPlannerResponse(steps)) return 'idle_generating_planner_response';
+  const lacksTerminalPlannerText = !hasTerminalPlannerTextInLatestTurn(steps);
+  if (latestTurnHasClientStreamErrorPlanner(steps) && lacksTerminalPlannerText) {
+    return 'idle_client_stream_error_without_terminal_planner_text';
+  }
+  if (latestTurnHasErrorMessage(steps) && lacksTerminalPlannerText) {
+    return 'idle_error_without_terminal_planner_text';
+  }
+  return undefined;
 }
 
 function trajectoryTimestampMs(trajectory: CascadeTrajectory): number | undefined {
@@ -606,7 +687,7 @@ export class AntigravityBridge {
       return true;
     }
 
-    // Antigravity has no usable approval surface in Cat Cafe's runtime path.
+    // Antigravity has no usable approval surface in Clowder AI's runtime path.
     // Default to YOLO for run_command, matching Codex/Claude/OpenCode behavior,
     // while retaining an env opt-out for emergency rollback. Local hard refusal
     // rules above still run before any LS approval/execution.
@@ -903,19 +984,29 @@ export class AntigravityBridge {
         const changed = lastStatusKey === undefined || statusKey !== lastStatusKey;
         const throttledMutationProbe = isRunning && !changed && fullFetchSkips >= REG9_RUNNING_FULL_FETCH_THROTTLE;
         if (!changed && !throttledMutationProbe) {
-          lastStatusKey = statusKey;
-          fullFetchSkips += 1;
           const idleMs = Date.now() - lastActivityAt;
-          // A cascade awaiting user approval is NOT a stall (carry the last full-fetch observation).
-          // Otherwise the idle-timeout still fires here — so a genuinely hung cascade surfaces instead
-          // of polling forever silently (REG9 core: no done/error must never become an invisible hang).
-          if (!lastAwaitingUserInput && idleMs > idleTimeoutMs) {
-            throw new Error(
-              `Antigravity stall: no activity for ${idleMs}ms (steps=${statusForGate.stepCount}, status=${statusForGate.status})`,
-            );
+          const shouldProbeTerminalBeforeStall =
+            !lastAwaitingUserInput && statusForGate.status === 'CASCADE_RUN_STATUS_IDLE' && idleMs > idleTimeoutMs;
+          if (shouldProbeTerminalBeforeStall) {
+            // F211-REG14: when an unchanged IDLE summary reaches the watchdog deadline, do one final
+            // authoritative trajectory read before surfacing a stall. A retry can resume from the last
+            // delivered step after the cascade has already become a clean terminal tail; throwing from
+            // the cheap status gate would skip the no-new-steps terminalization path below.
+            pendingStatusKey = statusKey;
+          } else {
+            lastStatusKey = statusKey;
+            fullFetchSkips += 1;
+            // A cascade awaiting user approval is NOT a stall (carry the last full-fetch observation).
+            // Otherwise the idle-timeout still fires here — so a genuinely hung cascade surfaces instead
+            // of polling forever silently (REG9 core: no done/error must never become an invisible hang).
+            if (!lastAwaitingUserInput && idleMs > idleTimeoutMs) {
+              throw new Error(
+                `Antigravity stall: no activity for ${idleMs}ms (steps=${statusForGate.stepCount}, status=${statusForGate.status})`,
+              );
+            }
+            await new Promise((r) => setTimeout(r, pollIntervalMs));
+            continue;
           }
-          await new Promise((r) => setTimeout(r, pollIntervalMs));
-          continue;
         }
         // Defer the commit until the full fetch below actually succeeds (砚砚 P1) — a transient
         // getTrajectory failure must keep this change un-consumed so the retry re-fetches it.
@@ -990,7 +1081,34 @@ export class AntigravityBridge {
         nextPlannerTexts = diff.nextPlannerTexts;
         hadMutation = diff.hadMutation;
       }
-      const terminalReady = isTerminal && !hasGeneratingPlannerResponse(allSteps);
+      const latestPlanner = latestPlannerResponseInLatestTurn(allSteps);
+      // F211 (#2558): full snapshot of the latest planner text (not the streamed
+      // suffix delta) so deferred/progress-only detection sees the complete tail.
+      // Only when the planner actually has displayable text (excludes thinking-only
+      // and stream-error steps); covers DONE and generating-with-text alike.
+      const latestPlannerText =
+        latestPlanner !== undefined && plannerStepHasDisplayableText(latestPlanner)
+          ? // `||` (not `??`) so a blank modifiedResponse falls through to response,
+            // matching the transformer's displayed `modifiedResponse || response` (#2558).
+            latestPlanner.plannerResponse?.modifiedResponse || latestPlanner.plannerResponse?.response || null
+          : null;
+      const latestPlannerIsGenerating = latestPlanner?.status === 'CORTEX_STEP_STATUS_GENERATING';
+      const latestGeneratingPlannerHasText =
+        latestPlannerIsGenerating && latestPlanner !== undefined && plannerStepHasDisplayableText(latestPlanner);
+      const deliveredBeyondReplayBaseline = delivered > replayBaselineStepCount;
+      const terminalReady =
+        isTerminal &&
+        (!latestPlannerIsGenerating ||
+          // F211-REG12: if Antigravity flips to IDLE while a planner response is still marked
+          // GENERATING, only close once that latest planner response itself has displayable text.
+          // Earlier planner text in the same user turn cannot prove this final generating step is done.
+          (!shouldFetchForNewSteps && !hadMutation && latestGeneratingPlannerHasText));
+      if (isTerminal && !terminalReady && latestPlannerIsGenerating) {
+        // The status key may already be committed for this IDLE fetch. Force one follow-up
+        // trajectory read so generating-planner text mutations are not hidden by the status gate.
+        lastStatusKey = undefined;
+        fullFetchSkips = 0;
+      }
 
       if (currentSteps > delivered || hadMutation) {
         waitingApprovalSignaled = false;
@@ -1035,6 +1153,7 @@ export class AntigravityBridge {
             awaitingUserInput,
             ...(trajectoryAt === undefined ? {} : { lastTrajectoryAt: trajectoryAt }),
             livenessEvidence,
+            latestPlannerText,
           },
         };
         // F211-REG8: in busy-reuse, defer terminating until the follow-up's own turn has started.
@@ -1072,7 +1191,7 @@ export class AntigravityBridge {
         if (
           terminalReady &&
           (!expectFollowUpTurn || followUpUserInputSeen) &&
-          (delivered > stepsBefore || idleMs > idleTimeoutMs)
+          (deliveredBeyondReplayBaseline || idleMs > idleTimeoutMs)
         ) {
           yield {
             steps: [],
@@ -1189,7 +1308,10 @@ export class AntigravityBridge {
           // DONE, or any unrecognized status) is NOT continuable — reusing it would pin the follow-up to
           // a dead cascade (cloud P1 #10) — as does an unreachable cascade (getTrajectory throws, below).
           let reuseCascadeId: string | undefined;
-          const continuable = traj.status === 'CASCADE_RUN_STATUS_IDLE' || traj.status === 'CASCADE_RUN_STATUS_RUNNING';
+          const idleReuseBlocker = idleCascadeReuseBlockerReason(traj);
+          const continuable =
+            (traj.status === 'CASCADE_RUN_STATUS_IDLE' && idleReuseBlocker === undefined) ||
+            traj.status === 'CASCADE_RUN_STATUS_RUNNING';
           if (continuable) {
             if (this.getInFlightCount(active.runtimeSessionId) > 0) {
               // A native tool result is in flight for ANY continuable state — IDLE (a pushToolResult
@@ -1228,8 +1350,9 @@ export class AntigravityBridge {
           }
           // Not a valid continuation target — a reachable but terminal/unknown status (cloud P1 #10) or a
           // cascade that became unreachable during the drain (cloud P2) → replace (REG2 fresh + bootstrap).
+          const notContinuableReason = idleReuseBlocker === undefined ? `status ${traj.status}` : idleReuseBlocker;
           log.info(
-            `runtime-store cascade ${active.runtimeSessionId} not continuable (status ${traj.status}) for ${key}, creating new`,
+            `runtime-store cascade ${active.runtimeSessionId} not continuable (${notContinuableReason}) for ${key}, creating new`,
           );
           runtimeStoreReplacementTarget = active;
         } catch {
@@ -1250,8 +1373,11 @@ export class AntigravityBridge {
       if (!cascadeId) continue;
       try {
         const traj = await this.getTrajectory(cascadeId);
-        if (traj.status !== 'CASCADE_RUN_STATUS_IDLE') {
-          log.info(`cascade ${cascadeId} stuck in ${traj.status} for ${key}, creating new`);
+        const idleReuseBlocker = idleCascadeReuseBlockerReason(traj);
+        const notContinuableReason =
+          traj.status === 'CASCADE_RUN_STATUS_IDLE' ? idleReuseBlocker : `status ${traj.status}`;
+        if (notContinuableReason !== undefined) {
+          log.info(`cascade ${cascadeId} stuck in ${notContinuableReason} for ${key}, creating new`);
           continue;
         }
         if (!this.runtimeSessionStore && this.legacyJsonSessionStore && this.sessionMap.get(key) !== cascadeId) {

@@ -3,7 +3,17 @@ node_modules/
 
 # Build outputs
 dist/
+
+# F253 Phase C: gate-last-run sentinel (written by pnpm gate, read by pre-push Layer 4)
+.gate-last-run
 docs/.doc-index.json
+
+# Runtime-written sentinel queue (MarkerQueue auto-writes ephemeral yaml here).
+# Source: packages/api/src/domains/memory/MarkerQueue.ts. Content is callback
+# id / sentinel — not meant for git history. Reported by hook as "未提交" but
+#猫不该 commit. (47 sweep 2026-06-17)
+docs/markers/
+
 # Feature index — derived from docs/features/*.md, NO live consumer (runtime builds
 # its index from the docs directly; opensource sync regenerates it fresh). ADR-011
 # lists it as optional/never-completed. Decommitted to kill merge-order staleness
@@ -26,8 +36,11 @@ packages/web/public/vendor/
 .env.local
 .env.*.local
 
-# Local overlay files (#603 .local convention)
+# Local overlay files (#603 .local convention, F225 prompt templates)
 *.local.md
+*.local.md.bak
+*.local.yaml
+*.local.yaml.bak
 *.local-override.md
 
 # IDE & AI tools
@@ -138,6 +151,7 @@ desktop-dist/
 bundled/
 docs/bug-report/werewolf-investigation/poster-screenshot.png
 .worktrees/
+.review-worktrees/
 
 # Raw avatar source images (large, pre-sliced originals)
 assets/avatars/raw/
@@ -166,17 +180,25 @@ docs/discussions/exported-threads/
 
 # Large source PDFs (external storage preferred)
 docs/discussions/**/sources/*.pdf
+docs/competitor-research/**/*.pdf
 
 # Playwright MCP cache
 .playwright-mcp/
 
-# SQLite runtime databases (Hindsight evidence store + World Engine)
+# SQLite runtime databases (Hindsight evidence store + World Engine + Task Outcome + Event Memory)
 evidence.sqlite
 evidence.sqlite-shm
 evidence.sqlite-wal
 world.sqlite
 world.sqlite-shm
 world.sqlite-wal
+task-outcome-episodes.sqlite
+task-outcome-episodes.sqlite-shm
+task-outcome-episodes.sqlite-wal
+event-memory.sqlite
+event-memory.sqlite-shm
+event-memory.sqlite-wal
+event-memory.sqlite.outbox.jsonl
 
 # Antigravity smoke test outputs
 .cat-cafe-antigravity-*-smoke.json

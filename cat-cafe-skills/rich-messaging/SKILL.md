@@ -2,7 +2,7 @@
 name: rich-messaging
 description: >
   富媒体消息发送：语音、图片、卡片、清单、代码 diff、交互选择。
-  Use when: 发语音、发图、发卡片、展示结构化信息、庆祝、给我听听、给我看看、让用户选、确认操作。
+  Use when: 发语音、发图、发卡片、展示结构化信息、长结构化汇报、想发一堆文字/日志/步骤、庆祝、给我听听、给我看看、让用户选、确认操作。
   Not for: 纯文字聊天、技术讨论、日常回复。
   Output: rich block 附着在消息上。
 triggers:
@@ -21,6 +21,11 @@ triggers:
   - "rich block"
   - "checklist"
   - "发个清单"
+  - "想发一堆文字"
+  - "发日志"
+  - "发步骤"
+  - "长结构化汇报"
+  - "结构化汇报"
   - "庆祝一下"
   - "展示一下"
   - "给我听听"
@@ -42,6 +47,10 @@ triggers:
 
 **每个 session 首次发 rich block 前，先调 `get_rich_block_rules` 获取完整字段规格。**
 本 skill 只给决策指引和最小示例，细则在 MCP 工具里。
+
+## 默认触发：长结构化汇报
+
+当你想发一堆文字、日志、步骤，或回复已经有 3+ 结构化信号（列表、表格、代码块、diff、状态字段、行动项）时，默认用 1-2 句自然语言摘要 + `cat_cafe_create_rich_block`。纯长 Markdown 只在 rich block 不适合或工具不可用时使用，并说明原因。
 
 ## 七种 Rich Block 一览
 
@@ -102,7 +111,7 @@ triggers:
 {"id": "hw1", "kind": "html_widget", "v": 1, "html": "<div style='padding:20px'><canvas id='c'></canvas><script>const c=document.getElementById('c').getContext('2d');c.fillStyle='#E29578';c.fillRect(0,0,100,50);</script></div>"}
 ```
 
-铲屎官拍板："简单的用富文本，复杂的用猫主动打开浏览器。"
+operator拍板："简单的用富文本，复杂的用猫主动打开浏览器。"
 - 用 sandboxed iframe `srcdoc` 渲染，**禁止** `allow-same-origin`（比 browser panel 更严格）
 - 适合：Chart.js 图表、CSS 动画、计算器等纯前端组件
 - 不适合：需要网络请求、需要访问外部资源的复杂应用（那些用 `browser-preview` skill）
@@ -133,7 +142,7 @@ triggers:
 
 | 错误 | 后果 | 正确做法 |
 |------|------|----------|
-| 不知道自己能发语音 | 铲屎官说"发语音"你说"我是文字猫" | 你可以！用 audio block |
+| 不知道自己能发语音 | operator说"发语音"你说"我是文字猫" | 你可以！用 audio block |
 | "发图"只想到 image-generation | 走 Chrome MCP 现场生成，慢且不稳定 | 先看家里有没有已有图片（`/avatars/`、`/uploads/`），有就 media_gallery 直接发 |
 | 本地生成图直接用 `file://` 或源码仓路径 | rich block 发得出去，但前端取不到 | 用 `publishGeneratedImage()` 发布到 `/uploads/...`（F172 共享合约自动解析 uploadDir） |
 | audio 写长段话 | 合成效果差 | 短句口语化，1-2 句 |

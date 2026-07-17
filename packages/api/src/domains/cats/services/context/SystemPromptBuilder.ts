@@ -5,8 +5,9 @@
  * 纯函数，无副作用。读取 catRegistry 生成身份上下文。
  */
 
-import type { CatConfig, CatId, CompiledPackBlocks, WorldContextEnvelope } from '@cat-cafe/shared';
+import type { CatConfig, CatId, CompiledPackBlocks, ConciergeConfig, WorldContextEnvelope } from '@cat-cafe/shared';
 import { catRegistry } from '@cat-cafe/shared';
+import { getDossierRosterSummary, hasDossierEntry } from '@cat-cafe/shared/dossier';
 import {
   catHasRole,
   getCoCreatorConfig,
@@ -16,10 +17,15 @@ import {
   isCatLead,
 } from '../../../../config/cat-config-loader.js';
 import { getCatModel } from '../../../../config/cat-models.js';
+import { findMonorepoRoot } from '../../../../utils/monorepo-root.js';
 // F167 Phase F P1 (cloud Codex): roster model cell must resolve via getCatModel
 // (env CAT_{CATID}_MODEL → registry → defaults), not from static config.defaultModel,
 // otherwise env overrides cause exactly the handle/model drift Phase F is killing.
-import { buildGuidePromptLines } from '../../../guides/GuidePromptSection.js';
+// F237 Phase 2 (AC-P2-6): pipeline-backed builders for delegation
+import {
+  buildInvocationContextViaHookPipeline,
+  buildStaticIdentityViaHookPipeline,
+} from '../../../prompt-hooks/PipelinePromptBuilder.js';
 import type {
   BootcampStateV1,
   ThreadMentionRoutingFeedback,
@@ -27,7 +33,14 @@ import type {
   ThreadRoutingPolicyV1,
 } from '../stores/ports/ThreadStore.js';
 import { loadCompiledGovernanceL0, loadCompiledGovernanceL0Sync } from './governance-l0.js';
+import { loadMcpToolsSection, loadWorkflowTriggers } from './prompt-template-loader.js';
 import { RICH_BLOCK_SHORT } from './rich-block-rules.js';
+
+// L0-budget-defense PR-B-impl (ADR-038 件套 ④): staging is wired in
+// invoke-single-cat (mirrors F225 contextHintPrefix), NOT here. See note
+// at the buildLiveStaticIdentity removal site below for the rationale.
+
+const MERGE_GATE_SOURCE_PROVENANCE_TRIGGER = '- MG provenance override：外部finding修完后等PR truth，不@旧reviewer。';
 
 /**
  * Context for a single cat invocation
@@ -45,6 +58,8 @@ export interface InvocationContext {
   teammates: readonly CatId[];
   /** Whether MCP tools are available for this cat */
   mcpAvailable: boolean;
+  /** Whether this invocation already receives the compiled L0 through a native system/developer channel. */
+  nativeL0Injected?: boolean;
   /** Prompt-level tags like 'critique' (from IntentParser) */
   promptTags?: readonly string[];
   /** Whether A2A collaboration prompt should be injected (only in serial/execute mode) */
@@ -58,7 +73,7 @@ export interface InvocationContext {
    * F167 L1: ping-pong streak warning.
    * When present (streak >= 2), inject a warning prompt reminding the cat
    * that they've been bouncing the same pair back and forth — consider
-   * third-party input / wrap up / escalate to 铲屎官 instead of another volley.
+   * third-party input / wrap up / escalate to co-creator instead of another volley.
    */
   pingPongWarning?: {
     /** The other cat in the ping-pong pair (not this cat). */
@@ -85,6 +100,8 @@ export interface InvocationContext {
     sourceThreadId: string;
     /** Sender cat handle (catId). */
     senderCatId: CatId;
+    /** F246 Phase B: effect-class label for receiving-side behavior constraints */
+    effectClass?: 'fyi' | 'coordinate' | 'investigate' | 'assign_work';
   };
   /**
    * F046 D3: One-shot feedback injected when previous @mention was not routed.
@@ -109,7 +126,7 @@ export interface InvocationContext {
   };
   /**
    * F091: Active Signal articles in discussion context.
-   * Injected when 铲屎官 links a Signal article in the thread.
+   * Injected when co-creator links a Signal article in the thread.
    */
   activeSignals?: readonly {
     readonly id: string;
@@ -136,7 +153,7 @@ export interface InvocationContext {
    */
   threadId?: string;
   /**
-   * F087: Bootcamp state for CVO onboarding threads.
+   * F087: Bootcamp state for operator onboarding threads.
    * When present, cats inject bootcamp-guide behavior per phase.
    */
   bootcampState?: BootcampStateV1;
@@ -174,6 +191,16 @@ export interface InvocationContext {
    * When present, injects world state (characters, scene, canon) into the prompt.
    */
   worldContext?: WorldContextEnvelope;
+  /**
+   * F229: Concierge thread marker.
+   * When 'concierge', ConciergePromptSection is injected into the invocation context.
+   */
+  threadKind?: 'concierge';
+  /**
+   * F229: Per-user concierge configuration.
+   * Required when threadKind === 'concierge'. Provides displayName / personaTone / dutyCatProfileId.
+   */
+  conciergeConfig?: ConciergeConfig;
 }
 
 /** Get all cat configs from catRegistry (.cat-cafe/cat-catalog.json) */
@@ -181,8 +208,10 @@ function getAllConfigs(): Record<string, CatConfig> {
   return catRegistry.getAllConfigs();
 }
 
-/** Get a single cat config by ID */
-function getConfig(catId: string): CatConfig | undefined {
+/** Get a single cat config by ID
+ * @internal F237 — exported for ContextAssembler bridge; will be removed when SystemPromptBuilder is replaced.
+ */
+export function getConfig(catId: string): CatConfig | undefined {
   return catRegistry.tryGet(catId)?.config;
 }
 
@@ -207,6 +236,12 @@ function pickVariantMention(id: string, config: CatConfig): string {
   return `@${id}`;
 }
 
+/** @internal F237 — exported for AssembleBridge routing policy parity (cloud P2-1 fix) */
+export function pickVariantMentionForBridge(id: string): string {
+  const config = getConfig(id);
+  return config ? pickVariantMention(id, config) : `@${id}`;
+}
+
 function pickDisplayNameMention(config: CatConfig): string | null {
   const expected = `@${config.displayName}`.toLowerCase();
   return config.mentionPatterns.find((p) => p.toLowerCase() === expected) ?? null;
@@ -218,7 +253,8 @@ function pickDisplayNameOrVariantMention(id: string, config: CatConfig): string 
   return pickDisplayNameMention(config) ?? pickVariantMention(id, config);
 }
 
-function buildCallableMentions(currentCatId: CatId): CallableMentionsResult {
+/** @internal F237 — exported for ContextAssembler bridge */
+export function buildCallableMentions(currentCatId: CatId): CallableMentionsResult {
   const entries: CallableCatEntry[] = Object.entries(getAllConfigs())
     .filter(([id]) => id !== currentCatId && isCatAvailable(id))
     .map(([id, config]) => ({ id, config }));
@@ -260,7 +296,8 @@ function buildCallableMentions(currentCatId: CatId): CallableMentionsResult {
   return { mentions, hasDuplicateDisplayNames, uniqueHandleExample };
 }
 
-function formatHandleFreeLabel(catId: string, config: CatConfig | undefined): string {
+/** @internal F237 — exported for ContextAssembler bridge */
+export function formatHandleFreeLabel(catId: string, config: CatConfig | undefined): string {
   if (!config) return catId;
   // F167 identity anti-spoofing: carry variantLabel when present to disambiguate same-breed variants
   // (e.g. "布偶猫 Opus 4.7(opus-47)" vs "布偶猫(opus)"), preventing A2A handoff identity confusion.
@@ -268,51 +305,32 @@ function formatHandleFreeLabel(catId: string, config: CatConfig | undefined): st
   return `${config.displayName}${variantPart}(${catId})`;
 }
 
-const PROVIDER_LABELS: Record<string, string> = {
+function compactRosterModel(model: string): string {
+  return model.replace(/-\d{8}$/u, '').replace(/^kimi-code\//u, '');
+}
+
+function compactRosterCell(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
+/** @internal F237 — exported for ContextAssembler bridge */
+export const PROVIDER_LABELS: Record<string, string> = {
   anthropic: 'Anthropic',
   openai: 'OpenAI',
   google: 'Google',
 };
 
 /**
+ * @segment S13 — MCP tools section (loaded from template)
  * Skills-as-source-of-truth: MCP tools section is minimal.
  * Full specs live in cat-cafe-skills/refs/ (rich-blocks.md, mcp-callbacks.md).
+ * Lazy-evaluated to pick up .local overlay changes (F237 Checkpoint C).
  */
-const MCP_TOOLS_SECTION = `
-MCP 工具（异步汇报；token 有效期有限）：
-
-**记忆工具：**
-- cat_cafe_search_evidence: 首选入口；depth=raw 可看消息级细节
-- cat_cafe_library_*: collection管理(list/create/rebuild/archive)
-
-**drill-down：**
-- cat_cafe_list_session_chain: 列出 session 链
-- cat_cafe_read_session_digest: 读 session 摘要
-- cat_cafe_read_session_events: 读 session 事件（raw/chat/handoff）
-- cat_cafe_read_invocation_detail: 读单次 invocation 全事件
-
-**四肢控制面（Limb — 插件/设备能力调用）：**
-- limb_list_available: 列出当前在线节点及能力（含插件提供的服务型节点）
-- limb_invoke: 调用节点能力（nodeId + command + params）。nodeId 从 limb_list_available 获取，不要猜
-
-**协作工具：**
-- cat_cafe_post_message: 本 thread 异步（agent-key 才传 threadId）
-- cat_cafe_cross_post_message: 跨 thread（targetCats/行首@二选一）。最小路径：list_threads → cross_post_message(threadId, targetCats, content) → get_thread_context 验证
-- cat_cafe_register_pr_tracking: PR tracking
-- cat_cafe_get_pending_mentions: @提及
-- cat_cafe_get_thread_context: thread 上下文
-- cat_cafe_list_threads: thread 摘要
-- cat_cafe_create_task: 🧶 毛线球（持久任务）
-- cat_cafe_update_task: 更新任务状态
-- cat_cafe_create_rich_block: rich block（inline）
-- cat_cafe_generate_document: 文档生成→IM投递
-- cat_cafe_get_rich_block_rules: rich block 规则
-- cat_cafe_multi_mention: 并行拉猫讨论（先搜后问）
-- cat_cafe_propose_thread: 提议新建 thread（创建提案卡片，**不直接创建 thread**）。返回 proposalId，仅在用户审批通过后后端才创建 thread。审批前必须假设 thread 不存在，不要 cross_post。仅在owner 显式要求或确有独立 long-running 讨论需求时使用。
-
-${RICH_BLOCK_SHORT}
-需要富呈现时优先 rich block；首次使用前先 call get_rich_block_rules。
-规范：cat-cafe-skills/refs/rich-blocks.md。`;
+/** @internal F237 — exported for ContextAssembler bridge */
+export function getMcpToolsSection(): string {
+  return `\n${loadMcpToolsSection({ RICH_BLOCK_SHORT })}`;
+}
 
 // --- shared-rules.md → compiled governance L0 support (#747) ---
 let _governanceDigestResolved = loadCompiledGovernanceL0Sync().content;
@@ -334,58 +352,31 @@ export function getGovernanceDigest(): string {
   return _governanceDigestResolved;
 }
 
-/** Per-breed workflow triggers: when to proactively @ other cats.
- *  Keyed by breedId so all variants of a breed share the same workflow. */
-const WORKFLOW_TRIGGERS: Record<string, string> = {
-  ragdoll: [
-    '## 工作流（主动 @ 触发点）',
-    '- 完成开发/修复 → @缅因猫 请 review',
-    '- 修完 review 意见 → @缅因猫 确认修复',
-    '- 遇到视觉/体验问题 → @暹罗猫 征询',
-    '- Review 别人代码：每个发现给明确立场（放行/退回 + 理由）',
-  ].join('\n'),
-  'maine-coon': [
-    '## 工作流（主动 @ 触发点）',
-    '- 完成 review → @布偶猫 通知结果',
-    '- 修完 bug/feature → @布偶猫 请 review',
-    '- serial/handoff 场景且需要对方行动 → @ 对应猫（parallel 模式各自独立，不互 @）',
-    '- 发现需要架构决策 → @布偶猫 征询',
-    '- Review 代码：每个发现给明确立场（放行/退回 + 理由）',
-    '- 收到 review 意见：独立判断，认为自己对就 push back（Rule 0），不全盘接受',
-    '',
-    '### 执行纪律',
-    '- 加载 Skill 后直接执行第一步（产出 > 复述）',
-    '- 接球后静默执行：收到"放行"后沉默做到下一状态迁移点（BLOCKED / REVIEW READY / DONE）',
-    '- 声明 = 执行：说"我进 merge gate"必须同 turn 加载 skill 并执行',
-    '- 只发状态迁移消息，中间产物留在代码里',
-    '- 完成任务后必须 @ 下一棒',
-    '- 若识别到角色不匹配或方向有问题，先通知对方再执行（Rule 0）',
-    '',
-    '### 出口一问（发消息前必问）',
-    '我这条消息结尾有没有 @ 下一棒？没有 → 是真的不需要，还是我忘了？',
-  ].join('\n'),
-  siamese: [
-    '## 工作流（主动 @ 触发点）',
-    '- 完成设计/视觉资产 → 分别 @布偶猫 和 @缅因猫 请确认（每只猫各占一行）',
-    '- 遇到技术实现问题 → @布偶猫 征询',
-    '',
-    '### 执行纪律',
-    '- 加载 Skill 后直接执行第一步（产出 > 复述）',
-    '- 涉及 UI/前端验证时：通过截图产出证据',
-    '- 接球后静默执行到下一状态点（DONE / HANDOFF）',
-    '- 若识别到角色不匹配或方向有问题，先通知对方再执行（Rule 0）',
-    '',
-    '### 出口一问（发消息前必问）',
-    '我这条消息结尾有没有 @ 下一棒？没有 → 是真的不需要，还是我忘了？',
-  ].join('\n'),
-};
+/** @segment S6 — Per-breed workflow triggers (loaded from template)
+ *  Keyed by breedId so all variants of a breed share the same workflow.
+ *  Lazy-evaluated to pick up .local overlay changes (F237 Checkpoint C). */
+/** @internal F237 — exported for ContextAssembler bridge */
+export function getWorkflowTriggers(): Record<string, string> {
+  const triggers = loadWorkflowTriggers();
+  return Object.fromEntries(
+    Object.entries(triggers).map(([breed, content]) => [breed, ensureMergeGateSourceProvenanceTrigger(content)]),
+  );
+}
+
+function ensureMergeGateSourceProvenanceTrigger(content: string): string {
+  if (content.includes('MG provenance override') && content.includes('外部finding修完后等PR truth')) {
+    return content;
+  }
+  return `${content.trimEnd()}\n${MERGE_GATE_SOURCE_PROVENANCE_TRIGGER}`;
+}
 
 /**
  * F-Ground-3: Build teammate roster table.
  * Lists all other cats with @mention, strengths, and caution.
  * Excludes the current cat. Returns null if no teammates.
  */
-function buildTeammateRoster(currentCatId: CatId): string | null {
+/** @internal F237 — exported for ContextAssembler bridge */
+export function buildTeammateRoster(currentCatId: CatId): string | null {
   const allConfigs = getAllConfigs();
   const entries = Object.entries(allConfigs).filter(([id]) => id !== currentCatId && isCatAvailable(id));
   if (entries.length === 0) return null;
@@ -410,14 +401,28 @@ function buildTeammateRoster(currentCatId: CatId): string | null {
     } catch {
       resolvedModel = config.defaultModel ?? '';
     }
+    resolvedModel = compactRosterModel(resolvedModel);
     const mentionCell = resolvedModel ? `${mention} · ${resolvedModel}` : mention;
-    const strengths = config.teamStrengths ?? config.roleDescription;
+    // F208 KD-12: dossier l0RosterSummary → legacy teamStrengths → roleDescription
+    const projectRoot = findMonorepoRoot();
+    const dossierSummary = getDossierRosterSummary(id, projectRoot);
+    // KD-9: warn only for tracked cats (have dossier entry) missing l0RosterSummary.
+    // Runtime/custom cats with no dossier entry silently use config fallback.
+    if (!dossierSummary && hasDossierEntry(id, projectRoot)) {
+      console.warn(
+        `[F208 KD-9] cat "${id}" has dossier entry but missing l0RosterSummary — falling back to config.teamStrengths`,
+      );
+    }
+    const strengths = compactRosterCell(dossierSummary ?? config.teamStrengths ?? config.roleDescription, 52);
     // F167 Phase E (KD-20): surface hard restrictions alongside caution — data-driven
     // replacement for the retired L3 role-gate. Sender sees e.g. "禁止写代码" so they
     // self-regulate which cat to @ for which task; no harness-side regex.
     const restrictionsNote =
       config.restrictions && config.restrictions.length > 0 ? `**硬限制**：${config.restrictions.join('、')}` : null;
-    const cautionCell = [config.caution ?? null, restrictionsNote].filter(Boolean).join('；') || '—';
+    const cautionCell = compactRosterCell(
+      [config.caution ?? null, restrictionsNote].filter(Boolean).join('；') || '—',
+      72,
+    );
     rows.push(`| ${label} | ${mentionCell} | ${strengths} | ${cautionCell} |`);
   }
 
@@ -437,7 +442,7 @@ function buildTeammateRoster(currentCatId: CatId): string | null {
 export interface StaticIdentityOptions {
   /**
    * Whether native MCP tools are available (Claude with --mcp-config).
-   * When true, MCP_TOOLS_SECTION is included in static identity because
+   * When true, getMcpToolsSection() is included in static identity because
    * Claude's --append-system-prompt survives context compression.
    *
    * Non-Claude cats (Codex/Gemini) use HTTP callback instructions which
@@ -451,131 +456,29 @@ export interface StaticIdentityOptions {
    *   Identity (core) > Pack Masks > Governance L0 > Pack Guardrails > Pack Defaults > Workflows
    */
   packBlocks?: CompiledPackBlocks | null;
+  /**
+   * F237: When true, insert `── [SN] Name ──` markers before each segment.
+   * Used by compiled-preview to show which segment generated which content.
+   */
+  annotateSegments?: boolean;
 }
 
 /**
  * Build static identity prompt — persistent across invocations.
  * Includes: identity, personality, rules, A2A format, workflow triggers,
- * 铲屎官 reference, and MCP tool documentation (session-level).
+ * co-creator reference, and MCP tool documentation (session-level).
  * Suitable for --system-prompt / --append-system-prompt injection.
  */
 export function buildStaticIdentity(catId: CatId, options?: StaticIdentityOptions): string {
   const config = getConfig(catId as string);
   if (!config) return '';
-
-  const providerLabel = PROVIDER_LABELS[config.clientId] ?? config.clientId;
-  const lines: string[] = [];
-
-  // Identity
-  const nameLabel = config.nickname
-    ? `${config.displayName}/${config.nickname}（${config.name}）`
-    : `${config.displayName}（${config.name}）`;
-  lines.push(
-    `你是 ${nameLabel}，由 ${providerLabel} 提供的 AI 猫猫。`,
-    ...(config.nickname ? [`昵称 "${config.nickname}" 的由来见 docs/stories/cat-names/。`] : []),
-    `角色：${config.roleDescription}`,
-    `性格：${config.personality}`,
-    '',
-  );
-
-  // F167 Phase E (KD-20): self-awareness — if this cat has hard restrictions,
-  // declare them inline so the cat can recognize illegitimate @-mentions and
-  // push back / retreat (instead of accepting and failing). Data-driven from
-  // cat-config.restrictions — no harness gate, the cat self-regulates.
-  if (config.restrictions && config.restrictions.length > 0) {
-    lines.push(`你的硬限制：${config.restrictions.join('、')}。被 @ 做这类任务时请 push back 或退回给 @ 你的猫。`, '');
-  }
-
-  // F129: Pack masks — role overlay (never changes core identity, see KD-3)
-  if (options?.packBlocks?.masksBlock) {
-    lines.push(options.packBlocks.masksBlock, '');
-  }
-
-  // A2A collaboration format (always included — cats should know how to @ even in single-cat mode)
-  const { mentions: callableMentions, hasDuplicateDisplayNames, uniqueHandleExample } = buildCallableMentions(catId);
-  if (callableMentions.length > 0) {
-    const exampleTarget = callableMentions[0]!;
-    lines.push('## 协作');
-    lines.push(`你可以 @队友: ${callableMentions.join(' / ')}`);
-    if (hasDuplicateDisplayNames) {
-      const example = uniqueHandleExample ?? '@opus';
-      lines.push(`同族多分身时：默认 \`@显示名\`，其它用**唯一句柄**（例如 \`${example}\`）。`);
-      lines.push(`同名队友并存时，请优先使用唯一句柄（例如 \`${example}\`）避免歧义。`);
-    }
-    lines.push('格式：另起一行行首写 @猫名（行中无效，多猫各占一行），上文或下文写请求均可。');
-    lines.push(`[正确] ${exampleTarget}\\n请帮忙  [正确] 内容...\\n${exampleTarget}`);
-    // F167 Phase F KD-22: model 在 narrative context 会把 @句柄写句中以为会路由。
-    // 注意：parseA2AMentions 会 **剥离** markdown 前缀 (`> ` / `- ` / `* ` / `+ ` / `1. `)
-    // 再匹配，所以 `- @cat` / `> @cat` 是**合法路由**（不是陷阱）。真正的陷阱是
-    // @ 不在剥离后的行首位置——句中 / URL 内 / 任意非首字符。
-    lines.push(
-      `[错误] 句中 ${exampleTarget}（@ 不是行首也不是剥离 markdown 前缀后的首字符）· URL 内 ${exampleTarget} · 任何非行首位置的 @ 都不路由，球权掉地上。`,
-    );
-    lines.push(
-      `发前自检：我消息里想路由的 @句柄 都在"独立一行的行首"或"markdown 列表/引用前缀后的首字符"吗？URL 内 / 句中任意位置的 @ 不是路由指令。`,
-    );
-    lines.push('');
-  }
-
-  // F-Ground-3: Teammate roster — who to @ and what they're good at
-  const rosterLines = buildTeammateRoster(catId);
-  if (rosterLines) {
-    lines.push(rosterLines, '');
-  }
-
-  // Per-breed workflow triggers (fallback to catId for legacy configs without breedId)
-  const triggers = WORKFLOW_TRIGGERS[config.breedId ?? ''] ?? WORKFLOW_TRIGGERS[catId as string];
-  if (triggers) {
-    lines.push(triggers, '');
-  }
-
-  // F129: Pack workflow blocks (after breed workflow triggers)
-  const packBlocks = options?.packBlocks;
-  if (packBlocks?.workflowsBlock) {
-    lines.push(packBlocks.workflowsBlock, '');
-  }
-
-  // 铲屎官 reference (session-level, not per-message)
-  // F067: Use co-creator config for name + mention handles
-  // Note: "不冒充/不编造/身份契约" folded into compiled governance L0
-  const coCreator = getCoCreatorConfig();
-  const ccName = coCreator.name;
-  const ccHandles = coCreator.mentionPatterns.map((p) => `\`${p}\``).join(' / ');
-  lines.push(`${ccName}（铲屎官/CVO）。重要决策由${ccName}拍板。需要关注时行首写 ${ccHandles}。`, '');
-
-  // L0 Governance Digest — compiled from shared-rules.md (#747)
-  // Source of truth: cat-cafe-skills/refs/shared-rules.md (supports .local/.local-override)
-  lines.push('', getGovernanceDigest());
-
-  // F129: Pack guardrails — hard constraint track (only adds strictness, never relaxes Core Rails)
-  if (packBlocks?.guardrailBlock) {
-    lines.push('', packBlocks.guardrailBlock);
-  }
-
-  // F129: Pack defaults — user-overridable behavior track
-  if (packBlocks?.defaultsBlock) {
-    lines.push('', packBlocks.defaultsBlock);
-  }
-
-  // F129: World driver summary (read-only, informational)
-  if (packBlocks?.worldDriverSummary) {
-    lines.push('', packBlocks.worldDriverSummary);
-  }
-
-  // MCP tools documentation — ONLY for Claude (--append-system-prompt survives compression).
-  // Non-Claude cats (Codex/Gemini) inject HTTP callback instructions per-message
-  // because their systemPrompt lives in session history and may be lost on compression.
-  if (options?.mcpAvailable) {
-    lines.push('', MCP_TOOLS_SECTION.trim());
-  }
-
-  return lines.join('\n');
+  return buildStaticIdentityViaHookPipeline(catId, options);
 }
 
 /**
  * F203 Phase C (Task 2): the pack-only slice of the static identity.
  *
- * After L0 (non-pack identity / A2A / roster / workflow triggers / CVO ref /
+ * After L0 (non-pack identity / A2A / roster / workflow triggers / operator ref /
  * governance digest / MCP) moves to the compression-immune native system role
  * (`--system-prompt-file` for Claude, `-c developer_instructions` for Codex —
  * Task 3/4), the user-message `systemPrompt` must carry ONLY the F129 pack
@@ -604,291 +507,15 @@ export function buildStaticIdentityPackOnly(catId: CatId, options?: StaticIdenti
 /**
  * Build dynamic invocation context — changes per call.
  * Includes: teammates, mode, chain position, prompt tags.
- * (MCP tools and 铲屎官 reference moved to buildStaticIdentity for session-level injection.)
+ * (MCP tools and co-creator reference moved to buildStaticIdentity for session-level injection.)
  */
 export function buildInvocationContext(context: InvocationContext): string {
+  // AC-P2-6: delegate to HookPipeline for production path.
+  // Trace events emitted during pipeline execution enable injection observability.
+  // Unknown cat guard: legacy returns '', pipeline would throw (same as buildStaticIdentity)
   const config = getConfig(context.catId as string);
   if (!config) return '';
-
-  const lines: string[] = [];
-  const runtimeModel = (() => {
-    try {
-      return getCatModel(context.catId as string);
-    } catch {
-      return config.defaultModel;
-    }
-  })();
-
-  // F042: Identity constant — pinned per invocation to survive compression.
-  lines.push(
-    `Identity: ${config.displayName}${config.nickname ? `/${config.nickname}` : ''} (@${context.catId}, model=${runtimeModel})`,
-  );
-
-  // F042 + F167: A2A direct-message reply target + identity anti-spoofing.
-  // When handoff comes from a same-breed variant (same displayName, different catId),
-  // inject explicit model markers + "not-you" reminder to prevent identity collapse
-  // (e.g. opus-47 receiving from opus-default conflating itself with the 4.6 variant).
-  if (context.directMessageFrom && context.directMessageFrom !== context.catId) {
-    const fromConfig = getConfig(context.directMessageFrom as string);
-    const fromLabel = formatHandleFreeLabel(context.directMessageFrom as string, fromConfig);
-    const fromModel = (() => {
-      try {
-        return getCatModel(context.directMessageFrom as string);
-      } catch {
-        return fromConfig?.defaultModel ?? 'unknown';
-      }
-    })();
-    lines.push(`Direct message from ${fromLabel} [model=${fromModel}]; reply to ${fromLabel}`);
-    // Anti-spoofing fires only for same-breed variant handoffs (displayName collision + catId differs)
-    if (fromConfig && fromConfig.displayName === config.displayName) {
-      const selfVariant = config.variantLabel ?? runtimeModel;
-      const fromVariant = fromConfig.variantLabel ?? fromModel;
-      lines.push(
-        `⚠️ 同族分身提醒：对方是 ${fromVariant}（model=${fromModel}），你是 ${selfVariant}（model=${runtimeModel}）——两个独立分身，不是你的旧版或新版。`,
-      );
-    }
-  }
-
-  // F193 AC-B2: Cross-thread reply hint.
-  // Cross-post triggered invocation (F052 sourceThreadId injected by API).
-  // Without this hint, the receiving cat sees a truncated 8-char thread
-  // string (ContextAssembler) and has no sender catId — guesses wrong how
-  // to reply. Local @ won't route back across threads.
-  if (context.crossThreadReplyHint) {
-    const { sourceThreadId, senderCatId } = context.crossThreadReplyHint;
-    lines.push(
-      `📨 来自跨线程消息（source thread: ${sourceThreadId}，发件猫: @${senderCatId}）`,
-      `回复请用 cross_post_message(threadId="${sourceThreadId}", targetCats=["${senderCatId}"])`,
-      `本 thread 的 @${senderCatId} 不会路由回对方（对方 session 在另一个 thread）`,
-    );
-  }
-
-  // F167 L1: ping-pong streak warning — inject when this cat just received the ball
-  // in a same-pair streak >= 2 (but < 4, else it would have been blocked upstream).
-  if (context.pingPongWarning) {
-    const otherConfig = getConfig(context.pingPongWarning.pairedWith as string);
-    const otherLabel = formatHandleFreeLabel(context.pingPongWarning.pairedWith as string, otherConfig);
-    lines.push(
-      `🏓 乒乓球警告：你和 ${otherLabel} 已连续互相 @ ${context.pingPongWarning.count} 轮。思考是否真的需要再回一棒——第三方介入？收尾给铲屎官？还是这轮可以不 @？再 @ 2 轮将自动熔断。`,
-    );
-  }
-
-  // Teammates — only list cats actually in this invocation
-  if (context.teammates.length > 0) {
-    lines.push('你的队友：');
-    for (const id of context.teammates) {
-      const c = getConfig(id as string);
-      if (c) {
-        const tmName = c.nickname ? `${c.displayName}/${c.nickname}` : c.displayName;
-        lines.push(`- ${tmName}（${c.name}）：${c.roleDescription}`);
-      }
-    }
-  }
-  // Mode context
-  if (context.mode === 'serial' && context.chainIndex != null && context.chainTotal != null) {
-    lines.push(`当前模式：你是第 ${context.chainIndex}/${context.chainTotal} 只被召唤的猫，请注意前面猫的回复。`, '');
-  } else if (context.mode === 'parallel') {
-    lines.push(
-      '当前模式：并行模式——独立思考。你和队友各自独立回答同一问题，给出你自己的观点。',
-      `重要：你是 ${config.displayName}（@${context.catId}），不要复制或模仿其他猫的自我介绍。`,
-      'F167 L2: @句柄 在并行模式下无路由语义（各猫并发、无先后顺序），不要互相 @；需要提醒队友做后续动作请等串行轮再说。',
-      '',
-    );
-  } else {
-    lines.push('当前模式：独立回答。', '');
-  }
-
-  // A2A: Exit check reminder — prevents "chain termination blind spot" where cats finish output
-  // without considering whether a teammate needs to act next.
-  if (context.mode !== 'parallel' && context.a2aEnabled) {
-    lines.push(
-      `A2A 球权检查：@ = 球权转移（行首 @句柄，句中无效）。收到 @ 但对方说"我在动" → 矛盾，push back + 立刻接/退/升（诊断≠解决，说完不@=球还在地上）。收了球却说"你等着/你别动" → 球权死锁，禁止——做不了就退回或升级。球权只有第一人称：只能声明自己持球，不能声明别人持球——没有 @ 或 hold_ball 动作，球权就没转移。`,
-      '',
-    );
-  }
-
-  // F064: One-shot feedback when previous @mention was not routed.
-  if (context.mentionRoutingFeedback && context.mentionRoutingFeedback.items?.length > 0) {
-    const items = context.mentionRoutingFeedback.items.slice(0, 2).map((it) => `@${it.targetCatId}`);
-    lines.push(
-      `[路由提醒] 上次你提到了 ${items.join('、')} 但没有用行首 @ 路由。如果需要对方行动，请在行首独立一行写 @句柄。`,
-      '',
-    );
-  }
-
-  // Prompt tags
-  if (context.promptTags?.includes('critique')) {
-    lines.push('思维方式：批判性分析。挑战假设，找出漏洞，提出反例。', '');
-  }
-
-  // F140 Phase C: connector-triggered skill suggestion (hint, not directive)
-  const skillTag = context.promptTags?.find((t) => t.startsWith('skill:'));
-  if (skillTag) {
-    lines.push(`⚡ Signal-triggered action → load skill: ${skillTag.slice(6)}`, '');
-  }
-
-  // F042 Wave 3: Active participant hint — re-injected per-invocation, survives compression.
-  if (context.activeParticipants && context.activeParticipants.length > 0) {
-    const topActive = context.activeParticipants
-      .filter((p) => p.catId !== context.catId)
-      .find((p) => p.lastMessageAt > 0);
-    if (topActive) {
-      const topConfig = getConfig(topActive.catId as string);
-      if (topConfig) {
-        lines.push(`最近活跃：${formatHandleFreeLabel(topActive.catId as string, topConfig)}`);
-      }
-    }
-  }
-
-  // F042: Thread routing policy hint — short, per-invocation, survives compression.
-  if (context.routingPolicy?.v === 1 && context.routingPolicy.scopes) {
-    const toMention = (id: string): string => {
-      const c = getConfig(id);
-      return c ? pickVariantMention(id, c) : `@${id}`;
-    };
-
-    const parts: string[] = [];
-    const scopes = context.routingPolicy.scopes;
-    const order = ['review', 'architecture'] as const;
-    for (const scope of order) {
-      const rule = scopes[scope];
-      if (!rule) continue;
-      if (typeof rule.expiresAt === 'number' && rule.expiresAt > 0 && rule.expiresAt < Date.now()) continue;
-
-      const segs: string[] = [];
-      // Defensive guard: data might be malformed from external persistence.
-      const avoidList = Array.isArray(rule.avoidCats) ? rule.avoidCats : [];
-      const preferList = Array.isArray(rule.preferCats) ? rule.preferCats : [];
-      const avoid = avoidList.slice(0, 3).map((id) => toMention(String(id)));
-      const prefer = preferList.slice(0, 3).map((id) => toMention(String(id)));
-      if (avoid.length > 0) segs.push(`avoid ${avoid.join(', ')}`);
-      if (prefer.length > 0) segs.push(`prefer ${prefer.join(', ')}`);
-      const sanitizedReason = typeof rule.reason === 'string' ? rule.reason.replace(/[\r\n]+/g, ' ').trim() : '';
-      if (sanitizedReason) segs.push(`(${sanitizedReason})`);
-
-      if (segs.length > 0) parts.push(`${scope} ${segs.join(' ')}`);
-    }
-
-    if (parts.length > 0) {
-      lines.push(`Routing: ${parts.join('; ')}`);
-    }
-  }
-
-  // F073 P4: SOP stage hint — 告示牌 (bulletin board, not controller)
-  if (context.sopStageHint) {
-    const { stage, suggestedSkill, suggestedSkillSource, featureId } = context.sopStageHint;
-    const sourcePart = suggestedSkillSource ? ` (${suggestedSkillSource})` : '';
-    lines.push(`SOP: ${featureId} stage=${stage} → load skill: ${suggestedSkill}${sourcePart}`);
-  }
-
-  // F092: Voice companion mode — instruct cats to prioritize audio output
-  if (context.voiceMode) {
-    lines.push(
-      'Voice Mode ON: 铲屎官在语音陪伴模式。',
-      '- 默认用 audio rich block；代码/表格/长内容用文字并附语音摘要',
-      '',
-    );
-  } else {
-    lines.push(
-      'Voice Mode OFF: 不强制发语音。默认用文字回复。你仍然可以发 audio rich block，但仅在铲屎官明确要求语音时才发。',
-      '',
-    );
-  }
-
-  // F087: Bootcamp mode — inject phase context so cats know to guide the new CVO
-  if (context.bootcampState) {
-    const { phase, leadCat, selectedTaskId } = context.bootcampState;
-    const threadPart = context.threadId ? ` thread=${context.threadId}` : '';
-    const membersPart = context.bootcampMemberCount != null ? ` members=${context.bootcampMemberCount}` : '';
-    lines.push(
-      `🎓 Bootcamp Mode:${threadPart} phase=${phase}${leadCat ? ` leadCat=${leadCat}` : ''}${selectedTaskId ? ` task=${selectedTaskId}` : ''}${membersPart}`,
-      '→ Load bootcamp-guide skill and act per current phase.',
-      '',
-    );
-  }
-
-  // F155: Guide candidate — inline protocol (cats don't have /Skill tool at runtime)
-  if (context.guideCandidate) {
-    lines.push(...buildGuidePromptLines(context.guideCandidate, context.threadId));
-  }
-
-  // F093: World context envelope — inject world state for world-building mode
-  if (context.worldContext) {
-    const wc = context.worldContext;
-    lines.push('');
-    lines.push(`## 🌍 World: ${wc.world.name} [${wc.world.status}]`);
-    if (wc.world.constitution) lines.push(`Constitution: ${wc.world.constitution}`);
-    lines.push(`Scene: ${wc.scene.name} [${wc.scene.status}]`);
-    if (wc.characters.length > 0) {
-      lines.push('Characters:');
-      for (const ch of wc.characters) {
-        const identity = ch.coreIdentity?.name ?? ch.characterId;
-        const drive = ch.innerDrive?.motivation ? ` — ${ch.innerDrive.motivation}` : '';
-        lines.push(`- ${identity}${drive}`);
-      }
-    }
-    if (wc.canonSummary.length > 0) {
-      lines.push('Established canon:');
-      for (const cs of wc.canonSummary) lines.push(`- ${cs.summary}`);
-    }
-    if (wc.recentEvents.length > 0) {
-      lines.push(`Recent events (${wc.recentEvents.length}):`);
-      for (const ev of wc.recentEvents.slice(-5)) {
-        lines.push(`- [${ev.type}] ${JSON.stringify(ev.payload)}`);
-      }
-    }
-    if (wc.careLoopHint) {
-      lines.push(`Care hint: ${wc.careLoopHint.trigger} → ${wc.careLoopHint.suggestion}`);
-    }
-    lines.push('');
-  }
-
-  // F163 AC-A3: always_on constitutional knowledge injection (physical, not retrieval)
-  if (context.alwaysOnDocs && context.alwaysOnDocs.length > 0) {
-    lines.push('');
-    lines.push('## Constitutional Knowledge (always_on)');
-    lines.push('');
-    for (const doc of context.alwaysOnDocs) {
-      lines.push(`### ${doc.title}`);
-      lines.push('');
-      lines.push(doc.summary);
-      lines.push('');
-    }
-  }
-
-  // F091: Active Signal articles in discussion context
-  if (context.activeSignals && context.activeSignals.length > 0) {
-    lines.push('Signal articles linked to this thread:');
-    for (const s of context.activeSignals) {
-      lines.push(`### [${s.id}] ${s.title} (${s.source}/T${s.tier})`);
-      if (s.note) lines.push(`Note: ${s.note}`);
-      lines.push(s.contentSnippet);
-      // AC-10: Related discussions from our memory architecture (session search)
-      if (s.relatedDiscussions && s.relatedDiscussions.length > 0) {
-        lines.push('Related past discussions:');
-        for (const d of s.relatedDiscussions) {
-          lines.push(`- [session:${d.sessionId}] ${d.snippet}`);
-        }
-      }
-    }
-  }
-
-  // F167 Phase D: Trailing anchor — decision tree, not flat three-choice.
-  // @co-creator is a hard-condition exit, not the safe default (KD-19).
-  // Placed at the very end for maximum recency bias (critical for non-Claude models).
-  if (context.mode !== 'parallel' && context.a2aEnabled) {
-    const cc = getCoCreatorConfig().mentionPatterns[0] ?? '@铲屎官';
-    lines.push(
-      '',
-      `下一棒传球决策树（本轮必选其一，缺 = 消息不完整）：先问"下一步谁能做"——`,
-      `1. 另一只猫能做 → @句柄（review 完→@author / 修完→@reviewer / merge 完→@愿景守护猫）`,
-      `2. 等外部条件（按 2a/2b 判断行动）。外部条件包括：**云端 codex / GitHub bot review / PR check / CI / 长 build / 外部 webhook**——这些不是本地猫，不在 roster，不可 @ 任何本地近似 proxy；CLI 要退出但还需继续也走这条。2a 无回调覆盖（如等 EYES）→ **调用 cat_cafe_hold_ball(...)** + 轮询（口头"我继续"不算）；2b 已有结构化回调且 EYES>0 → 纯事件驱动，**不调用/不续约 hold_ball**（KD-27）`,
-      `3. 只有铲屎官本人才能做 → ${cc}（硬条件：不可逆操作 / 愿景级决策 / 跨猫僵局）`,
-      `${cc} 不是默认出口——先问"哪只猫能接"。反问式 ping 非法（"要不要 X？"/"同意吗？"）：有立场就自决去做（错了能回滚），没立场根本不该 @。**外部 identity（云端 xxx / GitHub bot / CI）** 永远走选项 2（按 2a/2b 判断），严禁投射成本地 @句柄。`,
-    );
-  }
-
-  return lines.join('\n');
+  return buildInvocationContextViaHookPipeline(context);
 }
 
 /**
@@ -1017,3 +644,16 @@ export function buildSystemPrompt(context: InvocationContext): string {
 
   return parts.join('\n\n');
 }
+
+// L0-budget-defense PR-B-impl (ADR-038 件套 ④): staging is now injected directly
+// in invoke-single-cat at the per-invocation prompt prefix level (mirrors F225
+// contextHintPrefix), NOT folded into staticIdentity at route-serial/parallel.
+//
+// Cloud R2 P1 #2237 L1099 (root cause): folding staging into staticIdentity
+// causes resumed session-chain turns to drop staging, because invoke-single-cat
+// skips systemPrompt injection on canSkipOnResume + isResume turns. Staging
+// must apply EVERY turn per ADR-038 "每轮注入生效" contract → wire it
+// independently of injectSystemPrompt.
+//
+// buildLiveStaticIdentity removed. buildStagingPrepend (in StagingContent.ts)
+// is the single source — invoke-single-cat consumes it directly.

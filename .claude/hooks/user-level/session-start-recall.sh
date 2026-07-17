@@ -63,7 +63,7 @@ if [ -n "$UNTRACKED_DOCS" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ docs/ 下有未跟踪的 .md 文件（某只猫生成了但忘记 commit push）：
 ${UNTRACKED_DOCS}
-→ 向铲屎官汇报，商量处理方式（commit/移走/删除）
+→ 向co-creator汇报，商量处理方式（commit/移走/删除）
 "
 fi
 
@@ -73,19 +73,19 @@ if [ -n "$ROOT_IMAGES" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ 根目录有图片文件（截图应放 assets/screenshots/，设计稿放 designs/）：
 ${ROOT_IMAGES}
-→ 向铲屎官汇报，商量移走还是删除
+→ 向co-creator汇报，商量移走还是删除
 "
 fi
 
 # 6. 检查根目录其他杂物（未跟踪且未 ignore 的文件）
 ROOT_CLUTTER=$(git ls-files --others --exclude-standard -- ':!.*' ':!packages/' ':!docs/' ':!assets/' ':!scripts/' ':!cat-cafe-skills/' ':!designs/' ':!desktop/' 2>/dev/null \
-  | grep -vE '^(package\.json|pnpm-workspace\.yaml|pnpm-lock\.yaml|tsconfig|biome|README|LICENSE|CLAUDE|AGENTS|\.npmrc|\.nvmrc|\.node-version|\.editorconfig|\.prettierrc|Makefile|Dockerfile|Procfile|turbo\.json|\.tool-versions)' \
+  | grep -vE '^(package\.json|pnpm-workspace\.yaml|pnpm-lock\.yaml|tsconfig|biome|README|LICENSE|CLAUDE|AGENTS|GEMINI|KIMI|BACKLOG|\.npmrc|\.nvmrc|\.node-version|\.editorconfig|\.prettierrc|Makefile|Dockerfile|Procfile|turbo\.json|\.tool-versions)' \
   | head -10)
 if [ -n "$ROOT_CLUTTER" ]; then
   WARNINGS="${WARNINGS}
 ⚠️ 根目录有不该在这里的文件：
 ${ROOT_CLUTTER}
-→ 向铲屎官汇报，商量处理方式
+→ 向co-creator汇报，商量处理方式
 "
 fi
 
@@ -94,7 +94,8 @@ if [ -n "$WARNINGS" ]; then
   echo "🐾 开工自检：${WARNINGS}"
 fi
 
-# 通用提醒
-echo "📌 Recall 三入口（按场景选）：精确 anchor/看关系 → cat_cafe_graph_resolve | 零先验/扫最近 → cat_cafe_list_recent | 语义/模糊找 → cat_cafe_search_evidence（不确定→search_evidence mode=hybrid）。结果已融合消费加权排序（F200）。详见 CLAUDE.md 记忆系统段。若 MCP 未暴露，先 tool_search 精确搜工具名。"
+# 通用提醒（F256 Phase A: hook 升级 + skill link）
+echo "📌 Recall 三入口（按场景选）：精确 anchor/看关系 → cat_cafe_graph_resolve | 零先验/扫最近 → cat_cafe_list_recent | 语义/模糊找 → cat_cafe_search_evidence（不确定→search_evidence mode=hybrid）。结果已融合消费加权排序（F200）。若 MCP 未暴露，先 tool_search 精确搜工具名。"
+echo "🔍 复杂搜索（coverage/source-map/absence/delta）→ 加载 memory-search-best-practices skill（8 种题型 recipe + 何时停判据）。搜索铁律：≥3 路命中无新 anchor 才停（布偶猫家族尤其注意——别搜一刀就停）。"
 
 exit 0

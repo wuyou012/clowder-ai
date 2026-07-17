@@ -6,18 +6,44 @@
 import './helpers/setup-cat-registry.js';
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
-import { describe, test } from 'node:test';
+import { describe, mock, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { catRegistry } from '@cat-cafe/shared';
 
 const REPO_ROOT_TEMPLATE = resolve(dirname(fileURLToPath(import.meta.url)), '../../..', 'cat-template.json');
 const CAT_TEMPLATE_PATH = REPO_ROOT_TEMPLATE;
+const FULL_RUNTIME_PROMPT_CHAR_BUDGET = 6900; // 6500→6700→6900: gemini35 + gpt-pro roster growth
+
+function assertWithinFullRuntimePromptBudget(prompt) {
+  assert.ok(
+    prompt.length < FULL_RUNTIME_PROMPT_CHAR_BUDGET,
+    `Full runtime prompt is ${prompt.length} chars, expected < ${FULL_RUNTIME_PROMPT_CHAR_BUDGET}`,
+  );
+}
 
 describe('SystemPromptBuilder', () => {
   // Dynamic import after build
   async function getBuilder() {
     const { buildSystemPrompt } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
     return buildSystemPrompt;
+  }
+
+  async function withFreshRuntimeRegistry(run) {
+    const { loadCatConfig, toAllCatConfigs } = await import('../dist/config/cat-config-loader.js');
+    const originalConfigs = catRegistry.getAllConfigs();
+    catRegistry.reset();
+    try {
+      const runtimeConfigs = toAllCatConfigs(loadCatConfig(CAT_TEMPLATE_PATH));
+      for (const [id, config] of Object.entries(runtimeConfigs)) {
+        catRegistry.register(id, config);
+      }
+      return await run();
+    } finally {
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(originalConfigs)) {
+        catRegistry.register(id, config);
+      }
+    }
   }
 
   test('contains display name for opus', async () => {
@@ -80,11 +106,11 @@ describe('SystemPromptBuilder', () => {
     // Dynamic teammate listing absent, but static collaboration guide still present
     assert.ok(!prompt.includes('你的队友'));
     assert.ok(prompt.includes('@队友'));
-    // Still mentions 铲屎官
-    assert.ok(prompt.includes('铲屎官'));
+    // Still mentions co-creator
+    assert.ok(prompt.includes('co-creator'));
   });
 
-  test('contains 铲屎官 reference', async () => {
+  test('contains co-creator reference', async () => {
     const build = await getBuilder();
     const prompt = build({
       catId: 'opus',
@@ -92,7 +118,7 @@ describe('SystemPromptBuilder', () => {
       teammates: [],
       mcpAvailable: false,
     });
-    assert.ok(prompt.includes('铲屎官'));
+    assert.ok(prompt.includes('co-creator'));
   });
 
   test('contains serial chain context when mode is serial', async () => {
@@ -132,6 +158,52 @@ describe('SystemPromptBuilder', () => {
     assert.ok(prompt.includes('cat_cafe_register_pr_tracking'));
     assert.ok(prompt.includes('cat_cafe_get_pending_mentions'));
     assert.ok(prompt.includes('cat_cafe_get_thread_context'));
+  });
+
+  test('F128: propose_thread description surfaces the projectPath ownership parameter', async () => {
+    const build = await getBuilder();
+    const prompt = build({
+      catId: 'opus',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: true,
+    });
+    assert.ok(prompt.includes('cat_cafe_propose_thread'), 'propose_thread must be listed');
+    // The whole point of the fix is discoverability: a cat proposing a cross-repo child
+    // thread must know it can pin projectPath, or the child inherits `default` and cats
+    // fall back to the runtime cwd. Pin the param + its cross-repo guidance in the prompt.
+    assert.ok(
+      prompt.match(/propose_thread[\s\S]*?projectPath/),
+      'propose_thread description must document the projectPath parameter',
+    );
+    assert.ok(
+      prompt.match(/projectPath[\s\S]*?(工作目录|跨 ?repo|项目归属)/),
+      'projectPath note must explain it controls the child thread working directory / ownership',
+    );
+  });
+
+  test('F128 Phase AA (AC-AA1): propose_thread reportingMode default is final-only, not none', async () => {
+    // Guard test: SystemPromptBuilder's cat-facing propose_thread description must
+    // align with the actual DEFAULT_REPORTING_MODE in proposal-enrich-header.ts.
+    // Phase AA changed the default from none to final-only. If they drift again,
+    // this test catches it at build time rather than in a cross-cut review round.
+    const build = await getBuilder();
+    const prompt = build({
+      catId: 'opus',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: true,
+    });
+    const proposeSection = prompt.match(/cat_cafe_propose_thread[\s\S]*?(?=\n- cat_cafe_|$)/);
+    assert.ok(proposeSection, 'propose_thread description must be present');
+    const desc = proposeSection[0];
+    // final-only must be listed as default
+    assert.ok(
+      desc.includes('final-only（默认'),
+      `propose_thread must document final-only as 默认; got: ${desc.slice(0, 200)}`,
+    );
+    // none must NOT be labeled as default
+    assert.ok(!desc.includes('none（默认'), 'propose_thread must NOT label none as 默认 (Phase AA superseded)');
   });
 
   test('F193 AC-B1: MCP_TOOLS_SECTION lists cat_cafe_cross_post_message with routing hint', async () => {
@@ -215,18 +287,20 @@ describe('SystemPromptBuilder', () => {
   // 改 governance content（Magic Words / shared-rules）时两个 test 都要跑：
   //   - 本文件：char budget（runtime prompt）
   //   - scripts/compile-system-prompt-l0.test.mjs：token budget（L0 compiled markdown）
-  test('output size stays under 3900 chars after Magic Words + runtime prompt growth', async () => {
-    const build = await getBuilder();
-    const prompt = build({
-      catId: 'opus',
-      mode: 'serial',
-      chainIndex: 1,
-      chainTotal: 3,
-      teammates: ['codex', 'gemini'],
-      mcpAvailable: true,
-      promptTags: ['critique'],
+  test('output size stays under full runtime prompt budget after Magic Words + runtime prompt growth', async () => {
+    await withFreshRuntimeRegistry(async () => {
+      const build = await getBuilder();
+      const prompt = build({
+        catId: 'opus',
+        mode: 'serial',
+        chainIndex: 1,
+        chainTotal: 3,
+        teammates: ['codex', 'gemini'],
+        mcpAvailable: true,
+        promptTags: ['critique'],
+      });
+      assertWithinFullRuntimePromptBudget(prompt);
     });
-    assert.ok(prompt.length < 6100, `Full runtime prompt is ${prompt.length} chars, expected < 6100`);
   });
 
   test('returns empty string for unknown catId', async () => {
@@ -339,11 +413,29 @@ describe('SystemPromptBuilder', () => {
     const opusId = buildStaticIdentity('opus');
     assert.ok(opusId.includes('工作流'), 'Opus should have workflow triggers');
     assert.ok(opusId.includes('@缅因猫'), 'Opus workflow should mention review with 缅因猫');
+    assert.ok(
+      opusId.includes('MG provenance override'),
+      'Opus workflow should avoid local-reviewer ping after external merge-gate feedback',
+    );
 
     const codexId = buildStaticIdentity('codex');
     assert.ok(codexId.includes('工作流'), 'Codex should have workflow triggers');
     assert.ok(codexId.includes('@布偶猫'), 'Codex workflow should mention notifying 布偶猫');
+    assert.ok(
+      codexId.includes('MG provenance override'),
+      'Codex workflow should avoid local-reviewer ping after external merge-gate feedback',
+    );
     assert.ok(codexId.includes('出口一问'), 'Codex workflow should include exit check (出口一问)');
+
+    const opencodeId = buildStaticIdentity('opencode');
+    assert.ok(opencodeId.includes('工作流'), 'OpenCode should have workflow triggers');
+    assert.ok(
+      opencodeId.includes('MG provenance override'),
+      'OpenCode workflow should avoid local-reviewer ping after external merge-gate feedback',
+    );
+    assert.ok(opencodeId.includes('### 执行纪律'), 'OpenCode workflow should include execution discipline');
+    assert.ok(opencodeId.includes('出口一问'), 'OpenCode workflow should include exit check (出口一问)');
+    assert.ok(opencodeId.includes('OMOC Sisyphus'), 'OpenCode workflow should keep golden-chinchilla governance');
   });
 
   test('buildStaticIdentity is deterministic', async () => {
@@ -356,7 +448,7 @@ describe('SystemPromptBuilder', () => {
   // user-message systemPrompt must carry ONLY F129 pack blocks (per-invocation
   // dynamic, external-project-specific) — never the non-pack identity/家规
   // (now compression-immune in the native system prompt). This is the precise
-  // de-dup the CVO asked for ("接通之后再删重复").
+  // de-dup the operator asked for ("接通之后再删重复").
 
   const PACK_FIXTURE = {
     packName: 'test-pack',
@@ -530,6 +622,36 @@ describe('SystemPromptBuilder', () => {
     }
   });
 
+  test('F208 R2-P2: runtime cat in roster does not trigger KD-9 false-positive warning', async () => {
+    const { buildStaticIdentity } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const originalConfigs = catRegistry.getAllConfigs();
+    const warnFn = mock.method(console, 'warn');
+    try {
+      catRegistry.register('runtime-spark', {
+        ...originalConfigs.codex,
+        displayName: '火花猫',
+        nickname: '小火花',
+        mentionPatterns: ['@runtime-spark', '@火花猫'],
+        defaultModel: 'gpt-5.4-mini',
+        roleDescription: '快速执行',
+        teamStrengths: '精确点改',
+      });
+
+      buildStaticIdentity('opus');
+      // No KD-9 warning should fire for runtime-spark (no dossier entry = expected fallback)
+      const kd9Calls = warnFn.mock.calls.filter(
+        (c) => typeof c.arguments[0] === 'string' && c.arguments[0].includes('[F208 KD-9]'),
+      );
+      assert.equal(kd9Calls.length, 0, 'runtime cat must not trigger KD-9 dossier drift warning');
+    } finally {
+      warnFn.mock.restore();
+      catRegistry.reset();
+      for (const [id, config] of Object.entries(originalConfigs)) {
+        catRegistry.register(id, config);
+      }
+    }
+  });
+
   test('buildStaticIdentity roster excludes self', async () => {
     const { buildStaticIdentity } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
     const opusRoster = buildStaticIdentity('opus');
@@ -596,16 +718,8 @@ describe('SystemPromptBuilder', () => {
   });
 
   test('buildStaticIdentity roster size with full runtime config stays under 4700 chars after Magic Words growth', async () => {
-    const { buildSystemPrompt } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
-    const { loadCatConfig, toAllCatConfigs } = await import('../dist/config/cat-config-loader.js');
-    const originalConfigs = catRegistry.getAllConfigs();
-    catRegistry.reset();
-    try {
-      const runtimeConfigs = toAllCatConfigs(loadCatConfig(CAT_TEMPLATE_PATH));
-      for (const [id, config] of Object.entries(runtimeConfigs)) {
-        catRegistry.register(id, config);
-      }
-
+    await withFreshRuntimeRegistry(async () => {
+      const { buildSystemPrompt } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
       const prompt = buildSystemPrompt({
         catId: 'opus',
         mode: 'serial',
@@ -615,13 +729,8 @@ describe('SystemPromptBuilder', () => {
         mcpAvailable: true,
         promptTags: ['critique'],
       });
-      assert.ok(prompt.length < 6100, `Full runtime prompt is ${prompt.length} chars, expected < 6100`);
-    } finally {
-      catRegistry.reset();
-      for (const [id, config] of Object.entries(originalConfigs)) {
-        catRegistry.register(id, config);
-      }
-    }
+      assertWithinFullRuntimePromptBudget(prompt);
+    });
   });
 
   test('buildInvocationContext returns teammates when present', async () => {
@@ -702,6 +811,22 @@ describe('SystemPromptBuilder', () => {
     // F064 球权模型: A2A 出口检查 → A2A 球权检查
     assert.ok(ctx.includes('A2A 球权检查'), 'Should include A2A ball-ownership check hint');
     assert.ok(ctx.includes('句中无效'), 'Should teach inline @ is invalid for routing');
+  });
+
+  test('buildInvocationContext omits repeated A2A long anchors when native L0 is injected', async () => {
+    const { buildInvocationContext } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const ctx = buildInvocationContext({
+      catId: 'codex',
+      mode: 'independent',
+      teammates: ['opus'],
+      mcpAvailable: false,
+      a2aEnabled: true,
+      nativeL0Injected: true,
+    });
+    assert.ok(!ctx.includes('A2A 球权检查'), 'native L0 already carries A2A ball-ownership rules');
+    assert.ok(!ctx.includes('下一棒传球决策树'), 'native L0 already carries the full baton decision tree');
+    assert.ok(ctx.includes('当前模式：独立回答'), 'dynamic invocation mode should still be injected');
+    assert.ok(ctx.includes('你的队友'), 'dynamic teammate context should still be injected');
   });
 
   test('F167-F AC-F1: teammate roster surfaces resolved model per cat (handle/model 解绑)', async () => {
@@ -918,7 +1043,7 @@ describe('SystemPromptBuilder', () => {
     // 2. external condition
     assert.match(ctx, /2\..*外部条件|hold_ball/, 'option 2 = external wait via hold_ball');
     // 3. only co-creator (three hard conditions)
-    assert.match(ctx, /3\..*铲屎官|@co-creator|@co-creator/, 'option 3 = co-creator reserved for hard conditions');
+    assert.match(ctx, /3\..*co-creator|@co-creator|@co-creator/, 'option 3 = co-creator reserved for hard conditions');
   });
 
   test('F167-L AC-L2: trailing anchor option 2 distinguishes polling (2a) vs event-driven (2b) modes', async () => {
@@ -1044,8 +1169,8 @@ describe('SystemPromptBuilder', () => {
     assert.ok(!ctx.includes('## 协作'), 'Should not contain collaboration guide');
     // MCP tools moved to static identity (session-level, not per-message)
     assert.ok(!ctx.includes('cat_cafe_post_message'), 'MCP tools should be in static identity, not invocation context');
-    // 铲屎官 reference also moved to static identity
-    assert.ok(!ctx.includes('铲屎官是真人用户'), '铲屎官 reference should be in static identity');
+    // co-creator reference also moved to static identity
+    assert.ok(!ctx.includes('co-creator是真人用户'), 'co-creator reference should be in static identity');
   });
 
   test('buildStaticIdentity includes MCP tools when mcpAvailable', async () => {
@@ -1071,10 +1196,10 @@ describe('SystemPromptBuilder', () => {
     assert.ok(!identity.includes('HTTP 回调'), 'Codex should not have callback instructions in static identity');
   });
 
-  test('buildStaticIdentity includes 铲屎官 reference', async () => {
+  test('buildStaticIdentity includes co-creator reference', async () => {
     const { buildStaticIdentity } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
     const identity = buildStaticIdentity('opus');
-    assert.ok(identity.includes('铲屎官'), 'Should contain 铲屎官 reference in static identity');
+    assert.ok(identity.includes('co-creator'), 'Should contain co-creator reference in static identity');
   });
 
   test('buildStaticIdentity includes configured co-creator name and mention handles', async () => {
@@ -1083,11 +1208,14 @@ describe('SystemPromptBuilder', () => {
     // Config resolution: cat-template.json (base) + .cat-cafe/cat-catalog.json (overlay).
     // Template has coCreator.name="You", catalog may override to deployment-specific name.
     // Test structural invariants that hold regardless of deployment config:
-    assert.ok(identity.includes('铲屎官'), 'Should include 铲屎官 (always in CVO line)');
+    assert.ok(identity.includes('co-creator'), 'Should include co-creator (always in operator line)');
     assert.ok(identity.includes('行首'), 'Should teach line-start rule for owner mentions');
-    // CVO line: "{name}（铲屎官/CVO）…行首写 `@handle` / `@handle2`。"
+    // operator line: "{name}（co-creator/operator）…行首写 `@handle` / `@handle2`。"
     assert.ok(/重要决策由.+拍板/.test(identity), 'Should include decision authority line');
-    assert.ok(/行首写\s+`@\S+`/.test(identity), 'CVO line should contain backtick-wrapped mention handle after 行首写');
+    assert.ok(
+      /行首写\s+`@\S+`/.test(identity),
+      'operator line should contain backtick-wrapped mention handle after 行首写',
+    );
   });
 
   // F032 Phase D2: Reviewer section tests
@@ -1198,22 +1326,24 @@ describe('SystemPromptBuilder', () => {
     assert.ok(!ctx.includes('最近活跃'), 'Should not inject when no non-self participant has activity');
   });
 
-  test('buildSystemPrompt size with activeParticipants stays under 3900 chars after Magic Words + runtime prompt growth', async () => {
-    const build = await getBuilder();
-    const prompt = build({
-      catId: 'opus',
-      mode: 'serial',
-      chainIndex: 1,
-      chainTotal: 3,
-      teammates: ['codex', 'gemini'],
-      mcpAvailable: true,
-      promptTags: ['critique'],
-      activeParticipants: [
-        { catId: 'codex', lastMessageAt: Date.now(), messageCount: 5 },
-        { catId: 'opus', lastMessageAt: Date.now() - 1000, messageCount: 3 },
-      ],
+  test('buildSystemPrompt size with activeParticipants stays under full runtime prompt budget after Magic Words + runtime prompt growth', async () => {
+    await withFreshRuntimeRegistry(async () => {
+      const build = await getBuilder();
+      const prompt = build({
+        catId: 'opus',
+        mode: 'serial',
+        chainIndex: 1,
+        chainTotal: 3,
+        teammates: ['codex', 'gemini'],
+        mcpAvailable: true,
+        promptTags: ['critique'],
+        activeParticipants: [
+          { catId: 'codex', lastMessageAt: Date.now(), messageCount: 5 },
+          { catId: 'opus', lastMessageAt: Date.now() - 1000, messageCount: 3 },
+        ],
+      });
+      assertWithinFullRuntimePromptBudget(prompt);
     });
-    assert.ok(prompt.length < 6100, `Full runtime prompt is ${prompt.length} chars, expected < 6100`);
   });
 
   // --- F042: pinned identity constant + direct-message reply target ---
@@ -1629,7 +1759,8 @@ describe('SystemPromptBuilder', () => {
         featureId: 'F073',
       },
     });
-    assert.ok(prompt.length < 6200, `Prompt with SOP hint is ${prompt.length} chars, expected < 6200`);
+    // 6200→6500→6700→6800→6900: decision funnel §17 + roster growth + F208 dossier l0RosterSummary
+    assert.ok(prompt.length < 6900, `Prompt with SOP hint is ${prompt.length} chars, expected < 6900`);
   });
 
   // --- F092: Voice Mode prompt injection ---
@@ -1676,7 +1807,8 @@ describe('SystemPromptBuilder', () => {
       },
       voiceMode: true,
     });
-    assert.ok(prompt.length < 6200, `Prompt with voice mode + SOP hint is ${prompt.length} chars, expected < 6200`);
+    // 6200→6500→6700→6800→6900: decision funnel §17 + roster growth + F208 dossier l0RosterSummary
+    assert.ok(prompt.length < 6900, `Prompt with voice mode + SOP hint is ${prompt.length} chars, expected < 6900`);
   });
 
   test('buildInvocationContext injects bootcamp mode when bootcampState provided', async () => {
@@ -1911,7 +2043,7 @@ describe('SystemPromptBuilder', () => {
 
     // Pin: update this hash whenever you add/remove/rename P* or W* sections
     // in shared-rules.md, AND update GOVERNANCE_L0_DIGEST in SystemPromptBuilder.ts
-    const PINNED_HASH = '89989b48ac64c6ee';
+    const PINNED_HASH = '1b137442fdbb0d1c';
     if (PINNED_HASH === '${PLACEHOLDER}') {
       // First run — print hash for pinning
       console.log(`[drift-guard] shared-rules headings hash: ${hash} — pin this value`);
@@ -1965,5 +2097,155 @@ describe('SystemPromptBuilder', () => {
     // codex is available — should appear in opus's roster
     const prompt = buildStaticIdentity('opus');
     assert.ok(prompt.includes('codex'), 'available cat @codex must appear in roster');
+  });
+
+  // F229: ConciergePromptSection guard tests
+  test('F229: buildInvocationContext injects concierge duty section when threadKind=concierge', async () => {
+    const { buildInvocationContext } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const context = {
+      catId: 'sonnet',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: false,
+      threadId: 'thread-concierge-1',
+      threadKind: 'concierge',
+      conciergeConfig: {
+        enabled: true,
+        skin: 'ragdoll-v1',
+        displayName: '猫猫球',
+        personaTone: '温暖、简短、不啰嗦',
+        dutyCatProfileId: 'gemini35',
+        proactivePolicy: 'quiet-badge',
+        muted: false,
+      },
+    };
+    const result = buildInvocationContext(context);
+    assert.ok(result.includes('前台岗位'), 'should contain concierge duty marker');
+    assert.ok(result.includes('猫猫球'), 'should inject displayName');
+    assert.ok(result.includes('温暖、简短、不啰嗦'), 'should inject personaTone');
+    assert.ok(result.includes('anchor-first'), 'should contain anchor-first directive');
+    assert.ok(result.includes('search_evidence'), 'should list allowed tool search_evidence in whitelist');
+  });
+
+  test('F229: buildInvocationContext does NOT inject concierge section for normal thread', async () => {
+    const { buildInvocationContext } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const context = {
+      catId: 'sonnet',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: false,
+      threadId: 'thread-normal-1',
+      // no threadKind / no conciergeConfig
+    };
+    const result = buildInvocationContext(context);
+    assert.ok(!result.includes('前台岗位'), 'should NOT inject concierge section for normal thread');
+  });
+
+  test('F229: buildInvocationContext includes tool whitelist in concierge section', async () => {
+    const { buildInvocationContext } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const result = buildInvocationContext({
+      catId: 'sonnet',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: false,
+      threadId: 'thread-concierge-2',
+      threadKind: 'concierge',
+      conciergeConfig: {
+        enabled: true,
+        skin: 'ragdoll-v1',
+        displayName: 'Desk Cat',
+        personaTone: 'brief',
+        dutyCatProfileId: 'gemini35',
+        proactivePolicy: 'quiet-badge',
+        muted: false,
+      },
+    });
+    // Verify whitelist mentions from the岗位 section
+    assert.ok(result.includes('graph_resolve'), 'whitelist should include graph_resolve');
+    assert.ok(result.includes('feat_index'), 'whitelist should include feat_index');
+    assert.ok(result.includes('teleport'), 'whitelist should include teleport');
+    // Verify escalation protocol is mentioned
+    assert.ok(
+      result.includes('转接') || result.includes('escalation') || result.includes('escalate'),
+      'should include escalation protocol',
+    );
+  });
+
+  // KD-17: marker-based instructions replace old Rule #3 (actions array output)
+  // BUG-UX-12: prompt teaches only [跳过去 R] (teleport). [原地看 R] removed — all
+  // concierge actions are semantically thread jumps, no inline peek.
+  test('F229 KD-17: concierge prompt has [跳过去 R] marker, no [原地看 R] (BUG-UX-12)', async () => {
+    const { buildInvocationContext } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const result = buildInvocationContext({
+      catId: 'sonnet',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: false,
+      threadId: 'thread-concierge-kd17',
+      threadKind: 'concierge',
+      conciergeConfig: {
+        enabled: true,
+        skin: 'ragdoll-v1',
+        displayName: '猫猫球',
+        personaTone: '温暖、简短',
+        dutyCatProfileId: 'gemini35',
+        proactivePolicy: 'quiet-badge',
+        muted: false,
+      },
+    });
+
+    // [跳过去 R] marker instruction must be present (only navigation verb)
+    assert.ok(result.includes('[跳过去 R'), 'should contain [跳过去 R] marker instruction');
+    // BUG-UX-12: [原地看 R] removed from prompt — no longer a taught verb
+    assert.ok(!result.includes('[原地看 R'), 'should NOT contain [原地看 R] — peek removed (BUG-UX-12)');
+
+    // Old Rule #3 (actions array literal) must be gone
+    assert.ok(!result.includes('{ actions: [{ action:'), 'old Rule #3 actions array literal must be removed');
+
+    // Must NOT instruct model to output structured actions payload
+    assert.ok(!result.includes('anchor-first 答案必须附 teleport+peek 双动作卡'), 'old Rule #3 text must be removed');
+  });
+
+  // F229 Bug 1: Triage boundary criterion — duty cat must know when NOT to triage
+  test('F229: concierge prompt contains triage boundary criterion (direct-answer vs triage judgment)', async () => {
+    const { buildInvocationContext } = await import('../dist/domains/cats/services/context/SystemPromptBuilder.js');
+    const result = buildInvocationContext({
+      catId: 'sonnet',
+      mode: 'independent',
+      teammates: [],
+      mcpAvailable: false,
+      threadId: 'thread-concierge-boundary',
+      threadKind: 'concierge',
+      conciergeConfig: {
+        enabled: true,
+        skin: 'ragdoll-v1',
+        displayName: '猫猫球',
+        personaTone: '温暖、简短',
+        dutyCatProfileId: 'gemini35',
+        proactivePolicy: 'quiet-badge',
+        muted: false,
+      },
+    });
+
+    // Must have the boundary judgment criterion
+    assert.ok(result.includes('直接回答'), 'should contain direct-answer path');
+    assert.ok(result.includes('走分诊'), 'should contain triage path');
+    assert.ok(
+      result.includes('跨出当前对话'),
+      'should contain the core criterion: "does this need to leave the current conversation?"',
+    );
+
+    // Must explicitly list direct-answer cases (no triage-plan)
+    assert.ok(result.includes('不生成 triage-plan'), 'should explicitly say no triage-plan for direct answers');
+
+    // Must NOT have the old overly-broad trigger
+    assert.ok(
+      !result.includes('用户描述需求时，你要先理解意图，生成一个可确认的分诊计划'),
+      'old broad triage trigger must be removed',
+    );
+
+    // Investigate intent must be scoped to async search, not "查功能状态"
+    assert.ok(result.includes('当场答不了的异步搜索'), 'investigate intent should be scoped to async search');
+    assert.ok(!result.includes('查资料/记忆/功能状态'), 'old broad investigate description must be removed');
   });
 });

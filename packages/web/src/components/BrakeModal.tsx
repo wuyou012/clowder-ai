@@ -9,7 +9,7 @@ import { CatAvatar } from './CatAvatar';
 /** Three-cat 撒娇 messages by level */
 const MESSAGES: Record<1 | 2 | 3, { catId: string; nickname: string; text: string }[]> = {
   1: [
-    { catId: 'opus', nickname: '宪宪', text: '铲屎官，你忙很久啦，要不要喝口水呀？喵~' },
+    { catId: 'opus', nickname: '宪宪', text: 'co-creator，你忙很久啦，要不要喝口水呀？喵~' },
     { catId: 'codex', nickname: '砚砚', text: '监测到当前任务已持续较久。建议进行 5min 视疲劳缓解。' },
     { catId: 'gemini', nickname: '烁烁', text: '嘿！你得先站起来伸个懒腰！' },
   ],
@@ -108,7 +108,7 @@ export function BrakeModal() {
   const alertBadge = CAT_ALERT_BADGE[level];
 
   return (
-    <div className="fixed inset-0 bg-[var(--console-overlay-medium)] flex items-center justify-center z-50 p-4">
+    <div className="fixed inset-0 bg-[var(--console-overlay-medium)] backdrop-blur-sm flex items-center justify-center z-50 p-4">
       {/* biome-ignore lint/a11y/noStaticElementInteractions: modal content trap */}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: Escape handled globally */}
       <div

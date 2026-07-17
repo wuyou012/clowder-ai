@@ -19,7 +19,9 @@ export interface TokenUsage {
   totalTokens?: number; // Gemini fallback (doesn't split in/out)
   cacheReadTokens?: number; // Subset of inputTokens from cache (Claude + Codex)
   cacheCreationTokens?: number; // Subset of inputTokens written to cache (Claude only)
-  costUsd?: number; // Claude only
+  costUsd?: number; // Claude: exact from CLI; Codex: estimated from pricing table
+  /** True when costUsd was calculated from a pricing table rather than reported by the CLI */
+  costEstimated?: boolean;
   durationMs?: number; // Claude: total duration
   durationApiMs?: number; // Claude: pure API duration
   numTurns?: number; // Claude: number of turns
@@ -69,6 +71,9 @@ export function mergeTokenUsage(existing: TokenUsage | undefined, incoming: Toke
   if (incoming.isCumulativeUsage != null) {
     result.isCumulativeUsage = incoming.isCumulativeUsage;
   }
+  if (incoming.costEstimated != null) {
+    result.costEstimated = incoming.costEstimated;
+  }
   return result;
 }
 
@@ -79,6 +84,13 @@ export interface MessageMetadata {
   provider: string;
   model: string;
   sessionId?: string;
+  /**
+   * F198 Bug #3: bg carrier surfaces the daemon's freshly-forked conversation
+   * UUID after a `--bg --resume` turn (read from state.resumeSessionId). The
+   * consumer persists it as the SessionRecord's latestResumeSessionId — the
+   * next round's `--resume` target. bg-only; absent for other providers.
+   */
+  resumeSessionId?: string;
   usage?: TokenUsage;
   /** F061: false when provider cannot verify which model actually ran (e.g. CDP bridge) */
   modelVerified?: boolean;
@@ -153,7 +165,7 @@ export interface AgentMessage {
   /** Tool input parameters (for 'tool_use' type) */
   toolInput?: Record<string, unknown>;
   /** F153 Phase J AC-J1: native provider tool call id; used to pair tool_use ↔ tool_result for real-duration spans.
-   *  Provider transformers MUST inject this from raw payload when available (Claude tool_use.id, DARE tool_call_id,
+   *  Provider transformers MUST inject this from raw payload when available (Claude tool_use.id,
    *  CatAgent tool_use_id, Codex item.id, etc). Providers without native id may omit; ToolSpanTracker treats
    *  missing id as fallback (no span open, no fake duration) per KD-41. */
   toolUseId?: string;
@@ -179,12 +191,22 @@ export interface AgentMessage {
   /** Backend stored-message ID (set for callback post-message, used for rich_block correlation) */
   messageId?: string;
   /** F52: Cross-thread origin metadata (set for cross-thread callback messages) */
-  extra?: { crossPost?: { sourceThreadId: string; sourceInvocationId?: string }; targetCats?: string[] };
+  extra?: {
+    crossPost?: {
+      sourceThreadId: string;
+      sourceInvocationId?: string;
+      /** F246 Phase B: effect-class label for receiving-side behavior constraints */
+      effectClass?: 'fyi' | 'coordinate' | 'investigate' | 'assign_work';
+    };
+    targetCats?: string[];
+    /** #814: True when message originated from an explicit post_message callback (not stream duplicate) */
+    isExplicitPost?: boolean;
+  };
   /** F121: ID of the message this message is replying to */
   replyTo?: string;
   /** F121: Hydrated preview of the replied-to message */
   replyPreview?: ReplyPreview;
-  /** F061: Whether this message mentions the co-creator (@user/@铲屎官/configured patterns) */
+  /** F061: Whether this message mentions the co-creator (@user/@co-creator/configured patterns) */
   mentionsUser?: boolean;
   /** F108: Invocation ID — allows frontend to distinguish messages from concurrent invocations.
    *  F194 Phase Z3 dual id: this is the chain/parent invocation id (legacy SoT for liveness/queue/cancel).
@@ -249,8 +271,12 @@ export interface AgentServiceOptions {
   auditContext?: AuditContext;
   /** Static identity prompt (Claude: --append-system-prompt, others: prepend to prompt) */
   systemPrompt?: string;
+  /** Static identity prompt used only if a resumed carrier creates a fresh fallback session. */
+  resumeFallbackSystemPrompt?: string;
   /** F089: Override spawnCli with tmux-based spawner (set per-invocation) */
   spawnCliOverride?: SpawnCliOverride;
+  /** F210-H1b: Override AGY --log-file path (test seam for the trajectory progress observer). */
+  agyLogPathOverride?: string;
   /** F118: Invocation ID for diagnostic enrichment of __cliTimeout */
   invocationId?: string;
   /** F118: CLI session ID for diagnostic enrichment of __cliTimeout */
@@ -295,4 +321,50 @@ export interface AgentService {
    * Optional — defaults to false for back-compat with non-native services.
    */
   injectsL0Natively?(): boolean;
+
+  /**
+   * F198 Bug #3 — whether this carrier resumes a conversation that has NO
+   * stable per-conversation sessionId (the bg daemon forks a fresh UUID every
+   * `--bg --resume` round). When true, invoke-single-cat derives a stable
+   * chainKey = `bg:${threadId}:${catId}` and routes sessionId resolution,
+   * the resume mutex key, session_init record reuse, and done bookkeeping
+   * through it — bypassing the cliSessionId-based seal+create path that would
+   * otherwise inflate one conversation into N sealed records.
+   *
+   * Optional — defaults to false. Only ClaudeBgCarrierService returns true;
+   * every other provider (incl. `-p` ClaudeAgentService) keeps the stable
+   * cliSessionId path unchanged.
+   */
+  usesChainKeyResume?(): boolean;
+
+  /**
+   * F177 Phase H (KD-13) — true iff this service runs in a harness that does
+   * NOT honor the Claude Code F177-G Stop hook (e.g. CodexAgentService via
+   * `codex exec --json`, which does not dispatch ~/.codex/hooks.json — H0 spike
+   * 2026-06-11). When true, the serial route layer applies a server-side
+   * routing guard: one inline remedial invoke when the turn ends with no valid
+   * routing exit. Optional — defaults to false (Claude-family is already
+   * covered by the Stop hook).
+   */
+  needsServerRoutingGuard?(): boolean;
+}
+
+/**
+ * F203 Phase I — L0 compiler function signature.
+ * Same as `compileL0ViaSubprocess` but injectable for testing.
+ */
+export type L0CompilerFn = (options: { catId: string; outPath?: string }) => Promise<string>;
+
+/**
+ * F203 Phase I — AgentService that carries an injectable L0 compiler seam.
+ * OpenCodeAgentService implements this; Claude/Codex services keep their own
+ * private l0CompilerFn (different lifecycle — they compile L0 internally).
+ */
+export interface L0InjectableAgentService extends AgentService {
+  readonly l0CompilerFn?: L0CompilerFn;
+}
+
+/** Type guard: does this service expose an injectable L0 compiler? */
+export function hasL0CompilerSeam(service: AgentService): service is L0InjectableAgentService {
+  return 'l0CompilerFn' in service && typeof (service as L0InjectableAgentService).l0CompilerFn === 'function';
 }

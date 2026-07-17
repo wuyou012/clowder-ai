@@ -1,18 +1,66 @@
-// Cat Cafe Desktop — Electron main process
+// Clowder AI Desktop — Electron main process
 // Launches backend services (Redis, API, Web) then shows the web UI.
 
 const { app, BrowserWindow, Menu, Tray, dialog } = require('electron');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
+const path = require('node:path');
+const fs = require('node:fs');
+const os = require('node:os');
 const { resolveProjectRootFromDir } = require('./project-root');
 const ServiceManager = require('./service-manager');
 
-// Single instance lock — prevent multiple Cat Cafe processes
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
+// macOS install-location guard.
+//
+// When the user double-clicks Clowder AI.app from the mounted DMG without
+// dragging it to /Applications first, every backend subprocess (Redis, API,
+// Web) ends up with a cwd / loaded-module path under /Volumes/Clowder AI/...,
+// which holds the DMG volume open. The user then cannot eject the DMG until
+// the app is fully quit (and even then, lingering file handles or zombie
+// processes can keep it locked).
+//
+// We refuse to launch from a read-only mounted volume. Users must drag the
+// app into /Applications and launch that installed copy; launching directly
+// from the DMG only shows installation instructions and exits before services
+// start.
+//
+// This guard MUST run after app ready because Electron's dialog module is not
+// available earlier. It also MUST run before the single-instance lock below:
+// if another instance is already running from /Applications, the lock would
+// otherwise cause this instance to exit before the guard fires — letting users
+// "run" directly from the DMG without any warning, then wondering why the
+// volume won't eject.
+function ensureValidMacInstallLocation() {
+  if (process.platform !== 'darwin' || !app.isPackaged) {
+    return true;
+  }
+
+  const appPath = app.getAppPath();
+  const runningFromVolume = appPath.startsWith('/Volumes/');
+  const inApplications = (() => {
+    try {
+      return app.isInApplicationsFolder();
+    } catch {
+      return false;
+    }
+  })();
+
+  if (!runningFromVolume && inApplications) {
+    return true;
+  }
+
+  dialog.showMessageBoxSync({
+    type: 'warning',
+    buttons: ['OK'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'Clowder AI',
+    message: 'Clowder AI must be installed before it can open',
+    detail:
+      'Running directly from the install disk image is not supported. Drag Clowder AI.app to the Applications folder, then open it from Applications.',
+  });
+
   app.quit();
-  process.exit(0);
+  setImmediate(() => process.exit(0));
+  return false;
 }
 
 const PROJECT_ROOT = resolveProjectRootFromDir(__dirname);
@@ -112,7 +160,7 @@ function createTray() {
     return; // icon missing — skip tray
   }
   const contextMenu = Menu.buildFromTemplate([
-    { label: 'Show Cat Cafe', click: () => mainWindow?.show() },
+    { label: 'Show Clowder AI', click: () => mainWindow?.show() },
     { type: 'separator' },
     { label: 'Quit', click: () => quitApp() },
   ]);
@@ -149,6 +197,21 @@ app.on('second-instance', () => {
 
 app.on('ready', async () => {
   dbg('app ready event fired');
+
+  if (!ensureValidMacInstallLocation()) {
+    return;
+  }
+
+  // Single instance lock — prevent multiple Clowder AI processes.
+  // This runs AFTER the install-location guard so that launching from a DMG
+  // always shows the warning dialog, even if another instance is already
+  // running from /Applications.
+  const gotTheLock = app.requestSingleInstanceLock();
+  if (!gotTheLock) {
+    app.quit();
+    return;
+  }
+
   createSplashWindow();
   createTray();
 
@@ -166,7 +229,7 @@ app.on('ready', async () => {
   } catch (err) {
     dbg(`startAll() FAILED: ${err.message}`);
     dialog.showErrorBox(
-      'Cat Cafe - Startup Error',
+      'Clowder AI - Startup Error',
       `Failed to start services:\n${err.message}\n\nCheck logs in .cat-cafe/logs/`,
     );
     app.quit();

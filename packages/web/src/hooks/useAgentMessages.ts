@@ -30,8 +30,14 @@ import {
   markReplacedInvocation,
   removeReplacedInvocation,
 } from './shared-replaced-invocations';
-import { formatVisibleSystemInfo } from './system-info-visible';
 import {
+  formatAgyProgressDetail,
+  formatSessionSealRequested,
+  formatVisibleSystemInfo,
+  isInternalSystemInfoTelemetry,
+} from './system-info-visible';
+import {
+  type ActiveSeedSource,
   clearActiveBubble as clearActiveBubbleLedger,
   clearAllActiveBubblesForThread as clearAllActiveBubblesForThreadLedger,
   clearAllFinalizedForThread as clearAllFinalizedForThreadLedger,
@@ -39,6 +45,7 @@ import {
   clearPendingTimeoutDiag as clearPendingTimeoutDiagLedger,
   clearStreamData as clearStreamDataLedger,
   decideTerminalEventTarget as decideTerminalEventTargetLedger,
+  getActiveBoundTurnInvocationId as getActiveBoundTurnInvocationIdLedger,
   getActiveBubbleCount as getActiveBubbleCountLedger,
   getActiveBubble as getActiveBubbleLedger,
   getAllActiveBubblesForThread as getAllActiveBubblesForThreadLedger,
@@ -64,6 +71,8 @@ const FINALIZED_TTL_MS = 5 * 60 * 1000;
 
 /** Timeout for done(isFinal) - 5 minutes */
 const DONE_TIMEOUT_MS = 5 * 60 * 1000;
+const FRESH_PARENT_SEED_BOUNDARY_WINDOW_MS = DONE_TIMEOUT_MS;
+const FRESH_PARENT_SEED_MAX_SEQ_GAP = 100;
 /** Monotonic counter for collision-safe callback bubble IDs */
 let cbSeq = 0;
 // F173 a2a-handoff bug fix (cloud Codex R2 P2-2): monotonic suffix to prevent
@@ -136,6 +145,45 @@ function shouldCatchUpEmptyFinalStreamBubble(message: ChatMessage | undefined): 
   return (message.toolEvents?.length ?? 0) > 0 || (message.thinking?.trim().length ?? 0) > 0;
 }
 
+function isSameParentLocalToolOnlyResidue(
+  message: ChatMessage,
+  finalized: ChatMessage,
+  parentInvocationId: string,
+): boolean {
+  if (message.id === finalized.id) return false;
+  if (!message.id.startsWith('msg-')) return false;
+  if (message.type !== 'assistant' || message.catId !== finalized.catId || message.origin !== 'stream') {
+    return false;
+  }
+  if (message.extra?.stream?.invocationId !== parentInvocationId) return false;
+  if (message.content.trim().length > 0) return false;
+  return (message.toolEvents?.length ?? 0) > 0 || (message.thinking?.trim().length ?? 0) > 0;
+}
+
+function terminalizeSameParentLocalToolOnlyResidues(
+  messages: ChatMessage[],
+  finalized: ChatMessage | undefined,
+  invocationId: string | undefined,
+): { found: boolean; messages: ChatMessage[]; terminalized: boolean } {
+  if (!finalized || finalized.type !== 'assistant' || finalized.origin !== 'stream' || !finalized.catId) {
+    return { found: false, messages, terminalized: false };
+  }
+  const parentInvocationId = finalized.extra?.stream?.invocationId ?? invocationId;
+  if (!parentInvocationId) return { found: false, messages, terminalized: false };
+  let found = false;
+  let terminalized = false;
+  const nextMessages = messages.map((message) => {
+    if (!isSameParentLocalToolOnlyResidue(message, finalized, parentInvocationId)) {
+      return message;
+    }
+    found = true;
+    if (message.isStreaming === false) return message;
+    terminalized = true;
+    return { ...message, isStreaming: false };
+  });
+  return { found, messages: terminalized ? nextMessages : messages, terminalized };
+}
+
 interface AgentMsg {
   type: string;
   catId: string;
@@ -172,6 +220,10 @@ interface AgentMsg {
   extra?: {
     crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
     a2aRouting?: { fromCatId?: string; targetCatId?: string; invocationId?: string };
+    /** #814: True when message originated from an explicit post_message callback */
+    isExplicitPost?: boolean;
+    /** F098-C1: Explicit target cats from post_message (direction pills) */
+    targetCats?: string[];
   };
   /** F121: Reply-to message ID */
   replyTo?: string;
@@ -186,6 +238,8 @@ interface AgentMsg {
   /** F173 Phase E (KD-1 handler unification): handleAgentMessage 现在是 single dispatch
    *  entry，需要 threadId 区分 active vs background。useSocket 一直传 msg.threadId。 */
   threadId?: string;
+  /** F183 Phase C: optional thread-scoped monotonic sequence. */
+  seq?: number;
 }
 
 function normalizeInvocationForCat(invocationId: string | undefined, catId: string): string | undefined {
@@ -253,6 +307,10 @@ function sameInvocationForCat(candidate: string | undefined, expected: string, c
  */
 function sameBubbleStableKey(message: ChatMessage | undefined, expected: string, catId: string): boolean {
   if (!message) return false;
+  // #814: explicit post_message bubbles are standalone. They may retain stream
+  // identity after hydration for correlation, but must never be recovered,
+  // finalized, or replaced by stream stable-key paths.
+  if (message.extra?.isExplicitPost) return false;
   const turn = message.extra?.stream?.turnInvocationId;
   // F194 Phase Z3 R5 P1-1 (砚砚): turn-bearing bubble matches ONLY against turn (parent reserved
   // for liveness/cancel; same-parent multi-turn must NOT cross-match via parent fallback).
@@ -294,9 +352,65 @@ function findLatestActiveInvocationIdForCat(
   return undefined;
 }
 
+// F194 cloud R3 (2026-06-15, 砚砚) ③: provisional bubble id source. A fresh seed created before
+// the turn id is known must NOT collide with the deterministic `msg-{parent}-{cat}` id — an
+// earlier same-parent residue may already own it, and addMessage no-ops on a duplicate id. The
+// monotonic counter + timestamp guarantees a distinct id; it is rebound to the turn-derived id at
+// the invocation_created boundary. The `msg-prov-` prefix can never collide with a deterministic
+// `msg-{invocationId}-{cat}` id (invocation ids are never literally `prov-...`).
+let provisionalBubbleSeq = 0;
+function nextProvisionalBubbleId(catId: string): string {
+  provisionalBubbleSeq += 1;
+  return `msg-prov-${Date.now()}-${provisionalBubbleSeq}-${catId}`;
+}
+
 function isRecoverableInFlightError(msg: { type: string; errorCode?: string; isFinal?: boolean }): boolean {
   if (msg.type !== 'error' || msg.isFinal === true) return false;
   return msg.errorCode === 'upstream_error' || msg.errorCode === 'tool_error';
+}
+
+type FreshParentSeedProof = {
+  freshParentSeedAt?: number;
+  freshParentSeedSeq?: number;
+};
+
+function finiteNumber(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function freshParentSeedProof(
+  seedSource: ActiveSeedSource | undefined,
+  timestamp: number | undefined,
+  seq: number | undefined,
+): FreshParentSeedProof {
+  if (seedSource !== 'fresh-parent-seed') return {};
+  const freshParentSeedAt = finiteNumber(timestamp) ?? Date.now();
+  const freshParentSeedSeq = finiteNumber(seq);
+  return {
+    freshParentSeedAt,
+    ...(freshParentSeedSeq !== undefined ? { freshParentSeedSeq } : {}),
+  };
+}
+
+function isCurrentFreshParentSeed(
+  ref: { seedSource?: ActiveSeedSource; freshParentSeedAt?: number; freshParentSeedSeq?: number } | undefined,
+  boundaryTimestamp: number | undefined,
+  boundarySeq: number | undefined,
+): boolean {
+  if (ref?.seedSource !== 'fresh-parent-seed') return false;
+  const seedAt = finiteNumber(ref.freshParentSeedAt);
+  const eventAt = finiteNumber(boundaryTimestamp) ?? Date.now();
+  if (seedAt === undefined) return false;
+  const ageMs = eventAt - seedAt;
+  if (ageMs < 0 || ageMs > FRESH_PARENT_SEED_BOUNDARY_WINDOW_MS) return false;
+
+  const seedSeq = finiteNumber(ref.freshParentSeedSeq);
+  const eventSeq = finiteNumber(boundarySeq);
+  if (seedSeq !== undefined && eventSeq !== undefined) {
+    const seqGap = eventSeq - seedSeq;
+    if (seqGap <= 0 || seqGap > FRESH_PARENT_SEED_MAX_SEQ_GAP) return false;
+  }
+  return true;
 }
 
 export interface BackgroundAgentMessage {
@@ -323,8 +437,14 @@ export interface BackgroundAgentMessage {
     cliDiagnostics?: CliDiagnostics;
   };
   /** F52: Cross-thread origin metadata */
-  extra?: { crossPost?: { sourceThreadId: string; sourceInvocationId?: string } };
-  /** F057-C2: Whether this message mentions the user (@user / @铲屎官) */
+  extra?: {
+    crossPost?: { sourceThreadId: string; sourceInvocationId?: string };
+    /** #814: True when message originated from an explicit post_message callback */
+    isExplicitPost?: boolean;
+    /** F098-C1: Explicit target cats from post_message (direction pills) */
+    targetCats?: string[];
+  };
+  /** F057-C2: Whether this message mentions the user (@user / @co-creator) */
   mentionsUser?: boolean;
   /** F121: Reply-to message ID */
   replyTo?: string;
@@ -363,6 +483,9 @@ export interface BackgroundStreamRef {
   id: string;
   threadId: string;
   catId: string;
+  seedSource?: ActiveSeedSource;
+  freshParentSeedAt?: number;
+  freshParentSeedSeq?: number;
 }
 
 export interface BackgroundToastInput {
@@ -461,11 +584,18 @@ function recoverBackgroundStreamingMessage(
   options: HandleBackgroundMessageOptions,
 ): string | undefined {
   const streamKey = `${msg.threadId}::${msg.catId}`;
+  const activeRef = options.bgStreamRefs.get(streamKey);
   const threadMessages = options.store.getThreadState(msg.threadId).messages;
   for (let i = threadMessages.length - 1; i >= 0; i--) {
     const message = threadMessages[i];
     if (message.type === 'assistant' && message.catId === msg.catId && message.isStreaming) {
-      options.bgStreamRefs.set(streamKey, { id: message.id, threadId: msg.threadId, catId: msg.catId });
+      if (shouldSkipBackgroundParentOnlyResidueRecovery(message, msg, options, activeRef)) continue;
+      options.bgStreamRefs.set(streamKey, {
+        id: message.id,
+        threadId: msg.threadId,
+        catId: msg.catId,
+        seedSource: 'recovered',
+      });
       if (msg.metadata) {
         options.store.setThreadMessageMetadata(msg.threadId, message.id, msg.metadata);
       }
@@ -476,10 +606,70 @@ function recoverBackgroundStreamingMessage(
 }
 
 function getStreamStableInvocationKey(message: ChatMessage): string | undefined {
+  // #814: explicit post_message is standalone — never match by stable key,
+  // so stream events from the same invocation can't replace this bubble.
+  // stream block is still preserved for #573 correlation after F5/hydration.
+  if (message.extra?.isExplicitPost) return undefined;
   const invocationId = message.extra?.stream?.invocationId;
   if (typeof invocationId !== 'string' || invocationId.length === 0) return undefined;
   const turnInvocationId = message.extra?.stream?.turnInvocationId;
   return typeof turnInvocationId === 'string' && turnInvocationId.length > 0 ? turnInvocationId : invocationId;
+}
+
+function shouldSkipBackgroundParentOnlyResidueRecovery(
+  message: ChatMessage,
+  msg: BackgroundAgentMessage,
+  options: HandleBackgroundMessageOptions,
+  activeRef?: BackgroundStreamRef,
+): boolean {
+  if (msg.type !== 'tool_use' && msg.type !== 'tool_result') return false;
+  const incomingInvocationId = msg.invocationId ?? getThreadInvocationId(msg, options);
+  if (!incomingInvocationId) return false;
+  const incomingTurnInvocationId =
+    msg.turnInvocationId ?? options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
+  if (incomingTurnInvocationId) return false;
+  const boundInv = message.extra?.stream?.invocationId;
+  const boundTurn = message.extra?.stream?.turnInvocationId;
+  if (boundInv !== incomingInvocationId || boundTurn) return false;
+  // Check 1: bgStreamRef tracks this message as the current fresh parent seed.
+  if (activeRef?.id === message.id && isCurrentFreshParentSeed(activeRef, msg.timestamp, msg.seq)) return false;
+  // Check 2 (F194 saga17+): runtime ledger bridge for active→background transition.
+  // When the active path created a parent-only seed and the user switched threads,
+  // bgStreamRefs is cleared (line 4100) but the runtime ledger still knows which
+  // bubble is active. Allow recovery — same bridge pattern as invocation_created
+  // handler (line 655-668). Z3-safe: the ledger holds ONE entry per (thread, cat);
+  // finalized/done bubbles have been cleared, so stale residues cannot be recovered.
+  const ledgerEntry = getActiveBubbleLedger(getThreadRuntimeLedger(), msg.threadId, msg.catId);
+  if (
+    ledgerEntry?.messageId === message.id &&
+    ledgerEntry.seedSource === 'fresh-parent-seed' &&
+    isCurrentFreshParentSeed(ledgerEntry, msg.timestamp, msg.seq)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function hasBackgroundParentOnlyResidue(
+  msg: BackgroundAgentMessage,
+  invocationId: string | undefined,
+  activeRef: BackgroundStreamRef | undefined,
+  options: HandleBackgroundMessageOptions,
+): boolean {
+  if (msg.type !== 'tool_use' && msg.type !== 'tool_result') return false;
+  if (!invocationId) return false;
+  const activeFreshSeedId = isCurrentFreshParentSeed(activeRef, msg.timestamp, msg.seq) ? activeRef?.id : undefined;
+  return options.store
+    .getThreadState(msg.threadId)
+    .messages.some(
+      (message) =>
+        message.type === 'assistant' &&
+        message.catId === msg.catId &&
+        message.origin === 'stream' &&
+        message.extra?.stream?.invocationId === invocationId &&
+        !message.extra.stream.turnInvocationId &&
+        message.id !== activeFreshSeedId,
+    );
 }
 
 function isBackgroundStreamingAssistant(message: ChatMessage, catId: string): boolean {
@@ -491,16 +681,102 @@ function finalizeStaleBackgroundInvocationStreams(
   catId: string,
   incomingStableKey: string,
   options: HandleBackgroundMessageOptions,
+  incomingInvocationId?: string,
+  incomingTurnInvocationId?: string,
+  incomingTimestamp?: number,
+  incomingSeq?: number,
 ): void {
   const streamKey = `${threadId}::${catId}`;
   const activeRef = options.bgStreamRefs.get(streamKey);
+  const runtimeLedger = getThreadRuntimeLedger();
+  const activeLedgerRef = getActiveBubbleLedger(runtimeLedger, threadId, catId);
   const closedStableKeys = new Set<string>();
   const threadMessages = options.store.getThreadState(threadId).messages;
   for (const message of threadMessages) {
     if (!isBackgroundStreamingAssistant(message, catId)) continue;
     const stableKey = getStreamStableInvocationKey(message);
     if (!stableKey || stableKey === incomingStableKey) continue;
+    // F194 follow-up (codex live-split, cloud P1 2026-06-15): mirror the active-path
+    // boundary fix. A parent-ONLY seed of THIS incoming invocation (CLI tool_use built
+    // the work-log bubble before invocation_created stamped the per-cat-turn id) is the
+    // current turn's work-log, not a leftover stale stream. Finalizing it here (set
+    // non-streaming + markReplaced) is exactly what splits the work-log bubble from the
+    // later turn text. Upgrade it to the turn id + key (keep streaming) instead.
+    const boundTurn = message.extra?.stream?.turnInvocationId;
+    const boundInv = message.extra?.stream?.invocationId;
+    // cloud P1#2 (2026-06-15): gate on the current seed — only the active/background
+    // seed for this event window may be upgraded; a stale parent-only bubble from an
+    // earlier turn of the same parent must finalize.
+    // R18 recurrence: invocation_created can itself arrive on the background path
+    // after the operator switches threads. In that case bgStreamRefs is still empty,
+    // but the active path already recorded the parent-only seed in the per-thread
+    // active ledger. Bridge that ledger entry here so background invocation_created
+    // performs the same parent→turn upgrade the active path would have done.
+    const ledgerRefForMessage =
+      activeLedgerRef?.messageId === message.id &&
+      activeLedgerRef.invocationId === incomingInvocationId &&
+      activeLedgerRef.seedSource === 'fresh-parent-seed'
+        ? {
+            id: activeLedgerRef.messageId,
+            threadId,
+            catId,
+            seedSource: activeLedgerRef.seedSource,
+            freshParentSeedAt: activeLedgerRef.freshParentSeedAt,
+            freshParentSeedSeq: activeLedgerRef.freshParentSeedSeq,
+          }
+        : undefined;
+    const upgradeRef = activeRef?.id === message.id ? activeRef : ledgerRefForMessage;
+    if (
+      incomingTurnInvocationId &&
+      incomingInvocationId &&
+      boundInv === incomingInvocationId &&
+      !boundTurn &&
+      upgradeRef &&
+      isCurrentFreshParentSeed(upgradeRef, incomingTimestamp, incomingSeq)
+    ) {
+      options.store.setThreadMessageStreamInvocation(
+        threadId,
+        message.id,
+        incomingInvocationId,
+        incomingTurnInvocationId,
+      );
+      const turnDerivedId = deriveBubbleId(incomingTurnInvocationId, catId, () => message.id);
+      let shouldTrackBackgroundRef = true;
+      if (turnDerivedId !== message.id) {
+        const existingTurnMessage = threadMessages.find((candidate) => candidate.id === turnDerivedId);
+        if (existingTurnMessage) {
+          const collisionPatch = buildTurnBubbleCollisionPatch(
+            message,
+            existingTurnMessage,
+            incomingInvocationId,
+            incomingTurnInvocationId,
+          );
+          options.store.patchThreadMessage(threadId, turnDerivedId, collisionPatch);
+          options.store.removeThreadMessage(threadId, message.id);
+          shouldTrackBackgroundRef = collisionPatch.isStreaming !== false;
+        } else {
+          options.store.replaceThreadMessageId(threadId, message.id, turnDerivedId);
+        }
+      }
+      if (shouldTrackBackgroundRef) {
+        options.bgStreamRefs.set(streamKey, { id: turnDerivedId, threadId, catId, seedSource: 'bound' });
+        setActiveBubbleLedger(runtimeLedger, threadId, catId, {
+          messageId: turnDerivedId,
+          invocationId: incomingInvocationId,
+          seedSource: 'bound',
+        });
+      } else {
+        options.bgStreamRefs.delete(streamKey);
+        const ledgerMatchesSeed = activeLedgerRef?.messageId === message.id;
+        const ledgerMatchesTurn = activeLedgerRef?.messageId === turnDerivedId;
+        if (ledgerMatchesSeed ? true : ledgerMatchesTurn) {
+          clearActiveBubbleLedger(runtimeLedger, threadId, catId);
+        }
+      }
+      continue;
+    }
     options.store.setThreadMessageStreaming(threadId, message.id, false);
+    clearActiveBubbleLedgerForFinalizedMessage(threadId, catId, message.id);
     closedStableKeys.add(stableKey);
     if (activeRef?.id === message.id) {
       options.bgStreamRefs.delete(streamKey);
@@ -509,6 +785,119 @@ function finalizeStaleBackgroundInvocationStreams(
   for (const stableKey of closedStableKeys) {
     markReplacedInvocation(threadId, catId, stableKey);
   }
+}
+
+function mergeRichBlocksForUpgrade(
+  seedBlocks: RichBlock[] = [],
+  targetBlocks: RichBlock[] = [],
+): RichBlock[] | undefined {
+  const merged: RichBlock[] = [];
+  const seen = new Set<string>();
+  for (const block of [...seedBlocks, ...targetBlocks]) {
+    if (seen.has(block.id)) continue;
+    seen.add(block.id);
+    merged.push(block);
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+function mergeListById<T extends { id?: string }>(seedItems: T[] = [], targetItems: T[] = []): T[] | undefined {
+  const merged: T[] = [];
+  const seen = new Set<string>();
+  for (const item of [...seedItems, ...targetItems]) {
+    if (item.id) {
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+    }
+    merged.push(item);
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+function mergeContentBlocksForUpgrade(
+  seedBlocks: ChatMessage['contentBlocks'] = [],
+  targetBlocks: ChatMessage['contentBlocks'] = [],
+): ChatMessage['contentBlocks'] {
+  const merged: NonNullable<ChatMessage['contentBlocks']> = [];
+  const seen = new Set<string>();
+  for (const block of [...seedBlocks, ...targetBlocks]) {
+    const key = JSON.stringify(block);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(block);
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
+function mergeTextForUpgrade(
+  seedText: string | undefined,
+  targetText: string | undefined,
+  targetTextMode?: 'append' | 'replace',
+): string {
+  if (targetTextMode === 'replace') return targetText ? targetText : '';
+  if (!seedText) return targetText ? targetText : '';
+  if (!targetText) return seedText;
+  return `${seedText}${targetText}`;
+}
+
+function mergeMetadataForUpgrade(
+  seedMetadata: ChatMessageMetadata | undefined,
+  targetMetadata: ChatMessageMetadata | undefined,
+): ChatMessageMetadata | undefined {
+  if (seedMetadata && targetMetadata) return { ...seedMetadata, ...targetMetadata };
+  if (targetMetadata) return targetMetadata;
+  return seedMetadata;
+}
+
+function buildTurnBubbleCollisionPatch(
+  seed: ChatMessage,
+  target: ChatMessage,
+  invocationId: string,
+  turnInvocationId: string,
+): ChatMessagePatch {
+  const extra: ChatMessage['extra'] = {
+    ...seed.extra,
+    ...target.extra,
+    stream: {
+      ...seed.extra?.stream,
+      ...target.extra?.stream,
+      invocationId,
+      turnInvocationId,
+    },
+  };
+  const richBlocks = mergeRichBlocksForUpgrade(seed.extra?.rich?.blocks, target.extra?.rich?.blocks);
+  if (richBlocks) {
+    extra.rich = { v: 1, blocks: richBlocks };
+  } else {
+    delete extra.rich;
+  }
+  const contentBlocks = mergeContentBlocksForUpgrade(seed.contentBlocks, target.contentBlocks);
+  const toolEvents = mergeListById(seed.toolEvents, target.toolEvents);
+  const metadata = mergeMetadataForUpgrade(seed.metadata, target.metadata);
+  const deliveredAt = target.deliveredAt !== undefined ? target.deliveredAt : seed.deliveredAt;
+  const replyTo = target.replyTo !== undefined ? target.replyTo : seed.replyTo;
+  const replyPreview = target.replyPreview !== undefined ? target.replyPreview : seed.replyPreview;
+  const thinking = mergeTextForUpgrade(seed.thinking, target.thinking);
+  let isStreaming = target.isStreaming;
+  if (target.isStreaming !== false && seed.isStreaming) {
+    isStreaming = true;
+  }
+  const mentionsUser = seed.mentionsUser ? true : target.mentionsUser;
+
+  return {
+    content: mergeTextForUpgrade(seed.content, target.content, target.extra?.stream?.textMode),
+    ...(contentBlocks ? { contentBlocks } : {}),
+    ...(toolEvents ? { toolEvents } : {}),
+    ...(metadata ? { metadata } : {}),
+    ...(thinking ? { thinking } : {}),
+    timestamp: Math.min(seed.timestamp, target.timestamp),
+    isStreaming,
+    extra,
+    ...(mentionsUser ? { mentionsUser: true } : {}),
+    ...(deliveredAt !== undefined ? { deliveredAt } : {}),
+    ...(replyTo !== undefined ? { replyTo } : {}),
+    ...(replyPreview !== undefined ? { replyPreview } : {}),
+  };
 }
 
 function findBackgroundInvocationCreatedTarget(
@@ -529,7 +918,12 @@ function findBackgroundInvocationCreatedTarget(
   if (existingRef?.id) {
     const existing = threadMessages.find((message) => message.id === existingRef.id);
     if (isEligible(existing)) {
-      options.bgStreamRefs.set(streamKey, { id: existing.id, threadId: msg.threadId, catId: targetCatId });
+      options.bgStreamRefs.set(streamKey, {
+        id: existing.id,
+        threadId: msg.threadId,
+        catId: targetCatId,
+        seedSource: 'bound',
+      });
       if (msg.metadata) {
         options.store.setThreadMessageMetadata(msg.threadId, existing.id, msg.metadata);
       }
@@ -540,7 +934,12 @@ function findBackgroundInvocationCreatedTarget(
   for (let i = threadMessages.length - 1; i >= 0; i--) {
     const message = threadMessages[i];
     if (!isEligible(message)) continue;
-    options.bgStreamRefs.set(streamKey, { id: message.id, threadId: msg.threadId, catId: targetCatId });
+    options.bgStreamRefs.set(streamKey, {
+      id: message.id,
+      threadId: msg.threadId,
+      catId: targetCatId,
+      seedSource: 'bound',
+    });
     if (msg.metadata) {
       options.store.setThreadMessageMetadata(msg.threadId, message.id, msg.metadata);
     }
@@ -587,7 +986,16 @@ export function consumeBackgroundSystemInfo(
       options.finalizedBgRefs.delete(bgStreamKey);
       if (targetCatId && invocationId) {
         const incomingStableKey = turnInvocationId ?? invocationId;
-        finalizeStaleBackgroundInvocationStreams(msg.threadId, targetCatId, incomingStableKey, options);
+        finalizeStaleBackgroundInvocationStreams(
+          msg.threadId,
+          targetCatId,
+          incomingStableKey,
+          options,
+          invocationId,
+          turnInvocationId,
+          msg.timestamp,
+          msg.seq,
+        );
         options.store.setThreadCatInvocation(msg.threadId, targetCatId, {
           invocationId,
           ...(turnInvocationId ? { turnInvocationId } : {}),
@@ -637,24 +1045,22 @@ export function consumeBackgroundSystemInfo(
         usage: parsed.usage,
       });
       if (existingRef?.id) {
+        // F230: write model/provider FIRST so setThreadMessageMetadata creates the
+        // metadata object when absent (PTY text events carry no metadata).
+        // setThreadMessageUsage is a no-op when metadata is absent — ordering matters.
+        if (parsed.model && parsed.provider) {
+          options.store.setThreadMessageMetadata(msg.threadId, existingRef.id, {
+            model: parsed.model as string,
+            provider: parsed.provider as string,
+          });
+        }
         options.store.setThreadMessageUsage(msg.threadId, existingRef.id, parsed.usage);
       }
       consumed = true;
     } else if (parsed?.type === 'context_briefing') {
-      const storedMessage = parsed.storedMessage as
-        | { id: string; content: string; origin: string; timestamp: number; extra?: Record<string, unknown> }
-        | undefined;
-      if (storedMessage?.id) {
-        options.store.addMessageToThread(msg.threadId, {
-          id: storedMessage.id,
-          type: 'system',
-          content: storedMessage.content ?? '',
-          origin: (storedMessage.origin as 'briefing') ?? 'briefing',
-          timestamp: storedMessage.timestamp ?? Date.now(),
-          ...(storedMessage.extra ? { extra: storedMessage.extra } : {}),
-        });
-        consumed = true;
-      }
+      // Suppress: internal routing context for cats, not user-facing timeline.
+      // The briefing is already persisted in messageStore for cat context assembly.
+      consumed = true;
     } else if (parsed?.type === 'context_health') {
       const targetCatId = parsed.catId ?? msg.catId;
       options.store.setThreadCatInvocation(msg.threadId, targetCatId, {
@@ -708,9 +1114,20 @@ export function consumeBackgroundSystemInfo(
         // Create placeholder assistant bubble if needed (mirrors thinking path)
         const streamKey = `${msg.threadId}::${msg.catId}`;
         targetId = `bg-web-${Date.now()}-${msg.catId}-${options.nextBgSeq()}`;
-        const invocationId = options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.invocationId;
-        const turnInvocationId = options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
-        options.bgStreamRefs.set(streamKey, { id: targetId, threadId: msg.threadId, catId: msg.catId });
+        const threadState = options.store.getThreadState(msg.threadId);
+        const invocationId = msg.invocationId ?? threadState.catInvocations[msg.catId]?.invocationId;
+        const turnInvocationId = msg.turnInvocationId ?? threadState.catInvocations[msg.catId]?.turnInvocationId;
+        setBackgroundPlaceholderStreamRef(
+          options,
+          streamKey,
+          targetId,
+          msg.threadId,
+          msg.catId,
+          invocationId,
+          turnInvocationId,
+          msg.timestamp,
+          msg.seq,
+        );
         options.store.addMessageToThread(msg.threadId, {
           id: targetId,
           type: 'assistant',
@@ -798,7 +1215,17 @@ export function consumeBackgroundSystemInfo(
         const threadState = options.store.getThreadState(msg.threadId);
         const invocationId = msg.invocationId ?? threadState.catInvocations[msg.catId]?.invocationId;
         const turnInvocationId = msg.turnInvocationId ?? threadState.catInvocations[msg.catId]?.turnInvocationId;
-        options.bgStreamRefs.set(streamKey, { id: targetId, threadId: msg.threadId, catId: msg.catId });
+        setBackgroundPlaceholderStreamRef(
+          options,
+          streamKey,
+          targetId,
+          msg.threadId,
+          msg.catId,
+          invocationId,
+          turnInvocationId,
+          msg.timestamp,
+          msg.seq,
+        );
         options.store.addMessageToThread(msg.threadId, {
           id: targetId,
           type: 'assistant',
@@ -845,6 +1272,42 @@ export function consumeBackgroundSystemInfo(
       // Foreground uses pendingTimeoutDiagRef (React ref) to attach to error messages;
       // background threads don't have that mechanism, so we just suppress the raw JSON.
       consumed = true;
+    } else if (parsed?.type === 'agy_trajectory_progress') {
+      // F210-H3: 累积进度到 thread 级 catStatusDetails（折叠单行 "AGY working · N steps · latest"），
+      // 由 ThreadCatStatus 显示；不渲染 system bubble（承接 H1-hotfix 避免 per-step 刷屏）。
+      if (msg.catId && msg.threadId) {
+        options.store.updateThreadCatStatus(msg.threadId, msg.catId, 'streaming', formatAgyProgressDetail(parsed));
+      }
+      consumed = true;
+    } else if (parsed?.type === 'provider_capability') {
+      // #939 part A (kimi auth dual-path): capability telemetry from provider backends
+      // (kimi emits `thinking: unavailable` / `image_input: limited`, etc.). Mirror of the
+      // foreground branch (~line 5123) but using the background chain `options.store.*` API.
+      // F210-H1 dual-handler pattern: BOTH foreground and background chains must handle the
+      // same telemetry type — otherwise kimi running in a background thread still surfaces
+      // raw JSON bubbles (the original #939 bug). Caught by [宪宪/opus-4.6] review of #2352.
+      // Note: || (not ??) so empty-string parsed.catId falls through to msg.catId.
+      const targetCatId = (parsed.catId || msg.catId) as string | undefined;
+      const capability = typeof parsed.capability === 'string' ? parsed.capability : 'unknown';
+      const status =
+        parsed.status === 'available' || parsed.status === 'limited' || parsed.status === 'unavailable'
+          ? parsed.status
+          : 'unavailable';
+      const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+      const provider = typeof parsed.provider === 'string' ? parsed.provider : 'unknown';
+      if (targetCatId && msg.threadId) {
+        // Read-merge-write so multiple capabilities coexist on the same cat invocation
+        // (setThreadCatInvocation is shallow-merged, so passing a fresh object would clobber).
+        const existing =
+          options.store.getThreadState(msg.threadId).catInvocations?.[targetCatId]?.providerCapabilities ?? {};
+        options.store.setThreadCatInvocation(msg.threadId, targetCatId, {
+          providerCapabilities: {
+            ...existing,
+            [capability]: { status, reason, provider, receivedAt: Date.now() },
+          },
+        });
+      }
+      consumed = true;
     } else if (parsed?.type === 'governance_blocked') {
       const projectPath = typeof parsed.projectPath === 'string' ? parsed.projectPath : '';
       const reasonKind = (parsed.reasonKind as string) ?? 'needs_bootstrap';
@@ -872,7 +1335,7 @@ export function consumeBackgroundSystemInfo(
         },
       });
       consumed = true;
-    } else if (parsed?.type === 'strategy_allow_compress' || parsed?.type === 'resume_failure_stats') {
+    } else if (isInternalSystemInfoTelemetry(parsed)) {
       // Internal telemetry — suppress to avoid raw JSON bubbles in background threads
       consumed = true;
     } else if (parsed?.type === 'session_seal_requested') {
@@ -881,8 +1344,8 @@ export function consumeBackgroundSystemInfo(
           sessionSeq: parsed.sessionSeq,
           sessionSealed: true,
         });
-        const pct = parsed.healthSnapshot?.fillRatio ? Math.round(parsed.healthSnapshot.fillRatio * 100) : '?';
-        sysContent = `${parsed.catId} 的会话 #${parsed.sessionSeq} 已封存（上下文 ${pct}%），下次调用将自动创建新会话`;
+        const visibleSessionSeal = formatSessionSealRequested(parsed);
+        if (visibleSessionSeal) sysContent = visibleSessionSeal.content;
       }
     } else if (parsed?.type === 'mode_switch_proposal') {
       const by = parsed.proposedBy ?? '猫猫';
@@ -906,10 +1369,20 @@ export function consumeBackgroundSystemInfo(
           // Thinking arrived before any text/tool chunk — create placeholder assistant bubble
           const streamKey = `${msg.threadId}::${msg.catId}`;
           targetId = `bg-think-${Date.now()}-${msg.catId}-${options.nextBgSeq()}`;
-          const invocationId = options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.invocationId;
-          const turnInvocationId = options.store.getThreadState(msg.threadId).catInvocations[msg.catId]
-            ?.turnInvocationId;
-          options.bgStreamRefs.set(streamKey, { id: targetId, threadId: msg.threadId, catId: msg.catId });
+          const threadState = options.store.getThreadState(msg.threadId);
+          const invocationId = msg.invocationId ?? threadState.catInvocations[msg.catId]?.invocationId;
+          const turnInvocationId = msg.turnInvocationId ?? threadState.catInvocations[msg.catId]?.turnInvocationId;
+          setBackgroundPlaceholderStreamRef(
+            options,
+            streamKey,
+            targetId,
+            msg.threadId,
+            msg.catId,
+            invocationId,
+            turnInvocationId,
+            msg.timestamp,
+            msg.seq,
+          );
           options.store.addMessageToThread(msg.threadId, {
             id: targetId,
             type: 'assistant',
@@ -1112,6 +1585,33 @@ function getThreadInvocationId(
   );
 }
 
+function getBackgroundPlaceholderSeedSource(
+  invocationId: string | undefined,
+  turnInvocationId: string | undefined,
+): ActiveSeedSource | undefined {
+  // System-info placeholders are current-turn seeds when only the parent id is known.
+  if (turnInvocationId) return 'bound';
+  return invocationId ? 'fresh-parent-seed' : undefined;
+}
+
+function setBackgroundPlaceholderStreamRef(
+  options: HandleBackgroundMessageOptions,
+  streamKey: string,
+  id: string,
+  threadId: string,
+  catId: string,
+  invocationId: string | undefined,
+  turnInvocationId: string | undefined,
+  timestamp: number | undefined,
+  seq: number | undefined,
+): void {
+  const seedSource = getBackgroundPlaceholderSeedSource(invocationId, turnInvocationId);
+  const ref: BackgroundStreamRef = { id, threadId, catId };
+  if (seedSource) ref.seedSource = seedSource;
+  Object.assign(ref, freshParentSeedProof(seedSource, timestamp, seq));
+  options.bgStreamRefs.set(streamKey, ref);
+}
+
 export function clearBackgroundStreamRefForActiveEvent(
   msg: ActiveRoutedAgentMessage,
   bgStreamRefs: Map<string, BackgroundStreamRef>,
@@ -1132,7 +1632,16 @@ function stopTrackedStream(
   // after bgStreamRefs is cleared and isStreaming is false.
   options.finalizedBgRefs.set(streamKey, existing.id);
   options.bgStreamRefs.delete(streamKey);
+  clearActiveBubbleLedgerForFinalizedMessage(msg.threadId, msg.catId, existing.id);
   return existing;
+}
+
+function clearActiveBubbleLedgerForFinalizedMessage(threadId: string, catId: string, messageId: string): void {
+  const ledger = getThreadRuntimeLedger();
+  const activeEntry = getActiveBubbleLedger(ledger, threadId, catId);
+  if (activeEntry?.messageId === messageId) {
+    clearActiveBubbleLedger(ledger, threadId, catId);
+  }
 }
 
 function addBackgroundSystemMessage(
@@ -1169,10 +1678,17 @@ function recoverStreamingMessage(
   options: HandleBackgroundMessageOptions,
 ): string | undefined {
   const threadMessages = options.store.getThreadState(msg.threadId).messages;
+  const activeRef = options.bgStreamRefs.get(streamKey);
   for (let i = threadMessages.length - 1; i >= 0; i--) {
     const m = threadMessages[i];
     if (m.type === 'assistant' && m.catId === msg.catId && m.isStreaming) {
-      options.bgStreamRefs.set(streamKey, { id: m.id, threadId: msg.threadId, catId: msg.catId });
+      if (shouldSkipBackgroundParentOnlyResidueRecovery(m, msg, options, activeRef)) continue;
+      options.bgStreamRefs.set(streamKey, {
+        id: m.id,
+        threadId: msg.threadId,
+        catId: msg.catId,
+        seedSource: 'recovered',
+      });
       recordDebugEvent({
         event: 'bubble_lifecycle',
         threadId: msg.threadId,
@@ -1365,6 +1881,7 @@ function drainPendingBackgroundCallback(msg: BackgroundAgentMessage, options: Ha
       sameBubbleStableKey(message, msg.turnInvocationId ?? msg.invocationId, msg.catId)
     ) {
       options.store.setThreadMessageStreaming(msg.threadId, message.id, false);
+      clearActiveBubbleLedgerForFinalizedMessage(msg.threadId, msg.catId, message.id);
     }
   }
   handleBackgroundAgentMessage(pending, options);
@@ -1376,7 +1893,26 @@ function ensureBackgroundAssistantMessage(
   existing: BackgroundStreamRef | undefined,
   options: HandleBackgroundMessageOptions,
 ): string {
-  if (existing?.id) {
+  const invocationId = msg.invocationId ?? getThreadInvocationId(msg, options);
+  // F194 dual-path thread-switch fix (saga round 17): when a codex reply's events
+  // straddle a mid-reply currentThreadId switch, the trailing tool/work-log events
+  // (which carry NO msg.turnInvocationId) arrive on the background path. Resolving
+  // the turn from catInvocations alone can pick up a DIFFERENT (shadow) turn left by
+  // a newer invocation context → a second, empty work-log bubble (split). Recover
+  // the turn the ACTIVE path already bound for THIS reply's thread (msg.threadId —
+  // NOT the now-current thread) from the runtime ledger first, so both paths resolve
+  // the same turn → one bubble. Genuinely different invocation_created turns each
+  // own a distinct bound ledger bubble → still resolve distinct turns (Z3-safe).
+  const turnInvocationId =
+    msg.turnInvocationId ??
+    getActiveBoundTurnInvocationIdLedger(getThreadRuntimeLedger(), msg.threadId, msg.catId) ??
+    options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
+  const forceFreshParentSeed =
+    (msg.type === 'tool_use' || msg.type === 'tool_result') && turnInvocationId === undefined;
+  const canReuseExisting =
+    !!existing?.id && (!forceFreshParentSeed || isCurrentFreshParentSeed(existing, msg.timestamp, msg.seq));
+
+  if (canReuseExisting) {
     if (msg.metadata) {
       options.store.setThreadMessageMetadata(msg.threadId, existing.id, msg.metadata);
     }
@@ -1392,27 +1928,28 @@ function ensureBackgroundAssistantMessage(
     return recoveredId;
   }
 
-  // F173 A.3 — invocationId from event payload first; fallback to stale thread state.
-  const invocationId = msg.invocationId ?? getThreadInvocationId(msg, options);
-  // F194 Phase Z3 P1-1: turnInvocationId from msg (broadcast Z3 dual id) or store fallback
-  const turnInvocationId =
-    msg.turnInvocationId ?? options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
+  const hasResidue = !turnInvocationId && hasBackgroundParentOnlyResidue(msg, invocationId, existing, options);
   // F194 Phase Z3 R17 (cloud Codex P1#3): bubble id seeded with turn-priority key so
   // same-parent multi-turn from one cat produces distinct bubbles (otherwise dedup
   // by parent-only id collapses sibling turns under same chain).
-  const messageId = deriveBubbleId(
-    turnInvocationId ?? invocationId,
-    msg.catId,
-    () => `bg-tool-${msg.timestamp}-${msg.catId}-${options.nextBgSeq()}`,
+  const messageId = deriveBubbleId(turnInvocationId ?? (hasResidue ? undefined : invocationId), msg.catId, () =>
+    nextProvisionalBubbleId(msg.catId),
   );
-  options.bgStreamRefs.set(streamKey, { id: messageId, threadId: msg.threadId, catId: msg.catId });
+  const seedSource: ActiveSeedSource = turnInvocationId ? 'bound' : 'fresh-parent-seed';
+  options.bgStreamRefs.set(streamKey, {
+    id: messageId,
+    threadId: msg.threadId,
+    catId: msg.catId,
+    seedSource,
+    ...freshParentSeedProof(seedSource, msg.timestamp, msg.seq),
+  });
   options.store.addMessageToThread(msg.threadId, {
     id: messageId,
     type: 'assistant',
     catId: msg.catId,
     content: '',
     ...(msg.metadata ? { metadata: msg.metadata } : {}),
-    ...(invocationId
+    ...(invocationId && (turnInvocationId || !hasResidue)
       ? {
           extra: {
             stream: {
@@ -1507,10 +2044,19 @@ export function handleBackgroundAgentMessage(
     let finalMsgId: string | undefined;
 
     if (msg.origin === 'callback') {
-      if (deferBackgroundCallbackIfStreamOpen(msg, options)) {
+      // #814 P2: explicit post_message must bypass stream-open deferral. The deferral
+      // stores callbacks keyed by thread/cat/invocation (no messageId), so multiple
+      // explicit posts from the same invocation overwrite each other and are delayed
+      // until stream end. Explicit posts are standalone — apply them immediately.
+      if (!msg.extra?.isExplicitPost && deferBackgroundCallbackIfStreamOpen(msg, options)) {
         return;
       }
-      const replacementTarget = findBackgroundCallbackReplacementTarget(msg, options);
+      // #814: explicit post_message is a standalone message — skip replacement target
+      // lookup to avoid replacing existing stream bubble or marking the invocation as
+      // replaced, which would kill subsequent stream chunks (symmetric with active path).
+      const replacementTarget = msg.extra?.isExplicitPost
+        ? null
+        : findBackgroundCallbackReplacementTarget(msg, options);
       if (replacementTarget) {
         const cbId = msg.messageId ?? replacementTarget.id;
         if (cbId !== replacementTarget.id) {
@@ -1548,7 +2094,14 @@ export function handleBackgroundAgentMessage(
 
         const sidePatch: Partial<ChatMessage> = {
           ...(msg.metadata ? { metadata: msg.metadata } : {}),
-          ...(msg.extra?.crossPost ? { extra: { crossPost: msg.extra.crossPost } } : {}),
+          ...(msg.extra?.crossPost || msg.extra?.isExplicitPost
+            ? {
+                extra: {
+                  ...(msg.extra.crossPost ? { crossPost: msg.extra.crossPost } : {}),
+                  ...(msg.extra.isExplicitPost ? { isExplicitPost: true as const } : {}),
+                },
+              }
+            : {}),
           ...(msg.mentionsUser ? { mentionsUser: true } : {}),
           ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
           ...(msg.replyPreview ? { replyPreview: msg.replyPreview } : {}),
@@ -1626,7 +2179,15 @@ export function handleBackgroundAgentMessage(
             catId: msg.catId,
             content: msg.content,
             ...(msg.metadata ? { metadata: msg.metadata } : {}),
-            ...(msg.extra?.crossPost ? { extra: { crossPost: msg.extra.crossPost } } : {}),
+            ...(msg.extra?.crossPost || msg.extra?.isExplicitPost || msg.extra?.targetCats
+              ? {
+                  extra: {
+                    ...(msg.extra.crossPost ? { crossPost: msg.extra.crossPost } : {}),
+                    ...(msg.extra.isExplicitPost ? { isExplicitPost: true as const } : {}),
+                    ...(msg.extra.targetCats ? { targetCats: msg.extra.targetCats } : {}),
+                  },
+                }
+              : {}),
             ...(msg.mentionsUser ? { mentionsUser: true } : {}),
             ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
             ...(msg.replyPreview ? { replyPreview: msg.replyPreview } : {}),
@@ -1637,7 +2198,15 @@ export function handleBackgroundAgentMessage(
           // Side-fields after reducer success (reducer 不 model 这些)
           const sidePatch: Partial<ChatMessage> = {
             ...(msg.metadata ? { metadata: msg.metadata } : {}),
-            ...(msg.extra?.crossPost ? { extra: { crossPost: msg.extra.crossPost } } : {}),
+            ...(msg.extra?.crossPost || msg.extra?.isExplicitPost || msg.extra?.targetCats
+              ? {
+                  extra: {
+                    ...(msg.extra.crossPost ? { crossPost: msg.extra.crossPost } : {}),
+                    ...(msg.extra.isExplicitPost ? { isExplicitPost: true as const } : {}),
+                    ...(msg.extra.targetCats ? { targetCats: msg.extra.targetCats } : {}),
+                  },
+                }
+              : {}),
             ...(msg.mentionsUser ? { mentionsUser: true } : {}),
             ...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
             ...(msg.replyPreview ? { replyPreview: msg.replyPreview } : {}),
@@ -1649,13 +2218,18 @@ export function handleBackgroundAgentMessage(
         // #586 Bug 1 (TD112): Callback created new bubble without finding a stream
         // placeholder. Mark invocation as replaced so late background stream chunks
         // are suppressed instead of spawning a duplicate bubble.
+        // #814: explicit post_message is standalone — must NOT mark invocation as
+        // replaced, otherwise subsequent stream chunks from the same invocation get
+        // killed (symmetric with active-path guard in applyActiveExplicitCallbackNow).
         // F194 Phase Z3 R16 (cloud Codex P1): suppression key prefers turn id when
         // present so siblings under same parent chain don't cross-suppress.
-        const bgInvocationId = msg.invocationId ?? getThreadInvocationId(msg, options);
-        const bgSuppressionKey = msg.turnInvocationId ?? bgInvocationId;
-        if (bgSuppressionKey) {
-          // F173 A.6 — shared module Map.
-          markReplacedInvocation(msg.threadId, msg.catId, bgSuppressionKey);
+        if (!msg.extra?.isExplicitPost) {
+          const bgInvocationId = msg.invocationId ?? getThreadInvocationId(msg, options);
+          const bgSuppressionKey = msg.turnInvocationId ?? bgInvocationId;
+          if (bgSuppressionKey) {
+            // F173 A.6 — shared module Map.
+            markReplacedInvocation(msg.threadId, msg.catId, bgSuppressionKey);
+          }
         }
         finalMsgId = cbId;
       }
@@ -1718,10 +2292,13 @@ export function handleBackgroundAgentMessage(
             // 走下方统一 delete 逻辑）。recoverStreamingMessage 在 active→bg
             // transition 时也用这个 ref 找 bubble。
             if (reducerMessageId && !msg.isFinal) {
+              const seedSource: ActiveSeedSource = msg.turnInvocationId ? 'bound' : 'fresh-parent-seed';
               options.bgStreamRefs.set(streamKey, {
                 id: reducerMessageId,
                 threadId: msg.threadId,
                 catId: msg.catId,
+                seedSource,
+                ...freshParentSeedProof(seedSource, msg.timestamp, msg.seq),
               });
             }
           }
@@ -1752,6 +2329,7 @@ export function handleBackgroundAgentMessage(
         options.store.updateThreadCatStatus(msg.threadId, msg.catId, msg.isFinal ? 'done' : 'streaming');
         if (msg.isFinal) {
           options.bgStreamRefs.delete(streamKey);
+          clearActiveBubbleLedgerForFinalizedMessage(msg.threadId, msg.catId, messageId);
         }
       } else {
         // Legacy hot path — invocationless 走这里，reducer no-op 也走这里
@@ -1789,6 +2367,7 @@ export function handleBackgroundAgentMessage(
           }
           if (msg.isFinal) {
             options.bgStreamRefs.delete(streamKey);
+            clearActiveBubbleLedgerForFinalizedMessage(msg.threadId, msg.catId, messageId);
           }
         } else {
           // F173 A.3 — invocationId from event payload first (eliminates stale-state ghost).
@@ -1797,20 +2376,26 @@ export function handleBackgroundAgentMessage(
           const turnInvocationId =
             msg.turnInvocationId ??
             options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
+          const hasResidue = !turnInvocationId && hasBackgroundParentOnlyResidue(msg, invocationId, existing, options);
           // F194 Phase Z3 R17 (cloud Codex P1#2): bubble id seeded with turn-priority key.
-          messageId = deriveBubbleId(
-            turnInvocationId ?? invocationId,
-            msg.catId,
-            () => `bg-${msg.timestamp}-${msg.catId}-${options.nextBgSeq()}`,
+          messageId = deriveBubbleId(turnInvocationId ?? (hasResidue ? undefined : invocationId), msg.catId, () =>
+            nextProvisionalBubbleId(msg.catId),
           );
-          options.bgStreamRefs.set(streamKey, { id: messageId, threadId: msg.threadId, catId: msg.catId });
+          const seedSource: ActiveSeedSource = turnInvocationId ? 'bound' : 'fresh-parent-seed';
+          options.bgStreamRefs.set(streamKey, {
+            id: messageId,
+            threadId: msg.threadId,
+            catId: msg.catId,
+            seedSource,
+            ...freshParentSeedProof(seedSource, msg.timestamp, msg.seq),
+          });
           options.store.addMessageToThread(msg.threadId, {
             id: messageId,
             type: 'assistant',
             catId: msg.catId,
             content: msg.content,
             ...(msg.metadata ? { metadata: msg.metadata } : {}),
-            ...(invocationId
+            ...(invocationId && (turnInvocationId || !hasResidue)
               ? {
                   extra: {
                     stream: {
@@ -1830,6 +2415,7 @@ export function handleBackgroundAgentMessage(
           options.store.updateThreadCatStatus(msg.threadId, msg.catId, msg.isFinal ? 'done' : 'streaming');
           if (msg.isFinal) {
             options.bgStreamRefs.delete(streamKey);
+            clearActiveBubbleLedgerForFinalizedMessage(msg.threadId, msg.catId, messageId);
           }
         }
       }
@@ -1983,6 +2569,13 @@ export function handleBackgroundAgentMessage(
     const toolName = msg.toolName ?? 'unknown';
     const detail = msg.toolInput ? safeJsonPreview(msg.toolInput, 200) : undefined;
     const messageId = ensureBackgroundAssistantMessage(msg, streamKey, existing, options);
+    const bgTurnInvocationId =
+      msg.turnInvocationId ?? options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
+    const bgActiveRef = options.bgStreamRefs.get(streamKey);
+    const useFreshParentSeedDirectly =
+      !bgTurnInvocationId &&
+      bgActiveRef?.id === messageId &&
+      isCurrentFreshParentSeed(bgActiveRef, msg.timestamp, msg.seq);
     const toolUseEventData: ToolEvent = {
       id: `bg-tool-use-${msg.timestamp}-${options.nextBgSeq()}`,
       type: 'tool_use',
@@ -1998,7 +2591,7 @@ export function handleBackgroundAgentMessage(
     // recoveryAction !== 'none' 或 reducer no-op (no existing kind=assistant_text
     // bubble) 时回退 legacy appendToolEventToThread。
     let bgToolUseHandled = false;
-    if (msg.invocationId) {
+    if (msg.invocationId && !useFreshParentSeedDirectly) {
       const event = adaptIncomingToBubbleEvent(msg, { sourcePath: 'background' });
       if (event) {
         const eventWithToolEvent = {
@@ -2032,6 +2625,13 @@ export function handleBackgroundAgentMessage(
     markThreadInvocationActive(msg, options);
     const detail = compactToolResultDetail(msg.content ?? '');
     const messageId = ensureBackgroundAssistantMessage(msg, streamKey, existing, options);
+    const bgTurnInvocationId =
+      msg.turnInvocationId ?? options.store.getThreadState(msg.threadId).catInvocations[msg.catId]?.turnInvocationId;
+    const bgActiveRef = options.bgStreamRefs.get(streamKey);
+    const useFreshParentSeedDirectly =
+      !bgTurnInvocationId &&
+      bgActiveRef?.id === messageId &&
+      isCurrentFreshParentSeed(bgActiveRef, msg.timestamp, msg.seq);
     const toolResultEventData: ToolEvent = {
       id: `bg-tool-result-${msg.timestamp}-${options.nextBgSeq()}`,
       type: 'tool_result',
@@ -2042,7 +2642,7 @@ export function handleBackgroundAgentMessage(
 
     // F183 Phase B1.7 — bg tool_result wire-up via reducer (same pattern as tool_use)。
     let bgToolResultHandled = false;
-    if (msg.invocationId) {
+    if (msg.invocationId && !useFreshParentSeedDirectly) {
       const event = adaptIncomingToBubbleEvent(msg, { sourcePath: 'background' });
       if (event) {
         const eventWithToolEvent = {
@@ -2090,7 +2690,14 @@ export function handleBackgroundAgentMessage(
 
     const result = consumeBackgroundSystemInfo(msg, existing, options);
     if (!result.consumed) {
-      addBackgroundSystemMessage(msg, options, result.content, result.variant);
+      const bgCliDiag = msg.metadata?.cliDiagnostics;
+      addBackgroundSystemMessage(
+        msg,
+        options,
+        result.content,
+        result.variant,
+        bgCliDiag ? { cliDiagnostics: bgCliDiag } : undefined,
+      );
     }
   }
 }
@@ -2134,7 +2741,7 @@ export function useAgentMessages() {
   // F173 Phase E: bg-message processing refs (moved from useSocket).
   // useAgentMessages 现在是 single dispatch entry — 这些 refs 给 background-thread
   // delegation 用（handleBackgroundAgentMessage 内部的 stream key 追踪 / monotonic seq）。
-  const bgStreamRefsRef = useRef<Map<string, { id: string; threadId: string; catId: string }>>(new Map());
+  const bgStreamRefsRef = useRef<Map<string, BackgroundStreamRef>>(new Map());
   const bgFinalizedRefsRef = useRef<Map<string, string>>(new Map());
   const bgSeqRef = useRef(0);
 
@@ -2147,20 +2754,53 @@ export function useAgentMessages() {
    * `id` field is renamed to `messageId` in the ledger schema; for callback
    * shape compat we preserve the old field name in the iterator helper.
    */
-  const setActive = useCallback((catId: string, messageId: string, invocationId?: string) => {
-    const tid = useChatStore.getState().currentThreadId;
-    if (!tid) return;
-    setActiveBubbleLedger(getThreadRuntimeLedger(), tid, catId, {
-      messageId,
-      ...(invocationId ? { invocationId } : {}),
-    });
-  }, []);
-  const getActive = useCallback((catId: string): { id: string; catId: string } | undefined => {
-    const tid = useChatStore.getState().currentThreadId;
-    if (!tid) return undefined;
-    const entry = getActiveBubbleLedger(getThreadRuntimeLedger(), tid, catId);
-    return entry ? { id: entry.messageId, catId } : undefined;
-  }, []);
+  const setActive = useCallback(
+    (
+      catId: string,
+      messageId: string,
+      invocationId?: string,
+      seedSource?: ActiveSeedSource,
+      proof?: FreshParentSeedProof,
+    ) => {
+      const tid = useChatStore.getState().currentThreadId;
+      if (!tid) return;
+      setActiveBubbleLedger(getThreadRuntimeLedger(), tid, catId, {
+        messageId,
+        ...(invocationId ? { invocationId } : {}),
+        ...(seedSource ? { seedSource } : {}),
+        ...(proof?.freshParentSeedAt !== undefined ? { freshParentSeedAt: proof.freshParentSeedAt } : {}),
+        ...(proof?.freshParentSeedSeq !== undefined ? { freshParentSeedSeq: proof.freshParentSeedSeq } : {}),
+      });
+    },
+    [],
+  );
+  const getActive = useCallback(
+    (
+      catId: string,
+    ):
+      | {
+          id: string;
+          catId: string;
+          seedSource?: ActiveSeedSource;
+          freshParentSeedAt?: number;
+          freshParentSeedSeq?: number;
+        }
+      | undefined => {
+      const tid = useChatStore.getState().currentThreadId;
+      if (!tid) return undefined;
+      const entry = getActiveBubbleLedger(getThreadRuntimeLedger(), tid, catId);
+      return entry
+        ? {
+            id: entry.messageId,
+            catId,
+            ...(entry.seedSource ? { seedSource: entry.seedSource } : {}),
+            ...(entry.freshParentSeedAt !== undefined ? { freshParentSeedAt: entry.freshParentSeedAt } : {}),
+            ...(entry.freshParentSeedSeq !== undefined ? { freshParentSeedSeq: entry.freshParentSeedSeq } : {}),
+          }
+        : undefined;
+    },
+    [],
+  );
   const deleteActive = useCallback((catId: string) => {
     const tid = useChatStore.getState().currentThreadId;
     if (!tid) return;
@@ -2629,7 +3269,16 @@ export function useAgentMessages() {
   }, []);
 
   const findRecoverableAssistantMessage = useCallback(
-    (catId: string, explicitInvocationId?: string, options?: { requireStreamOrigin?: boolean }) => {
+    (
+      catId: string,
+      explicitInvocationId?: string,
+      options?: {
+        requireStreamOrigin?: boolean;
+        avoidParentOnlyResidueRecovery?: boolean;
+        currentEventTimestamp?: number;
+        currentEventSeq?: number;
+      },
+    ) => {
       // F173 hotfix (砚砚 4 件套 #1) — recovery MUST be identity-aware.
       // Old behavior: first pass matched any isStreaming=true bubble of this cat, which
       // allowed new invocation's chunks to append onto a previous invocation's bubble
@@ -2647,6 +3296,27 @@ export function useAgentMessages() {
       const currentTurnInvocationId = resolveEffectiveTurnInvocationIdForCat(catId, invocationId);
       if (currentTurnInvocationId) stableLookupId = currentTurnInvocationId;
 
+      // F194 cloud R3 (2026-06-15, 砚砚): recovery guard. When the turn id is unknown,
+      // stableLookupId falls back to the PARENT — which also matches an earlier same-parent
+      // parent-only residue (reconnect/hydration). Adopting it lets the current turn's tool_use
+      // pollute the residue BEFORE invocation_created can finalize it (the R3 split→merge bug).
+      // Only adopt a parent-only bound bubble when the runtime ledger marks it as THIS turn's
+      // fresh seed; otherwise skip so the caller creates a new current seed (provisional id) and
+      // the residue stays isolated. Turn-known recovery is unaffected (turn keys never match a
+      // parent-only residue). The unbound fallback below already rejects bound bubbles.
+      const turnUnknownForRecovery = options?.avoidParentOnlyResidueRecovery === true;
+      const shouldSkipParentOnlyResidue = (m: ChatMessage): boolean => {
+        if (!turnUnknownForRecovery) return false;
+        const boundInv = m.extra?.stream?.invocationId;
+        const boundTurn = m.extra?.stream?.turnInvocationId;
+        if (!boundInv || boundTurn) return false; // not a parent-only bound bubble
+        const active = getActive(catId);
+        return !(
+          active?.id === m.id &&
+          isCurrentFreshParentSeed(active, options?.currentEventTimestamp, options?.currentEventSeq)
+        );
+      };
+
       if (stableLookupId) {
         const lastFinalizedIdForCat = getFinalized(catId);
         // Cloud P1#4 (PR#1352): streaming-first preference. With explicit invocationId,
@@ -2662,6 +3332,7 @@ export function useAgentMessages() {
           if (msg.type !== 'assistant' || msg.catId !== catId) continue;
           if (options?.requireStreamOrigin && msg.origin && msg.origin !== 'stream') continue;
           if (!sameBubbleStableKey(msg, stableLookupId, catId)) continue;
+          if (shouldSkipParentOnlyResidue(msg)) continue; // F194 R3 (砚砚): recovery guard
           if (!msg.isStreaming) continue;
           return { id: msg.id, needsStreamingRestore: false };
         }
@@ -2670,6 +3341,7 @@ export function useAgentMessages() {
           if (msg.type !== 'assistant' || msg.catId !== catId) continue;
           if (options?.requireStreamOrigin && msg.origin && msg.origin !== 'stream') continue;
           if (!sameBubbleStableKey(msg, stableLookupId, catId)) continue;
+          if (shouldSkipParentOnlyResidue(msg)) continue; // F194 R3 (砚砚): recovery guard
           // Cloud P1#3 (PR#1352) — reject bubbles this session's `done` has already
           // finalized. Hydration-loaded non-streaming bubbles (no finalizedStreamRef
           // entry) remain recoverable for the "replace hydration swaps" test.
@@ -2692,7 +3364,7 @@ export function useAgentMessages() {
 
       return null;
     },
-    [getCurrentInvocationIdForCat, getFinalized, resolveEffectiveTurnInvocationIdForCat],
+    [getActive, getCurrentInvocationIdForCat, getFinalized, resolveEffectiveTurnInvocationIdForCat],
   );
 
   const findCallbackReplacementTarget = useCallback((catId: string, invocationId: string): { id: string } | null => {
@@ -2826,10 +3498,15 @@ export function useAgentMessages() {
     (msg: AgentMsg): void => {
       if (!msg.invocationId) return;
       const invocationId = msg.invocationId;
-      // F194 Phase Z3 R8 P1-1: pass turn-priority expected
-      const replacementTarget =
-        findCallbackReplacementTarget(msg.catId, msg.turnInvocationId ?? invocationId) ??
-        findInvocationlessRichPlaceholder(msg.catId);
+      const isExplicitPost = msg.extra?.isExplicitPost === true;
+      // #814: explicit post_message is a standalone message — it doesn't replace
+      // any existing stream bubble, so skip replacement target lookup entirely.
+      // Finding a target would cause deleteActive/clearFinalized/markReplacedInvocation
+      // which would kill subsequent stream chunks from the same invocation.
+      const replacementTarget = isExplicitPost
+        ? null
+        : (findCallbackReplacementTarget(msg.catId, msg.turnInvocationId ?? invocationId) ??
+          findInvocationlessRichPlaceholder(msg.catId));
       // F194 Phase Z3 R3 P1-2: callback bubble id 用 turn-priority (turnInvocationId ?? invocationId)
       const bubbleIdSeed = msg.turnInvocationId ?? invocationId;
       const finalId =
@@ -2868,6 +3545,10 @@ export function useAgentMessages() {
         const turnInvocationIdForFallback = msg.turnInvocationId;
         const extraForAdd = {
           ...(msg.extra?.crossPost ? { crossPost: msg.extra.crossPost } : {}),
+          // #814: propagate isExplicitPost so chatStore.findAssistantDuplicate
+          // skips merge for explicit post_message callbacks in fallback path.
+          ...(msg.extra?.isExplicitPost ? { isExplicitPost: true } : {}),
+          ...(msg.extra?.targetCats ? { targetCats: msg.extra.targetCats } : {}),
           stream: {
             invocationId,
             ...(turnInvocationIdForFallback && turnInvocationIdForFallback !== invocationId
@@ -2893,6 +3574,8 @@ export function useAgentMessages() {
 
       const extraForPatch = {
         ...(msg.extra?.crossPost ? { crossPost: msg.extra.crossPost } : {}),
+        ...(msg.extra?.isExplicitPost ? { isExplicitPost: true as const } : {}),
+        ...(msg.extra?.targetCats ? { targetCats: msg.extra.targetCats } : {}),
       };
       if (
         msg.metadata ||
@@ -2913,9 +3596,14 @@ export function useAgentMessages() {
         deleteActive(msg.catId);
         clearFinalized(msg.catId);
       }
-      // F194 Phase Z3 R16 (cloud Codex P1): suppression key uses turn id when present so
-      // sibling turns under the same parent chain don't get cross-suppressed.
-      markReplacedInvocation(threadIdForCallback, msg.catId, msg.turnInvocationId ?? invocationId);
+      // #814: explicit post_message is standalone — must NOT mark the invocation
+      // as replaced, otherwise subsequent stream chunks from the same invocation
+      // get dropped by isInvocationReplaced guard.
+      if (!isExplicitPost) {
+        // F194 Phase Z3 R16 (cloud Codex P1): suppression key uses turn id when present so
+        // sibling turns under the same parent chain don't get cross-suppressed.
+        markReplacedInvocation(threadIdForCallback, msg.catId, msg.turnInvocationId ?? invocationId);
+      }
     },
     [
       addMessage,
@@ -3106,7 +3794,13 @@ export function useAgentMessages() {
     (
       catId: string,
       metadata?: AgentMsg['metadata'],
-      options?: { ensureStreaming?: boolean; invocationId?: string; turnInvocationId?: string },
+      options?: {
+        ensureStreaming?: boolean;
+        invocationId?: string;
+        turnInvocationId?: string;
+        currentEventTimestamp?: number;
+        currentEventSeq?: number;
+      },
     ): string | null => {
       const currentMessages = useChatStore.getState().messages;
       const existing = getActive(catId);
@@ -3134,7 +3828,8 @@ export function useAgentMessages() {
             !!options?.invocationId &&
             !!effectiveTurnInvocationId &&
             boundInv === options.invocationId &&
-            !boundTurnInv;
+            !boundTurnInv &&
+            isCurrentFreshParentSeed(existing, options?.currentEventTimestamp, options?.currentEventSeq);
           const stale =
             (!!expectedKey &&
               !!boundInv &&
@@ -3155,8 +3850,15 @@ export function useAgentMessages() {
               // F194 Phase Z3 R10 P1-1 (砚砚): write dual id — invocationId=parent (chain SoT), turn separate
               // R11 P1 (砚砚): setActive must use parent (AC-Z8: liveness/queue/cancel SoT). turn is bubble identity only.
               const parentBindId = options?.invocationId ?? expectedKey;
+              const seedSource: ActiveSeedSource = effectiveTurnInvocationId ? 'bound' : 'fresh-parent-seed';
               setMessageStreamInvocation(found.id, parentBindId, effectiveTurnInvocationId);
-              setActive(catId, found.id, parentBindId);
+              setActive(
+                catId,
+                found.id,
+                parentBindId,
+                seedSource,
+                freshParentSeedProof(seedSource, options?.currentEventTimestamp, options?.currentEventSeq),
+              );
             }
             if (options?.ensureStreaming && !found.isStreaming) {
               setStreaming(found.id, true);
@@ -3175,10 +3877,12 @@ export function useAgentMessages() {
       if (effectiveTurnInvocationId) recoverKey = effectiveTurnInvocationId;
       const recovered = findRecoverableAssistantMessage(catId, recoverKey, {
         requireStreamOrigin: options?.ensureStreaming === true,
+        currentEventTimestamp: options?.currentEventTimestamp,
+        currentEventSeq: options?.currentEventSeq,
       });
       if (!recovered) return null;
 
-      setActive(catId, recovered.id, options?.invocationId);
+      setActive(catId, recovered.id, options?.invocationId, 'recovered');
       if (options?.invocationId) {
         const recoveredMessage = useChatStore
           .getState()
@@ -3215,19 +3919,35 @@ export function useAgentMessages() {
     (
       catId: string,
       metadata?: AgentMsg['metadata'],
-      options?: { invocationId?: string; turnInvocationId?: string },
+      options?: {
+        invocationId?: string;
+        turnInvocationId?: string;
+        avoidParentOnlyResidueRecovery?: boolean;
+        currentEventTimestamp?: number;
+        currentEventSeq?: number;
+      },
     ): string => {
       const effectiveTurnInvocationId = resolveEffectiveTurnInvocationIdForCat(
         catId,
         options?.invocationId,
         options?.turnInvocationId,
       );
+      const forceFreshParentSeed =
+        options?.avoidParentOnlyResidueRecovery === true && effectiveTurnInvocationId === undefined;
       // F194 Phase Z3 R8 P1-2 (砚砚): forward turnInvocationId so recovery uses turn-priority lookup
-      const existingId = getOrRecoverActiveAssistantMessageId(catId, metadata, {
-        ensureStreaming: true,
-        ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
-        ...(effectiveTurnInvocationId ? { turnInvocationId: effectiveTurnInvocationId } : {}),
-      });
+      const activeSeed = getActive(catId);
+      const existingId =
+        forceFreshParentSeed &&
+        !isCurrentFreshParentSeed(activeSeed, options?.currentEventTimestamp, options?.currentEventSeq)
+          ? null
+          : getOrRecoverActiveAssistantMessageId(catId, metadata, {
+              ensureStreaming: true,
+              ...(options?.invocationId ? { invocationId: options.invocationId } : {}),
+              ...(effectiveTurnInvocationId ? { turnInvocationId: effectiveTurnInvocationId } : {}),
+              ...(options?.avoidParentOnlyResidueRecovery ? { avoidParentOnlyResidueRecovery: true } : {}),
+              currentEventTimestamp: options?.currentEventTimestamp,
+              currentEventSeq: options?.currentEventSeq,
+            });
       if (existingId) {
         return existingId;
       }
@@ -3243,21 +3963,54 @@ export function useAgentMessages() {
         const fallback = findLatestActiveInvocationIdForCat(useChatStore.getState().activeInvocations, catId);
         if (fallback) invocationId = fallback;
       }
-      // F194 Phase Z3 P1-1: speculative active bubble uses parent invocationId only (no thread context
-      // here to look up store.catInvocations[catId].turnInvocationId reliably). Backend live broadcast
-      // will subsequently stamp turnInvocationId via useAgentMessages handleBackgroundAgentMessage,
-      // and getBubbleInvocationId will then resolve to turn id for stable bubble identity.
+      // F194 Phase Z3 P1-1: this path can run before the turn id is resolvable. The parent id remains
+      // in the runtime ledger for liveness/cancel, but a fresh message must stay unbound until
+      // invocation_created writes the parent+turn pair; otherwise same-parent residues can TD112-merge.
       const turnInvocationId: string | undefined = resolveEffectiveTurnInvocationIdForCat(
         catId,
         invocationId,
         effectiveTurnInvocationId,
       );
+      const activeFreshSeedId = isCurrentFreshParentSeed(
+        activeSeed,
+        options?.currentEventTimestamp,
+        options?.currentEventSeq,
+      )
+        ? activeSeed?.id
+        : undefined;
+      const hasParentOnlyResidue =
+        options?.avoidParentOnlyResidueRecovery === true &&
+        !!invocationId &&
+        !turnInvocationId &&
+        useChatStore
+          .getState()
+          .messages.some(
+            (m) =>
+              m.type === 'assistant' &&
+              m.catId === catId &&
+              m.origin === 'stream' &&
+              m.extra?.stream?.invocationId === invocationId &&
+              !m.extra.stream.turnInvocationId &&
+              m.id !== activeFreshSeedId,
+          );
       // F194 Phase Z3 R8 P1-2: derive id from turn-priority key so same parent multi-turn produces
       // distinct bubbles even when speculative active path creates the placeholder.
-      let bubbleIdSeed = invocationId;
-      if (turnInvocationId) bubbleIdSeed = turnInvocationId;
-      const id = deriveBubbleId(bubbleIdSeed, catId, () => `msg-${Date.now()}-${catId}`);
-      setActive(catId, id, invocationId);
+      // F194 cloud R3 (砚砚) ③ provisional id: when the turn id is still unknown, do NOT seed the
+      // id from the parent (`msg-{parent}-{cat}`) IF an earlier same-parent residue already owns it;
+      // addMessage would otherwise no-op / TD112-merge and the current turn would silently collide
+      // into the residue. No-residue parent-only seeds keep the legacy parent-derived id.
+      const bubbleIdSeed = turnInvocationId ?? (hasParentOnlyResidue ? undefined : invocationId);
+      const id = deriveBubbleId(bubbleIdSeed, catId, () => nextProvisionalBubbleId(catId));
+      // Provenance: a parent-only fresh seed (turn unknown) is THIS turn's seed — mark it so the
+      // recovery guard tells it apart from an earlier same-parent residue. Turn-bound → 'bound'.
+      const seedSource: ActiveSeedSource = turnInvocationId ? 'bound' : 'fresh-parent-seed';
+      setActive(
+        catId,
+        id,
+        invocationId,
+        seedSource,
+        freshParentSeedProof(seedSource, options?.currentEventTimestamp, options?.currentEventSeq),
+      );
       addMessage({
         id,
         type: 'assistant',
@@ -3265,7 +4018,7 @@ export function useAgentMessages() {
         content: '',
         origin: 'stream',
         ...(metadata ? { metadata } : {}),
-        ...(invocationId
+        ...(invocationId && (turnInvocationId || !hasParentOnlyResidue)
           ? {
               extra: {
                 stream: {
@@ -3285,6 +4038,7 @@ export function useAgentMessages() {
     },
     [
       addMessage,
+      getActive,
       getOrRecoverActiveAssistantMessageId,
       recordLateBindBubbleCreate,
       resolveEffectiveTurnInvocationIdForCat,
@@ -3453,7 +4207,14 @@ export function useAgentMessages() {
           const hasExplicitInvocationId = !!msg.invocationId;
           if (hasExplicitInvocationId && msg.invocationId) {
             const callbackThreadId = msg.threadId ?? useChatStore.getState().currentThreadId;
-            if (isActiveCallbackStillStreaming(msg.catId, msg.turnInvocationId ?? msg.invocationId)) {
+            // #814 P2: explicit post_message must bypass stream-open deferral.
+            // The pending map keys by thread/cat/invocation (no messageId), so multiple
+            // explicit posts from the same invocation overwrite each other. Explicit
+            // posts are standalone bubbles — apply them immediately even while streaming.
+            if (
+              !msg.extra?.isExplicitPost &&
+              isActiveCallbackStillStreaming(msg.catId, msg.turnInvocationId ?? msg.invocationId)
+            ) {
               deferPendingCallback(
                 {
                   ...msg,
@@ -3572,6 +4333,7 @@ export function useAgentMessages() {
             // F194 Phase Z3 R3 P1-3: invocationless callback add 也写完整 dual id
             const extraForAdd = {
               ...(msg.extra?.crossPost ? { crossPost: msg.extra.crossPost } : {}),
+              ...(msg.extra?.targetCats ? { targetCats: msg.extra.targetCats } : {}),
               ...(hasExplicitInvocationId && msg.invocationId
                 ? {
                     stream: {
@@ -3708,7 +4470,14 @@ export function useAgentMessages() {
             const id = bubbleIdSeed3
               ? deriveBubbleId(bubbleIdSeed3, msg.catId, () => `msg-${Date.now()}-${msg.catId}`)
               : `msg-${Date.now()}-${msg.catId}`;
-            setActive(msg.catId, id, invocationId);
+            const seedSource: ActiveSeedSource = activeTurnInvocationIdForNew ? 'bound' : 'fresh-parent-seed';
+            setActive(
+              msg.catId,
+              id,
+              invocationId,
+              seedSource,
+              freshParentSeedProof(seedSource, msg.timestamp, msg.seq),
+            );
             const threadId = msg.threadId ?? useChatStore.getState().currentThreadId;
             const event = adaptIncomingToBubbleEvent(
               {
@@ -3783,7 +4552,15 @@ export function useAgentMessages() {
         const messageId = ensureActiveAssistantMessage(msg.catId, msg.metadata, {
           ...(msg.invocationId ? { invocationId: msg.invocationId } : {}),
           ...(activeTurnInvocationId ? { turnInvocationId: activeTurnInvocationId } : {}),
+          ...(!activeTurnInvocationId ? { avoidParentOnlyResidueRecovery: true } : {}),
+          currentEventTimestamp: msg.timestamp,
+          currentEventSeq: msg.seq,
         });
+        const activeSeed = getActive(msg.catId);
+        const useFreshParentSeedDirectly =
+          !activeTurnInvocationId &&
+          activeSeed?.id === messageId &&
+          isCurrentFreshParentSeed(activeSeed, msg.timestamp, msg.seq);
 
         // F183 Phase B1.6 — tool_use wire-up via reducer (single-writer)。
         // ensureActiveAssistantMessage 仍跑，因为它管 activeRefs ledger。reducer
@@ -3799,7 +4576,7 @@ export function useAgentMessages() {
           timestamp: Date.now(),
         };
         let toolUseReducerHandled = false;
-        if (msg.invocationId) {
+        if (msg.invocationId && !useFreshParentSeedDirectly) {
           const threadIdForTool = msg.threadId ?? useChatStore.getState().currentThreadId;
           const event = adaptIncomingToBubbleEvent(
             {
@@ -3859,7 +4636,15 @@ export function useAgentMessages() {
         const messageId = ensureActiveAssistantMessage(msg.catId, msg.metadata, {
           ...(msg.invocationId ? { invocationId: msg.invocationId } : {}),
           ...(activeTurnInvocationId ? { turnInvocationId: activeTurnInvocationId } : {}),
+          ...(!activeTurnInvocationId ? { avoidParentOnlyResidueRecovery: true } : {}),
+          currentEventTimestamp: msg.timestamp,
+          currentEventSeq: msg.seq,
         });
+        const activeSeed = getActive(msg.catId);
+        const useFreshParentSeedDirectly =
+          !activeTurnInvocationId &&
+          activeSeed?.id === messageId &&
+          isCurrentFreshParentSeed(activeSeed, msg.timestamp, msg.seq);
 
         const detail = compactToolResultDetail(msg.content ?? '');
         // F183 Phase B1.6 — tool_result wire-up via reducer (same pattern as tool_use).
@@ -3871,7 +4656,7 @@ export function useAgentMessages() {
           timestamp: Date.now(),
         };
         let toolResultReducerHandled = false;
-        if (msg.invocationId) {
+        if (msg.invocationId && !useFreshParentSeedDirectly) {
           const threadIdForTool = msg.threadId ?? useChatStore.getState().currentThreadId;
           const event = adaptIncomingToBubbleEvent(
             {
@@ -4066,6 +4851,31 @@ export function useAgentMessages() {
               });
               if (tid) {
                 requestStreamCatchUp(tid);
+              }
+            } else {
+              const residueTerminalization = terminalizeSameParentLocalToolOnlyResidues(
+                stateAfterFinalize.messages,
+                finalized,
+                msg.invocationId,
+              );
+              if (residueTerminalization.found) {
+                const tid = msg.threadId ?? stateAfterFinalize.currentThreadId;
+                if (residueTerminalization.terminalized) {
+                  stateAfterFinalize.replaceMessages(residueTerminalization.messages, stateAfterFinalize.hasMore);
+                }
+                console.warn(
+                  '[stream-catchup] done(isFinal) with same-parent local tool residue — requesting catch-up',
+                  {
+                    catId: msg.catId,
+                    threadId: tid,
+                    messageId,
+                    invocationId: msg.invocationId,
+                    terminalizedResidue: residueTerminalization.terminalized,
+                  },
+                );
+                if (tid) {
+                  requestStreamCatchUp(tid);
+                }
               }
             }
           }
@@ -4317,9 +5127,41 @@ export function useAgentMessages() {
                 if (!m.isStreaming) continue;
                 const boundInv = m.extra?.stream?.invocationId;
                 if (!boundInv) continue;
+                const boundTurn = m.extra?.stream?.turnInvocationId;
                 // Stable key: turn (when stored) > parent. Old turn under same parent gets distinct key.
-                const boundaryStableKey = m.extra?.stream?.turnInvocationId ?? boundInv;
+                const boundaryStableKey = boundTurn ?? boundInv;
                 if (boundaryStableKey !== incomingStableKey) {
+                  // F194 follow-up (codex live-split, cloud P1 2026-06-15 / 宪宪 opus-48):
+                  // a parent-ONLY seed of THIS incoming invocation is NOT stale. When the
+                  // CLI tool_use builds the work-log bubble before invocation_created stamps
+                  // the per-cat-turn id, that bubble is bound to the parent (boundInv ===
+                  // incoming invocationId, no turn). It is the current turn's work-log, not a
+                  // leftover from a prior invocation. Finalizing it here (set non-streaming +
+                  // markReplaced) is exactly what defeats the later turn-text merge and splits
+                  // the bubble (the downstream getOrRecover upgrade is gated on isStreaming).
+                  // Upgrade it to the turn id + key (keep streaming) instead of finalizing.
+                  // Real-shape (tool already carried turn -> boundTurn set) and genuinely stale
+                  // bubbles (boundInv !== invocationId) fall through to the finalize path.
+                  // cloud P1#2/P1#5 (2026-06-15): gate on the active fresh seed. A stale
+                  // parent-only bubble from an EARLIER turn of the SAME parent (lost done /
+                  // reconnect — exactly what this boundary pass exists to finalize) also
+                  // matches boundInv===invocationId && !boundTurn; only the current
+                  // fresh-parent-seed may be upgraded, the stale/recovered one must still
+                  // fall through to finalize.
+                  const activeRefForBoundary = getActive(targetCatId);
+                  if (
+                    turnInvocationId &&
+                    boundInv === invocationId &&
+                    !boundTurn &&
+                    activeRefForBoundary?.id === m.id &&
+                    isCurrentFreshParentSeed(activeRefForBoundary, msg.timestamp, msg.seq)
+                  ) {
+                    setMessageStreamInvocation(m.id, invocationId, turnInvocationId);
+                    const turnDerivedId = deriveBubbleId(turnInvocationId, targetCatId, () => m.id);
+                    if (turnDerivedId !== m.id) replaceMessageId(m.id, turnDerivedId);
+                    setActive(targetCatId, turnDerivedId, invocationId, 'bound');
+                    continue;
+                  }
                   setStreaming(m.id, false);
                   // R16: suppression set entry uses turn-aware key so siblings under same parent
                   // chain don't get cross-suppressed.
@@ -4373,7 +5215,7 @@ export function useAgentMessages() {
                 // older bubble would let later invocationless chunks reuse it via
                 // ensureStreaming and append into the previous invocation's bubble.
                 const reboundId = deterministicId !== unboundPlaceholderId ? deterministicId : unboundPlaceholderId;
-                setActive(targetCatId, reboundId);
+                setActive(targetCatId, reboundId, invocationId, 'bound');
               } else {
                 // Legacy path: no unbound placeholder but there's some existing message we can
                 // bind invocationId onto (preserves behavior for messages already matching newInv).
@@ -4419,24 +5261,21 @@ export function useAgentMessages() {
             // Also persist usage on the cat's last assistant message (message-scoped)
             const ref = getActive(msg.catId);
             if (ref) {
+              // F230: write model/provider FIRST so setMessageMetadata creates the metadata
+              // object when absent (PTY text events carry no metadata).
+              // setMessageUsage is a no-op when metadata is absent — ordering matters.
+              // For -p/bg paths, setMessageMetadata is first-write-wins → no-op (idempotent).
+              if (parsed.model && parsed.provider) {
+                setMessageMetadata(ref.id, {
+                  model: parsed.model as string,
+                  provider: parsed.provider as string,
+                });
+              }
               setMessageUsage(ref.id, parsed.usage);
             }
             consumed = true;
           } else if (parsed?.type === 'context_briefing') {
-            // F148 Phase E: Insert briefing card into chat store for immediate display
-            const sm = parsed.storedMessage as
-              | { id: string; content: string; origin: string; timestamp: number; extra?: Record<string, unknown> }
-              | undefined;
-            if (sm?.id) {
-              addMessage({
-                id: sm.id,
-                type: 'system',
-                content: sm.content ?? '',
-                origin: (sm.origin as 'briefing') ?? 'briefing',
-                timestamp: sm.timestamp ?? Date.now(),
-                ...(sm.extra ? { extra: sm.extra } : {}),
-              });
-            }
+            // Suppress: internal routing context for cats, not user-facing timeline.
             consumed = true;
           } else if (parsed?.type === 'context_health') {
             // F24: Store context health silently
@@ -4504,6 +5343,8 @@ export function useAgentMessages() {
               const messageId = ensureActiveAssistantMessage(msg.catId, msg.metadata, {
                 ...(effectiveInv ? { invocationId: effectiveInv as string } : {}),
                 ...(msg.turnInvocationId ? { turnInvocationId: msg.turnInvocationId } : {}),
+                currentEventTimestamp: msg.timestamp,
+                currentEventSeq: msg.seq,
               });
 
               appendToolEvent(messageId, {
@@ -4527,6 +5368,8 @@ export function useAgentMessages() {
               const messageId = ensureActiveAssistantMessage(msg.catId, msg.metadata, {
                 ...(effectiveInv ? { invocationId: effectiveInv as string } : {}),
                 ...(msg.turnInvocationId ? { turnInvocationId: msg.turnInvocationId } : {}),
+                currentEventTimestamp: msg.timestamp,
+                currentEventSeq: msg.seq,
               });
               setMessageThinking(messageId, thinkingText);
             }
@@ -4550,6 +5393,50 @@ export function useAgentMessages() {
             // F118 AC-C3: Store diagnostics keyed by catId to prevent cross-cat mismatch
             if (msg.catId) {
               setPendingTimeoutDiag(msg.catId, parsed as Record<string, unknown>);
+            }
+            consumed = true;
+          } else if (parsed?.type === 'agy_trajectory_progress') {
+            // F210-H3: 累积进度到 thread 级 catStatusDetails（折叠单行 "AGY working · N steps · latest"），
+            // 由 ThreadCatStatus 显示；不渲染 system bubble（承接 H1-hotfix 避免 per-step 刷屏）。
+            if (msg.catId) {
+              const tid = msg.threadId ?? useChatStore.getState().currentThreadId;
+              if (tid) {
+                useChatStore
+                  .getState()
+                  .updateThreadCatStatus(tid, msg.catId, 'streaming', formatAgyProgressDetail(parsed));
+              }
+            }
+            consumed = true;
+          } else if (parsed?.type === 'provider_capability') {
+            // #939 part A (kimi auth dual-path): capability telemetry from provider backends
+            // (kimi emits `thinking: unavailable` / `image_input: limited`, etc.). These are
+            // capability status reports — NOT user-facing errors. Before this branch they
+            // fell through to the default addMessage() path and surfaced as raw-JSON system
+            // bubbles, which first-time users read as "thinking failed" (the bug). Pattern
+            // mirrors F210-H1 agy_trajectory_progress + F045 rate_limit / compact_boundary:
+            // store on the invocation snapshot for a future capability UI (tooltip / badge);
+            // consumed silently here so the bubble layer never sees these.
+            // Note: || (not ??) so empty-string parsed.catId falls through to msg.catId
+            // (opus-46 nit from #2352 review — defensive against backend emitting empty string).
+            const targetCatId = parsed.catId || msg.catId;
+            const capability = typeof parsed.capability === 'string' ? parsed.capability : 'unknown';
+            const status =
+              parsed.status === 'available' || parsed.status === 'limited' || parsed.status === 'unavailable'
+                ? parsed.status
+                : 'unavailable';
+            const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+            const provider = typeof parsed.provider === 'string' ? parsed.provider : 'unknown';
+            if (targetCatId) {
+              // Read-merge-write so multiple capabilities (thinking + image_input) coexist on
+              // the same cat invocation. setCatInvocation is a shallow zustand merge, so
+              // passing a fresh object would clobber other capabilities already stored.
+              const existing = useChatStore.getState().catInvocations?.[targetCatId]?.providerCapabilities ?? {};
+              setCatInvocation(targetCatId, {
+                providerCapabilities: {
+                  ...existing,
+                  [capability]: { status, reason, provider, receivedAt: Date.now() },
+                },
+              });
             }
             consumed = true;
           } else if (parsed?.type === 'governance_blocked') {
@@ -4579,7 +5466,7 @@ export function useAgentMessages() {
               },
             });
             consumed = true;
-          } else if (parsed?.type === 'strategy_allow_compress' || parsed?.type === 'resume_failure_stats') {
+          } else if (isInternalSystemInfoTelemetry(parsed)) {
             // Internal telemetry — suppress to avoid raw JSON bubbles
             consumed = true;
           } else if (parsed?.type === 'silent_completion') {
@@ -4642,6 +5529,8 @@ export function useAgentMessages() {
               targetId = ensureActiveAssistantMessage(msg.catId, msg.metadata, {
                 ...(effectiveInv ? { invocationId: effectiveInv as string } : {}),
                 ...(msg.turnInvocationId ? { turnInvocationId: msg.turnInvocationId } : {}),
+                currentEventTimestamp: msg.timestamp,
+                currentEventSeq: msg.seq,
               });
             }
 
@@ -4655,19 +5544,21 @@ export function useAgentMessages() {
               sessionSeq: parsed.sessionSeq,
               sessionSealed: true,
             });
-            const pct = parsed.healthSnapshot?.fillRatio ? Math.round(parsed.healthSnapshot.fillRatio * 100) : '?';
-            sysContent = `${parsed.catId} 的会话 #${parsed.sessionSeq} 已封存（上下文 ${pct}%），下次调用将自动创建新会话`;
+            const visibleSessionSeal = formatSessionSealRequested(parsed);
+            if (visibleSessionSeal) sysContent = visibleSessionSeal.content;
           }
         } catch {
           /* not JSON, use raw content */
         }
         if (!consumed) {
+          const sysCliDiag = msg.metadata?.cliDiagnostics;
           addMessage({
             id: `sysinfo-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             type: 'system',
             variant: sysVariant,
             content: sysContent,
             timestamp: Date.now(),
+            ...(sysCliDiag ? { extra: { cliDiagnostics: sysCliDiag } } : {}),
           });
         }
       } else if (msg.type === 'error') {

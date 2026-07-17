@@ -4,9 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-const { resolveCliCommand, resolveCliCommandOrBare, formatCliNotFoundError, invalidateCliCommand } = await import(
-  '../dist/utils/cli-resolve.js'
-);
+const {
+  resolveCliCommand,
+  resolveCliCommandOrBare,
+  formatCliNotFoundError,
+  invalidateCliCommand,
+  selectWindowsPathEntry,
+} = await import('../dist/utils/cli-resolve.js');
 
 // --- formatCliNotFoundError ---
 
@@ -19,7 +23,18 @@ test('formatCliNotFoundError returns install hint for known CLI', () => {
 test('formatCliNotFoundError returns native installer hint for agy', () => {
   const msg = formatCliNotFoundError('agy');
   assert.match(msg, /agy CLI 未找到/);
-  assert.match(msg, /https:\/\/antigravity\.google\/cli\/install\.sh/);
+  if (process.platform === 'win32') {
+    assert.match(msg, /install\.cmd/);
+  } else {
+    assert.match(msg, /https:\/\/antigravity\.google\/cli\/install\.sh/);
+  }
+});
+
+test('formatCliNotFoundError points opencode users at the npm package that installs the opencode binary', () => {
+  const msg = formatCliNotFoundError('opencode');
+  assert.match(msg, /opencode CLI 未找到/);
+  assert.match(msg, /npm install -g opencode-ai/);
+  assert.doesNotMatch(msg, /npm install -g opencode`/);
 });
 
 test('formatCliNotFoundError returns Windows installer hint for agy on win32', () => {
@@ -48,6 +63,50 @@ test('resolveCliCommand returns null for non-existent CLI', () => {
   const result = resolveCliCommand('nonexistent-cli-tool-abc-99999');
   assert.equal(result, null);
 });
+
+test('selectWindowsPathEntry prefers .exe over extensionless hits from the same directory', () => {
+  const selected = selectWindowsPathEntry(['C:\\Users\\me\\bin\\codex', 'C:\\Users\\me\\bin\\codex.exe']);
+  assert.equal(selected, 'C:\\Users\\me\\bin\\codex.exe');
+});
+
+test('selectWindowsPathEntry preserves an earlier PATH wrapper over a later .exe in another directory', () => {
+  const selected = selectWindowsPathEntry(['C:\\Users\\me\\bin\\codex.bat', 'C:\\Program Files\\Codex\\codex.exe']);
+  assert.equal(selected, 'C:\\Users\\me\\bin\\codex.bat');
+});
+
+test(
+  'resolveCliCommand prefers .exe over extensionless Windows PATH hits',
+  { skip: process.platform !== 'win32' && 'Windows-only (.exe PATH preference)' },
+  () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'cli-resolve-exe-prefer-'));
+    const binDir = join(tempRoot, 'bin');
+    mkdirSync(binDir, { recursive: true });
+
+    const cmdName = `fake-cliresolve-exe-prefer-${process.pid}-${Date.now()}`;
+    const extensionless = join(binDir, cmdName);
+    const exePath = join(binDir, `${cmdName}.exe`);
+    writeFileSync(extensionless, 'ELF fake linux binary', 'utf8');
+    writeFileSync(exePath, 'MZ fake windows binary', 'utf8');
+
+    const originalPath = process.env.PATH;
+    const originalPathMixed = process.env.Path;
+    try {
+      process.env.PATH = `${binDir};${originalPath ?? ''}`;
+      process.env.Path = `${binDir};${originalPathMixed ?? originalPath ?? ''}`;
+      invalidateCliCommand(cmdName);
+
+      const result = resolveCliCommand(cmdName);
+      assert.equal(result, exePath, 'Windows resolver must prefer the native .exe over extensionless PATH hits');
+    } finally {
+      invalidateCliCommand(cmdName);
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathMixed === undefined) delete process.env.Path;
+      else process.env.Path = originalPathMixed;
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 // --- Windows APPDATA fallback ---
 
@@ -167,6 +226,44 @@ test(
     }
   },
 );
+
+// --- #894: skipPathProbe skips PATH and goes straight to fallback dirs ---
+
+test(
+  'resolveCliCommand with skipPathProbe finds CLI in fallback dir without PATH probe (#894)',
+  { skip: process.platform === 'win32' && 'Unix-only (HOME fallback)' },
+  () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'cli-resolve-skipprobe-'));
+    const localBin = join(tempRoot, '.local', 'bin');
+    mkdirSync(localBin, { recursive: true });
+
+    // Use a unique name that definitely won't be on PATH
+    const cmdName = 'fake-skipprobe-test-tool-894';
+    const fakeBin = join(localBin, cmdName);
+    writeFileSync(fakeBin, '#!/bin/sh\necho ok\n', { mode: 0o755 });
+
+    const originalHome = process.env.HOME;
+    try {
+      process.env.HOME = tempRoot;
+      // Clear any cached result first
+      invalidateCliCommand(cmdName);
+
+      const result = resolveCliCommand(cmdName, { skipPathProbe: true });
+      assert.equal(result, fakeBin, 'should find binary in fallback dir even with skipPathProbe');
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test('resolveCliCommand with skipPathProbe returns null when not in fallback dirs', () => {
+  const cmdName = 'nonexistent-skipprobe-xyz-894';
+  invalidateCliCommand(cmdName);
+  const result = resolveCliCommand(cmdName, { skipPathProbe: true });
+  assert.equal(result, null, 'should return null for truly missing CLI');
+});
 
 // --- F173 Phase D AC-D1/D2: cache invalidation on stale entry ---
 
